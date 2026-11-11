@@ -677,3 +677,33 @@ an alias, but it is no longer documented as a primary binding.
 **Consequences:** The two actions have distinct, reliable modifiers on all three
 platforms. `Alt+b`/`Alt+f` remain accepted so macOS terminals work unmodified.
 The footer advertises exactly this split under Shift and Option.
+
+## ADR-034 — Modifier-aware file operations, complete key menu, open source
+
+**Status:** accepted (2026-11-11, `0.5.2`)
+
+**Context:** A bare Shift press appeared to start a copy. The real cause was
+`handle_common_action`: it matched on `KeyCode` alone, so `Shift+C` (reported as
+`Char('C')` with `SHIFT`) hit the `c` arm and began a transfer. The settings menu
+also silently dropped Alt, Shift and Super because `KeySpec::from_event` kept
+only Ctrl and Alt, `matches` discarded Shift, and `label`/`parse` had no `super`.
+Finally the menu listed only older actions.
+
+**Decision:**
+
+1. `handle_common_action` takes the whole `KeyEvent`. Any held modifier makes a
+   plain-letter shortcut inapplicable, so Shift/Alt/Ctrl gestures win. Function
+   keys keep working with Shift, because macOS requires it for F-keys.
+2. `KeySpec::from_event` records Shift and folds Super/Meta into `SUPER`;
+   `matches` requires Shift when the spec names it and accepts both Super and
+   Meta for a `super` spec; `label`/`parse` round-trip `super`/`cmd`.
+3. Six actions were added so the menu covers every binding: `ToggleSidebar`
+   (`Ctrl+F`), `OpenHere` (`Enter`/`l`), `OpenFolderThere` (`Shift+arrows`),
+   `PreviewThere` (`Alt+arrows`), `Confirm` (`Enter`) and `Cancel` (`Esc`).
+4. The repository gains `LICENSE` (MIT) and a `.gitignore` that excludes build
+   artifacts, logs and editor droppings, so it can be published as-is.
+
+**Consequences:** Modifiers are never mistaken for plain keys, rebinding works
+for every modifier the terminal reports, and the key menu is a complete map of
+the app. Publishing requires the user's own GitHub credentials; the tree is
+already clean (`git status` shows no artifacts).

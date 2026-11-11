@@ -671,7 +671,7 @@ impl App {
             PanelMode::List => {}
         }
 
-        if self.handle_common_action(key.code) {
+        if self.handle_common_action(key) {
             return;
         }
 
@@ -702,7 +702,7 @@ impl App {
             return;
         }
 
-        if self.handle_common_action(key.code) {
+        if self.handle_common_action(key) {
             return;
         }
 
@@ -896,7 +896,29 @@ impl App {
         }
     }
 
-    fn handle_common_action(&mut self, code: KeyCode) -> bool {
+    /// File operations shared by the list and the thumbnail grid.
+    ///
+    /// These are plain-key shortcuts, so any held modifier means the user is
+    /// performing a different gesture (for example `Shift+→` opens a folder in
+    /// the neighbour). Returning `false` lets that gesture win instead of
+    /// silently starting a copy.
+    fn handle_common_action(&mut self, key: KeyEvent) -> bool {
+        let code = key.code;
+        let busy_modifier = key.modifiers.intersects(
+            KeyModifiers::CONTROL
+                | KeyModifiers::ALT
+                | KeyModifiers::SUPER
+                | KeyModifiers::META
+                | KeyModifiers::SHIFT,
+        );
+
+        // Function keys are unambiguous even with Shift (macOS often needs it),
+        // but bare letters must have no modifiers at all.
+        let is_function_key = matches!(code, KeyCode::F(_));
+        if busy_modifier && !is_function_key {
+            return false;
+        }
+
         match code {
             KeyCode::F(5) | KeyCode::Char('c') => self.start_transfer(JobKind::Copy),
             KeyCode::F(6) | KeyCode::Char('m') => self.start_transfer(JobKind::Move),
@@ -989,6 +1011,16 @@ impl App {
             Action::OpenInOther => self.open_entry_in_panel(1 - self.active),
             Action::AddFavorite => self.add_favorite(),
             Action::FocusFavorites => self.toggle_favorites_focus(),
+            Action::ToggleSidebar => self.toggle_favorites_sidebar(),
+            Action::OpenHere => self.open_current_entry(),
+            Action::OpenFolderThere => self.open_entry_in_panel(1 - self.active),
+            Action::PreviewThere => self.preview_panel(1 - self.active),
+            Action::Confirm => {
+                // Enter on a prompt is handled by the prompt itself.
+            }
+            Action::Cancel => {
+                self.clear_selection();
+            }
         }
     }
 
@@ -2086,6 +2118,91 @@ mod tests {
         assert_eq!(app.panels[0].current_entry().unwrap().name, "b.txt");
         app.on_scroll(1);
         assert_eq!(app.panels[0].current_entry().unwrap().name, "a.txt");
+    }
+
+    #[test]
+    fn shifted_letters_do_not_trigger_file_operations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let left = tmp.path().join("left");
+        let right = tmp.path().join("right");
+        fs::create_dir_all(&left).unwrap();
+        fs::create_dir_all(&right).unwrap();
+        fs::write(left.join("a.txt"), "x").unwrap();
+
+        let mut app = app_for(&left, &right);
+        app.panels[0].select_name("a.txt");
+
+        // Shift+C is not "copy": Shift belongs to the cross-panel gesture.
+        press(&mut app, KeyCode::Char('C'), KeyModifiers::SHIFT);
+        assert!(app.prompt.is_none(), "Shift+C must not start a copy");
+
+        press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE);
+        assert!(matches!(app.prompt, Some(Prompt::Transfer { .. })));
+    }
+
+    #[test]
+    fn function_keys_still_work_with_shift() {
+        let tmp = tempfile::tempdir().unwrap();
+        let left = tmp.path().join("left");
+        let right = tmp.path().join("right");
+        fs::create_dir_all(&left).unwrap();
+        fs::create_dir_all(&right).unwrap();
+        fs::write(left.join("a.txt"), "x").unwrap();
+
+        let mut app = app_for(&left, &right);
+        app.panels[0].select_name("a.txt");
+
+        // macOS often needs Shift for F-keys, so those must keep working.
+        press(&mut app, KeyCode::F(5), KeyModifiers::SHIFT);
+        assert!(matches!(app.prompt, Some(Prompt::Transfer { .. })));
+    }
+
+    #[test]
+    fn settings_can_record_alt_shift_and_super_bindings() {
+        let mut settings = crate::settings::Settings::load();
+        settings.bindings.clear();
+
+        assert!(settings.rebind(
+            Action::Delete,
+            KeySpec::new(KeyCode::Char('d'), KeyModifiers::ALT)
+        ));
+        assert_eq!(
+            settings.keys_for(Action::Delete),
+            vec![KeySpec::new(KeyCode::Char('d'), KeyModifiers::ALT)]
+        );
+        assert_eq!(settings.keys_label(Action::Delete), "alt+d");
+
+        // Shift is preserved for keys where it is meaningful.
+        assert!(settings.rebind(
+            Action::Copy,
+            KeySpec::new(KeyCode::Right, KeyModifiers::SHIFT)
+        ));
+        assert_eq!(settings.keys_label(Action::Copy), "shift+right");
+
+        // Command is stored as super and matches both Super and Meta events.
+        assert!(settings.rebind(
+            Action::Mkdir,
+            KeySpec::new(KeyCode::Char('n'), KeyModifiers::SUPER)
+        ));
+        assert_eq!(settings.keys_label(Action::Mkdir), "super+n");
+        assert!(KeySpec::new(KeyCode::Char('n'), KeyModifiers::SUPER)
+            .matches(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::META)));
+    }
+
+    #[test]
+    fn settings_menu_lists_the_new_actions() {
+        use crate::settings::Action as A;
+        for action in [
+            A::ToggleSidebar,
+            A::OpenHere,
+            A::OpenFolderThere,
+            A::PreviewThere,
+            A::Confirm,
+            A::Cancel,
+        ] {
+            assert!(A::ALL.contains(&action), "{action:?} missing from the menu");
+            assert!(!action.defaults().is_empty());
+        }
     }
 
     #[test]

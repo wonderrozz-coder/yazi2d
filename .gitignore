@@ -1,3 +1,14 @@
-/target
+# Build artifacts — never commit these. The repo often lives in a synced
+# folder (Nextcloud/Dropbox), so keeping them out also avoids syncing GBs.
+/target/
+**/*.rs.bk
+
+# Local runtime data
+*.log
+yazi2d.log*
+
+# Editor / OS noise
 .DS_Store
+.idea/
+.vscode/
 *.swp

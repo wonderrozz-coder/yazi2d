@@ -32,6 +32,12 @@ pub enum Action {
     OpenInOther,
     AddFavorite,
     FocusFavorites,
+    OpenHere,
+    OpenFolderThere,
+    PreviewThere,
+    ToggleSidebar,
+    Confirm,
+    Cancel,
 }
 
 impl Action {
@@ -39,7 +45,7 @@ impl Action {
     ///
     /// `Settings` is deliberately absent: rebinding the key that opens the
     /// settings menu would make the menu unreachable.
-    pub const ALL: [Action; 18] = [
+    pub const ALL: [Action; 24] = [
         Action::Quit,
         Action::Help,
         Action::Copy,
@@ -58,6 +64,12 @@ impl Action {
         Action::OpenInOther,
         Action::AddFavorite,
         Action::FocusFavorites,
+        Action::ToggleSidebar,
+        Action::OpenHere,
+        Action::OpenFolderThere,
+        Action::PreviewThere,
+        Action::Confirm,
+        Action::Cancel,
     ];
 
     /// Stable identifier used in the settings file.
@@ -82,6 +94,12 @@ impl Action {
             Action::OpenInOther => "open_in_other",
             Action::AddFavorite => "add_favorite",
             Action::FocusFavorites => "focus_favorites",
+            Action::ToggleSidebar => "toggle_sidebar",
+            Action::OpenHere => "open_here",
+            Action::OpenFolderThere => "open_folder_there",
+            Action::PreviewThere => "preview_there",
+            Action::Confirm => "confirm",
+            Action::Cancel => "cancel",
         }
     }
 
@@ -106,6 +124,12 @@ impl Action {
             Action::OpenInOther => "Open folder there",
             Action::AddFavorite => "Add to favorites",
             Action::FocusFavorites => "Focus favorites",
+            Action::ToggleSidebar => "Show/hide favorites",
+            Action::OpenHere => "Open entry (Enter)",
+            Action::OpenFolderThere => "Open folder there",
+            Action::PreviewThere => "Preview there",
+            Action::Confirm => "Confirm prompt",
+            Action::Cancel => "Cancel / clear",
         }
     }
 
@@ -139,6 +163,18 @@ impl Action {
                 KeySpec::code(KeyCode::BackTab),
                 KeySpec::plain_char('§'),
             ],
+            Action::ToggleSidebar => vec![KeySpec::ctrl('f')],
+            Action::OpenHere => vec![KeySpec::code(KeyCode::Enter), KeySpec::plain_char('l')],
+            Action::OpenFolderThere => vec![
+                KeySpec::new(KeyCode::Right, KeyModifiers::SHIFT),
+                KeySpec::new(KeyCode::Left, KeyModifiers::SHIFT),
+            ],
+            Action::PreviewThere => vec![
+                KeySpec::new(KeyCode::Right, KeyModifiers::ALT),
+                KeySpec::new(KeyCode::Left, KeyModifiers::ALT),
+            ],
+            Action::Confirm => vec![KeySpec::code(KeyCode::Enter)],
+            Action::Cancel => vec![KeySpec::code(KeyCode::Esc)],
         }
     }
 }
@@ -186,11 +222,24 @@ impl KeySpec {
                 .modifiers
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
         }
-        let wanted = self.modifiers.difference(KeyModifiers::SHIFT);
-        key.modifiers.contains(wanted)
+        // A spec that names Shift requires it; one that does not still accepts
+        // a stray Shift coming from a shifted character (`?` is Shift+/).
+        let mut wanted = self.modifiers;
+        if !wanted.contains(KeyModifiers::SHIFT) {
+            wanted.remove(KeyModifiers::SHIFT);
+        }
+        let mut actual = key.modifiers;
+        if actual.intersects(KeyModifiers::META) {
+            actual |= KeyModifiers::SUPER;
+        }
+        actual.contains(wanted)
     }
 
-    /// Build a spec from a pressed key, dropping modifiers we cannot persist.
+    /// Build a spec from a pressed key.
+    ///
+    /// Shift is kept only for keys where it is meaningful: a terminal reports
+    /// `Shift+a` as `A`, but `Shift+←` keeps the modifier. Command (Super/Meta)
+    /// is folded into `SUPER` so one spec covers both reportings.
     pub fn from_event(key: KeyEvent) -> Self {
         let mut modifiers = KeyModifiers::NONE;
         if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -198,6 +247,15 @@ impl KeySpec {
         }
         if key.modifiers.contains(KeyModifiers::ALT) {
             modifiers |= KeyModifiers::ALT;
+        }
+        if key.modifiers.contains(KeyModifiers::SHIFT) {
+            modifiers |= KeyModifiers::SHIFT;
+        }
+        if key
+            .modifiers
+            .intersects(KeyModifiers::SUPER | KeyModifiers::META)
+        {
+            modifiers |= KeyModifiers::SUPER;
         }
         Self::new(key.code, modifiers)
     }
@@ -214,6 +272,9 @@ impl KeySpec {
         if self.modifiers.contains(KeyModifiers::SHIFT) {
             parts.push("shift".to_string());
         }
+        if self.modifiers.contains(KeyModifiers::SUPER) {
+            parts.push("super".to_string());
+        }
         parts.push(code_name(self.code));
         parts.join("+")
     }
@@ -229,6 +290,7 @@ impl KeySpec {
                 "ctrl" | "control" => modifiers |= KeyModifiers::CONTROL,
                 "alt" | "option" | "opt" => modifiers |= KeyModifiers::ALT,
                 "shift" => modifiers |= KeyModifiers::SHIFT,
+                "super" | "cmd" | "command" | "meta" => modifiers |= KeyModifiers::SUPER,
                 _ => {
                     if code.is_some() {
                         return None;

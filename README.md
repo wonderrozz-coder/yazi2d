@@ -60,7 +60,8 @@ cargo run --release
 cargo run --release -- ~/Projects /Volumes/Backup
 ```
 
-Готовый бинарник: `target/release/yazi2d`.
+Готовый бинарник: `target/release/yazi2d` (≈2 МБ). Можно скопировать его в
+`~/.local/bin` или `/usr/local/bin` и запускать как `yazi2d`.
 
 > Проект может лежать в синхронизируемой папке (Nextcloud/Dropbox). Чтобы не
 > синхронизировать гигабайты артефактов, удобно вынести каталог сборки:
@@ -281,6 +282,8 @@ cargo build --release
 # сквозной тест в настоящем PTY
 python3 scripts/e2e_pty.py target/debug/yazi2d
 ```
+
+Проект распространяется по лицензии MIT — см. [`LICENSE`](LICENSE).
 
 Документация для продолжения работы:
 

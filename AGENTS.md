@@ -20,7 +20,7 @@ filesystems, a GUI, sixel/Kitty image protocols.
 
 ## Current status (2026-11-11)
 
-Version `0.5.1` — MVP + quick view, thumbnails, background loading, logging,
+Version `0.5.2` — MVP + quick view, thumbnails, background loading, logging,
 sorting, type colours, bulk rename, trackpad gestures, a live footer, and a
 polished thumbnail grid with a separate extension column.
 
@@ -47,7 +47,8 @@ polished thumbnail grid with a separate extension column.
 - [x] Settings menu: rebindable keys, trackpad inversion.
 - [x] Modifier footer incl. Command, `Ctrl+F` sidebar toggle, Shift/Cmd arrows.
 - [x] Copy/move confirmation, Alt-based cross-panel keys, footer recovery.
-- [x] Shift opens / Alt previews across panels; 89 unit tests.
+- [x] Shift opens / Alt previews; modifier-safe file ops; full key menu.
+- [x] 93 unit tests + a real-PTY end-to-end test, all green.
 - [x] `cargo fmt`, `cargo clippy -D warnings`, release build (≈2 MB binary).
 
 Known limitations and the next steps are in `docs/STATUS.md` and
