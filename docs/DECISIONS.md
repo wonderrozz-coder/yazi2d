@@ -654,3 +654,26 @@ release leaves `held_modifiers` set.
 Cross-panel navigation works on Ghostty and iTerm2 out of the box, and users who
 want `Cmd` can unbind Ghostty's defaults. The footer always returns to its
 default text on the next keystroke.
+
+## ADR-033 — Shift opens, Alt previews; Ctrl/Command dropped
+
+**Status:** accepted (2026-11-11, `0.5.1`)
+
+**Context:** ADR-032 made both modifiers do the same thing, so the two actions
+could not be told apart. Ctrl+arrows switch macOS Spaces, and Ghostty rewrites
+`Cmd+←/→` into `Ctrl+A`/`Ctrl+E` before the app sees them, so neither can carry
+an in-app action.
+
+**Decision:** `cross_panel_action` returns `(panel, preview)`:
+
+- `Shift+←/→` → open the cursor folder in that panel (`preview = false`)
+- `Alt+←/→`, and `Alt+b`/`Alt+f` (the readline encodings terminals emit) →
+  quick preview there (`preview = true`)
+
+`Ctrl` and `Command` are no longer consulted for cross-panel navigation.
+`Ctrl+←/→` still reaches `preview_panel` through the older control-key branch as
+an alias, but it is no longer documented as a primary binding.
+
+**Consequences:** The two actions have distinct, reliable modifiers on all three
+platforms. `Alt+b`/`Alt+f` remain accepted so macOS terminals work unmodified.
+The footer advertises exactly this split under Shift and Option.

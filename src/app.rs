@@ -631,15 +631,14 @@ impl App {
         // Shift+←/→ opens the cursor folder in that panel; Command (Super)+←/→
         // opens the quick preview there. Both are offered because terminals
         // disagree about which modifier they deliver.
-        // Cross-panel actions, in order of reliability:
-        //   Alt+←/→   open the cursor folder in that panel (primary)
-        //   Alt+b/f   the same, because Ghostty encodes Alt+←/→ as ESC b / ESC f
-        //   Shift+←→  same again, for terminals where Alt is swallowed
-        //   Cmd/Super+←→  quick preview there
-        //   Ctrl+←→   preview there (often bound by the OS)
-        if let Some(target) = cross_panel_target(key) {
-            let preview =
-                super_modifier(key.modifiers) || key.modifiers.contains(KeyModifiers::CONTROL);
+        // Cross-panel actions are split between the two modifiers that
+        // actually reach the terminal:
+        //   Shift+←/→  open the cursor folder in the indicated panel
+        //   Alt+←/→    quick preview in the indicated panel
+        // Ctrl and Command are deliberately unused: macOS reserves Ctrl+arrows
+        // for Spaces and terminals (Ghostty, iTerm2) bind Command+arrows to
+        // line editing, so they never arrive here.
+        if let Some((target, preview)) = cross_panel_action(key) {
             if preview {
                 self.preview_panel(target);
             } else {
@@ -1791,26 +1790,30 @@ impl App {
 /// implement readline-style Alt bindings (Ghostty and iTerm2 by default) turn
 /// `Alt+←` into `ESC b` and `Alt+→` into `ESC f`, so the app never sees an
 /// arrow at all.
-fn cross_panel_target(key: KeyEvent) -> Option<usize> {
+fn cross_panel_action(key: KeyEvent) -> Option<(usize, bool)> {
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT)
         && !key
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
-    let preview_modifier =
-        super_modifier(key.modifiers) || key.modifiers.contains(KeyModifiers::CONTROL);
 
-    if !(alt || shift || preview_modifier) {
-        return None;
-    }
+    // Which panel the arrow points at.
+    let target = match key.code {
+        KeyCode::Left => 0,
+        KeyCode::Right => 1,
+        // Ghostty and iTerm2 encode Alt+←/→ as ESC b / ESC f, so the arrow
+        // never arrives; accept the letters as the same gesture.
+        KeyCode::Char('b') if alt => 0,
+        KeyCode::Char('f') if alt => 1,
+        _ => return None,
+    };
 
-    match key.code {
-        KeyCode::Left => Some(0),
-        KeyCode::Right => Some(1),
-        // Ghostty/iTerm2 "natural text editing" sends these instead of arrows.
-        KeyCode::Char('b') if alt => Some(0),
-        KeyCode::Char('f') if alt => Some(1),
-        _ => None,
+    if alt {
+        Some((target, true))
+    } else if shift {
+        Some((target, false))
+    } else {
+        None
     }
 }
 
@@ -1824,14 +1827,6 @@ fn bit_of(modifier: ModifierKeyCode) -> KeyModifiers {
         ModifierKeyCode::LeftMeta | ModifierKeyCode::RightMeta => KeyModifiers::META,
         _ => KeyModifiers::NONE,
     }
-}
-
-/// True when the Command key (Super) is held.
-///
-/// Terminals report it as SUPER; a few report META. Both mean Command on macOS
-/// and the Windows/Super key elsewhere.
-fn super_modifier(modifiers: KeyModifiers) -> bool {
-    modifiers.intersects(KeyModifiers::SUPER | KeyModifiers::META)
 }
 
 fn pick_dir(path: Option<&PathBuf>, fallback: &Path) -> PathBuf {
@@ -1920,7 +1915,7 @@ mod tests {
     }
 
     #[test]
-    fn alt_arrow_opens_the_cursor_folder_in_the_neighbour() {
+    fn shift_arrow_opens_the_cursor_folder_in_the_neighbour() {
         let tmp = tempfile::tempdir().unwrap();
         let left = tmp.path().join("left");
         let right = tmp.path().join("right");
@@ -1930,14 +1925,14 @@ mod tests {
 
         let mut app = app_for(&left, &right);
         app.panels[0].select_name("child");
-        press(&mut app, KeyCode::Right, KeyModifiers::ALT);
+        press(&mut app, KeyCode::Right, KeyModifiers::SHIFT);
         wait_for_loads(&mut app);
 
         assert_eq!(app.panels[1].cwd, child);
     }
 
     #[test]
-    fn alt_arrow_on_a_file_is_rejected() {
+    fn shift_arrow_on_a_file_is_rejected() {
         let tmp = tempfile::tempdir().unwrap();
         let left = tmp.path().join("left");
         let right = tmp.path().join("right");
@@ -1947,7 +1942,7 @@ mod tests {
 
         let mut app = app_for(&left, &right);
         app.panels[0].select_name("a.txt");
-        press(&mut app, KeyCode::Right, KeyModifiers::ALT);
+        press(&mut app, KeyCode::Right, KeyModifiers::SHIFT);
 
         assert_eq!(app.panels[1].cwd, right);
         assert!(app.status.contains("not a folder"));
@@ -2158,7 +2153,56 @@ mod tests {
     }
 
     #[test]
-    fn alt_arrow_and_terminal_alt_letters_both_open_the_neighbour() {
+    fn alt_arrow_previews_in_the_indicated_panel() {
+        let tmp = tempfile::tempdir().unwrap();
+        let left = tmp.path().join("left");
+        let right = tmp.path().join("right");
+        fs::create_dir_all(&left).unwrap();
+        fs::create_dir_all(&right).unwrap();
+        fs::write(left.join("a.txt"), "x").unwrap();
+
+        let mut app = app_for(&left, &right);
+        app.panels[0].select_name("a.txt");
+
+        press(&mut app, KeyCode::Right, KeyModifiers::ALT);
+        assert_eq!(app.panels[1].mode, PanelMode::Preview);
+        assert_eq!(
+            app.panels[0].mode,
+            PanelMode::List,
+            "source panel unchanged"
+        );
+
+        press(&mut app, KeyCode::Right, KeyModifiers::ALT);
+        assert_eq!(app.panels[1].mode, PanelMode::List);
+    }
+
+    #[test]
+    fn alt_letters_from_the_terminal_preview_too() {
+        let tmp = tempfile::tempdir().unwrap();
+        let left = tmp.path().join("left");
+        let right = tmp.path().join("right");
+        fs::create_dir_all(&left).unwrap();
+        fs::create_dir_all(&right).unwrap();
+        fs::write(left.join("a.txt"), "x").unwrap();
+
+        let mut app = app_for(&left, &right);
+        app.panels[0].select_name("a.txt");
+
+        // Ghostty encodes Alt+Right as ESC f.
+        press(&mut app, KeyCode::Char('f'), KeyModifiers::ALT);
+        assert_eq!(app.panels[1].mode, PanelMode::Preview);
+
+        press(&mut app, KeyCode::Char('f'), KeyModifiers::ALT);
+        assert_eq!(app.panels[1].mode, PanelMode::List);
+
+        // ...and Alt+Left as ESC b, which targets the left panel.
+        app.active = 1;
+        press(&mut app, KeyCode::Char('b'), KeyModifiers::ALT);
+        assert_eq!(app.panels[0].mode, PanelMode::Preview);
+    }
+
+    #[test]
+    fn shift_arrow_and_terminal_alt_letters_open_the_neighbour() {
         let tmp = tempfile::tempdir().unwrap();
         let left = tmp.path().join("left");
         let right = tmp.path().join("right");
@@ -2170,22 +2214,14 @@ mod tests {
 
         let mut app = app_for(&left, &right);
         app.panels[0].select_name("one");
-        press(&mut app, KeyCode::Right, KeyModifiers::ALT);
+        press(&mut app, KeyCode::Right, KeyModifiers::SHIFT);
         wait_for_loads(&mut app);
         assert_eq!(app.panels[1].cwd, one);
 
-        // Ghostty encodes Alt+Right as ESC f, which arrives as Alt+f.
-        app.active = 0;
-        app.panels[0].select_name("two");
-        press(&mut app, KeyCode::Char('f'), KeyModifiers::ALT);
-        wait_for_loads(&mut app);
-        assert_eq!(app.panels[1].cwd, two);
-
-        // ...and Alt+Left as ESC b, which targets the left panel. The right
-        // panel currently sits in `two`, so its `..` row must open there.
+        // Shift+Left from the right panel opens the cursor folder on the left.
         app.active = 1;
         app.panels[1].select_name("..");
-        press(&mut app, KeyCode::Char('b'), KeyModifiers::ALT);
+        press(&mut app, KeyCode::Left, KeyModifiers::SHIFT);
         wait_for_loads(&mut app);
         assert_eq!(app.panels[0].cwd, left);
     }
@@ -2255,31 +2291,6 @@ mod tests {
         press(&mut app, KeyCode::Left, KeyModifiers::SHIFT);
         wait_for_loads(&mut app);
         assert_eq!(app.panels[0].cwd, nested);
-    }
-
-    #[test]
-    fn command_arrow_previews_in_the_indicated_panel() {
-        let tmp = tempfile::tempdir().unwrap();
-        let left = tmp.path().join("left");
-        let right = tmp.path().join("right");
-        fs::create_dir_all(&left).unwrap();
-        fs::create_dir_all(&right).unwrap();
-        fs::write(left.join("a.txt"), "x").unwrap();
-
-        let mut app = app_for(&left, &right);
-        app.panels[0].select_name("a.txt");
-
-        // Command+Right makes the right panel a viewer.
-        press(&mut app, KeyCode::Right, KeyModifiers::SUPER);
-        assert_eq!(app.panels[1].mode, PanelMode::Preview);
-        assert_eq!(app.panels[0].mode, PanelMode::List);
-
-        press(&mut app, KeyCode::Right, KeyModifiers::SUPER);
-        assert_eq!(app.panels[1].mode, PanelMode::List);
-
-        app.active = 1;
-        press(&mut app, KeyCode::Left, KeyModifiers::SUPER);
-        assert_eq!(app.panels[0].mode, PanelMode::Preview);
     }
 
     #[test]

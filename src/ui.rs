@@ -1040,9 +1040,6 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
 fn modifier_hint(modifiers: crossterm::event::KeyModifiers) -> Option<&'static str> {
     use crossterm::event::KeyModifiers as M;
 
-    if modifiers.intersects(M::SUPER | M::META) {
-        return Some(" Command · ← / → quick preview in that panel");
-    }
     if modifiers.contains(M::CONTROL) {
         return Some(
             " Ctrl · B add fav · D focus favs · F show/hide favs · Q/P preview other · T thumbs \

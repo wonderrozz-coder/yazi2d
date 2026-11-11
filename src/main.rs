@@ -205,9 +205,11 @@ fn print_help() {
          \x20 F9 + Up/Down    thumbnail grid on / off\n\
          \x20 Ctrl+Q / Ctrl+P quick preview in the OTHER panel\n\
          \x20 Ctrl+T          thumbnail grid in the active panel\n\
-         \x20 Ctrl+O          open cursor folder in the other panel\n\x20 Shift+Left/Right open cursor folder in that panel\n\x20 Cmd+Left/Right  quick preview in that panel\n\
-         \x20 Ctrl+Left/Right preview in that panel (may be OS-bound)\n\
-         \x20 Alt+Left/Right  open cursor folder in that panel\n\
+         \x20 Ctrl+O          open cursor folder in the other panel\n\
+         \x20 Shift+Left/Right open cursor folder in that panel\n\
+         \x20 Alt+Left/Right  quick preview in that panel\n\
+         \x20 Ctrl+Left/Right preview in that panel (alias)\n\
+         \
          \x20 Ctrl+B / a      add current directory to favorites\n\
          \x20 Ctrl+D          focus favorites / back to panels\n\
          \x20 Ctrl+F          show / hide the favorites sidebar\n\

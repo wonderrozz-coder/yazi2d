@@ -1,6 +1,6 @@
 [package]
 name = "yazi2d"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 rust-version = "1.80"
 description = "Yazi2D — a fast dual-pane terminal file manager inspired by Yazi and Total Commander"
