@@ -20,7 +20,7 @@ filesystems, a GUI, sixel/Kitty image protocols.
 
 ## Current status (2026-11-11)
 
-Version `0.3.8` — MVP + quick view, thumbnails, background loading, logging,
+Version `0.3.9` — MVP + quick view, thumbnails, background loading, logging,
 sorting, type colours, bulk rename, trackpad gestures, a live footer, and a
 polished thumbnail grid with a separate extension column.
 
@@ -43,7 +43,8 @@ polished thumbnail grid with a separate extension column.
 - [x] `F9` chord: `F9` + arrows for cross-panel open / thumbnails.
 - [x] Key repeat and debounced trackpad swipes.
 - [x] Layout-independent shortcuts (`src/keys.rs`), `Enter` opens files.
-- [x] 67 unit tests + a real-PTY end-to-end test, all green.
+- [x] Block-art icons per file group in the thumbnail grid.
+- [x] 69 unit tests + a real-PTY end-to-end test, all green.
 - [x] `cargo fmt`, `cargo clippy -D warnings`, release build (≈2 MB binary).
 
 Known limitations and the next steps are in `docs/STATUS.md` and
@@ -86,6 +87,7 @@ src/panel.rs               Panel state, modes, navigation, background directory 
 src/preview.rs             async preview/image caches, image resampling
 src/colors.rs              file-type groups, colour presets, persisted theme
 src/keys.rs                Cyrillic→Latin key mapping so shortcuts ignore layout
+src/icons.rs               block-art icons per FileGroup for the thumbnail grid
 src/logging.rs             append-only file log (timings, slow loads, panics)
 src/transfer.rs            background copy/move/delete engine + progress channel
 src/favorites.rs           favorites model and TOML persistence

@@ -544,3 +544,26 @@ macOS maps it to a **right** button click while only left presses were handled.
 keyboard, and the trackpad gesture works on machines where a two-finger tap is a
 right click. macOS does not expose "double tap with two fingers" as a distinct
 event, so the gesture remains "two taps", not a single two-finger touch.
+
+## ADR-029 — Block-art icons per file group in the thumbnail grid
+
+**Status:** accepted (2026-11-11, `0.3.9`)
+
+**Context:** Only images produced a thumbnail. Folders had a small glyph and every
+other file drew two faint rules around a short extension label, which left most
+of the tile as a black hole — the user described them as "black spots".
+
+**Decision:**
+
+1. New `src/icons.rs` holds a 9×6 block-art icon per `FileGroup` (folder, image,
+   video, audio, text, archive, temporary, model, code, other).
+2. `draw_group_icon` centres that art in the tile body and falls back to a single
+   coloured glyph when the tile is smaller than the artwork.
+3. Non-image files use `draw_file_icon`, which draws the group icon plus the
+   extension on the last row, in the group colour.
+4. A unit test asserts every icon is exactly `ICON_WIDTH × ICON_HEIGHT` in
+   terminal cells, so adding a group cannot silently break the grid.
+
+**Consequences:** Every tile is visually distinct without decoding anything, so
+the grid is fast even for folders full of archives and models. Icon shapes are
+ASCII/box-drawing only, which any monospace font renders consistently.

@@ -1,6 +1,7 @@
 mod app;
 mod colors;
 mod favorites;
+mod icons;
 mod keys;
 mod logging;
 mod panel;

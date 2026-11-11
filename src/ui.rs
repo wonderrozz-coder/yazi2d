@@ -650,14 +650,20 @@ fn draw_tile(
 
     if body.width > 0 && body.height > 0 {
         if entry.is_dir {
-            draw_folder_icon(frame, body, colors.color(FileGroup::Directory), background);
+            draw_group_icon(
+                frame,
+                body,
+                FileGroup::Directory,
+                colors.color(FileGroup::Directory),
+                background,
+            );
         } else if is_image_path(&entry.path) {
             match image_cache.render(&entry.path, body.width, body.height) {
                 Some(image) => render_halfblocks(frame, &image, body),
                 None => render_message(frame, body, "…"),
             }
         } else {
-            draw_file_badge(frame, entry, body, colors, background);
+            draw_file_icon(frame, entry, body, colors, background);
         }
     }
 
@@ -702,26 +708,38 @@ fn draw_tile(
     }
 }
 
-/// A small folder glyph, big enough to read as a folder instead of a black box.
-const FOLDER_ART: [&str; 4] = ["  ▄▄▄▄▄▄  ", " ████████▄", "██████████", "▀▀▀▀▀▀▀▀▀▀"];
-
-fn draw_folder_icon(frame: &mut Frame, area: Rect, color: Color, background: Color) {
-    let art_height = FOLDER_ART.len() as u16;
-    let art_width = FOLDER_ART[0].chars().count() as u16;
+/// Draw the block icon for a file group, centred in `area`.
+///
+/// Falls back to a single coloured glyph when the tile is too small for the
+/// artwork, so a tile is never empty.
+fn draw_group_icon(
+    frame: &mut Frame,
+    area: Rect,
+    group: FileGroup,
+    color: Color,
+    background: Color,
+) {
+    let art = crate::icons::icon(group);
+    let art_height = art.len() as u16;
+    let art_width = crate::icons::ICON_WIDTH as u16;
 
     if area.width < art_width || area.height < art_height {
-        // Too small for the glyph: a simple folder mark still beats nothing.
         frame.render_widget(
-            Paragraph::new("▸")
+            Paragraph::new(crate::icons::glyph(group).to_string())
                 .alignment(Alignment::Center)
-                .style(Style::default().fg(color).bg(background)),
+                .style(
+                    Style::default()
+                        .fg(color)
+                        .bg(background)
+                        .add_modifier(Modifier::BOLD),
+                ),
             center_vertically(area, 1),
         );
         return;
     }
 
     let y = area.y + (area.height - art_height) / 2;
-    for (offset, line) in FOLDER_ART.iter().enumerate() {
+    for (offset, line) in art.iter().enumerate() {
         let line_area = Rect {
             x: area.x,
             y: y + offset as u16,
@@ -737,8 +755,11 @@ fn draw_folder_icon(frame: &mut Frame, area: Rect, color: Color, background: Col
     }
 }
 
-/// Non-previewable file: show a large extension badge instead of empty space.
-fn draw_file_badge(
+/// Non-previewable file: a large icon for its group plus the extension.
+///
+/// Previously this was two faint rules and a short label, which left most of the
+/// tile black. The icon fills that space and makes the type recognisable.
+fn draw_file_icon(
     frame: &mut Frame,
     entry: &Entry,
     area: Rect,
@@ -747,49 +768,44 @@ fn draw_file_badge(
 ) {
     let group = FileGroup::classify(&entry.path, false);
     let color = colors.color(group);
-    let extension = entry_extension(entry);
-    let label = if extension.is_empty() {
-        "file".to_string()
-    } else {
-        extension.trim_start_matches('.').to_uppercase()
-    };
-    let label = truncate_right(&label, area.width.saturating_sub(2).max(1) as usize);
+    let icon_height = crate::icons::ICON_HEIGHT as u16;
 
-    // A faint frame makes the tile look deliberate rather than broken.
-    if area.width >= 6 && area.height >= 3 {
-        let box_area = Rect {
-            x: area.x,
-            y: area.y + area.height.saturating_sub(3) / 2,
-            width: area.width,
-            height: 3.min(area.height),
-        };
-        frame.render_widget(
-            Block::default()
-                .borders(Borders::TOP | Borders::BOTTOM)
-                .border_style(Style::default().fg(Color::Rgb(70, 74, 88)))
-                .style(Style::default().bg(background)),
-            box_area,
-        );
-        let inner = Rect {
-            y: box_area.y + 1,
-            height: 1,
-            ..box_area
-        };
-        frame.render_widget(
-            Paragraph::new(label).alignment(Alignment::Center).style(
-                Style::default()
-                    .fg(color)
-                    .bg(background)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            inner,
-        );
+    let (icon_area, label_area) = if area.height >= icon_height + 1 {
+        (
+            Rect {
+                height: area.height - 1,
+                ..area
+            },
+            Some(Rect {
+                x: area.x,
+                y: area.y + area.height - 1,
+                width: area.width,
+                height: 1,
+            }),
+        )
     } else {
+        (area, None)
+    };
+
+    draw_group_icon(frame, icon_area, group, color, background);
+
+    if let Some(label_area) = label_area {
+        let extension = entry_extension(entry);
+        let label = if extension.is_empty() {
+            "file".to_string()
+        } else {
+            extension.trim_start_matches('.').to_uppercase()
+        };
         frame.render_widget(
-            Paragraph::new(label)
+            Paragraph::new(truncate_right(&label, label_area.width as usize))
                 .alignment(Alignment::Center)
-                .style(Style::default().fg(color).bg(background)),
-            center_vertically(area, 1),
+                .style(
+                    Style::default()
+                        .fg(color)
+                        .bg(background)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            label_area,
         );
     }
 }
