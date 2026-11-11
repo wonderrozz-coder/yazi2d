@@ -178,7 +178,7 @@ fn print_help() {
          \n\
          KEYS:\n\
          \x20 Tab             switch active panel\n\
-         \x20 Shift+Tab       focus favorites / back to panels\n\
+         \x20 § / Shift+Tab   focus favorites / back to panels\n\
          \x20 Arrows / hjkl   navigate\n\
          \x20 Enter / l       open directory\n\
          \x20 Backspace / h   go to parent directory\n\

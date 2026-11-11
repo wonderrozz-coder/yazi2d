@@ -1034,13 +1034,13 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             " Shift · Tab focus favorites · Home/End jump · (arrows and letters work as usual)"
         }
         Focus::Favorites => {
-            " Yazi2D · Favorites: ↑↓/jk move · Enter open · Del remove · Ctrl+B add · Shift+Tab/Ctrl+D panels · ? help · q quit"
+            " Yazi2D · Favorites: ↑↓/jk move · Enter open · Del remove · Ctrl+B add · §/Shift+Tab/Ctrl+D panels · ? help · q quit"
         }
         Focus::Panels if app.job.is_some() => {
             " Yazi2D · operation in progress — navigation stays available"
         }
         Focus::Panels => {
-            " Yazi2D · Tab switch · Tab Tab favs · Shift+Tab favs · Ctrl+Q/Ctrl+P preview · Ctrl+T thumbs · Ctrl+O open there · s sort · Ctrl+A all · F5/c copy · F6/m move · F8/d delete · ? help · q quit"
+            " Yazi2D · Tab switch · § favs · Shift+Tab favs · Ctrl+Q/Ctrl+P preview · Ctrl+T thumbs · Ctrl+O open there · s sort · Ctrl+A all · F5/c copy · F6/m move · F8/d delete · ? help · q quit"
         }
     };
 
@@ -1116,7 +1116,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         Line::from(Span::styled("PANELS & FAVORITES", header)),
         help_line("  Tab", "switch active panel", key),
         help_line(
-            "  Shift+Tab / Ctrl+D",
+            "  § · Shift+Tab · Ctrl+D",
             "focus favorites / back to panels",
             key,
         ),

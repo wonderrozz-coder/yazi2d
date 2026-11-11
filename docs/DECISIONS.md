@@ -474,3 +474,20 @@ gestures, so the panels dove into folders the user never meant to open.
 **Consequences:** Key repeat works again, and a swipe needs a deliberate
 horizontal movement. A very slow, long swipe may need a second attempt, which is
 preferable to accidental navigation.
+
+## ADR-026 — `§` replaces the double-Tab favorites gesture
+
+**Status:** accepted (2026-11-11, `0.3.6`)
+
+**Context:** Double `Tab` was implemented with a 280 ms window, but it competed
+with the primary `Tab` action (switch panel). Pressing `Tab` twice quickly to
+bounce between panels could land in the favorites sidebar instead, which felt
+unreliable.
+
+**Decision:** Remove the timing-based gesture entirely. `§` (the section sign on
+the key left of `1` on most layouts) opens and closes favorites with a single
+press. `Shift+Tab` and `Ctrl+D` remain as aliases, and `Tab` is once again only
+"switch panel".
+
+**Consequences:** No timing heuristics and no hidden mode. `§` may require a
+layout-specific key, so the two existing aliases stay documented everywhere.

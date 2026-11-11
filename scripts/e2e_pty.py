@@ -230,9 +230,6 @@ try:
 
     send(b"\t")  # focus the right panel (inside sub)
     send(b"\x7f")  # Backspace: go up to the parent
-    # Wait out the double-Tab window before coming back, so two quick Tabs are
-    # not mistaken for the "open favorites" gesture.
-    time.sleep(0.45)
     send(b"\t")  # back to the left panel
     time.sleep(0.3)
     send(b"d")

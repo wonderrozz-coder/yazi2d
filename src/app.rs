@@ -12,12 +12,6 @@ use crate::panel::{LoadKind, LoadResult, Panel, PanelMode, SortKey, StatsUpdate}
 use crate::preview::{ImageCache, PreviewCache};
 use crate::transfer::{self, Job, JobKind, JobMsg};
 
-/// Two `Tab` presses within this window count as "double Tab" and open favorites.
-///
-/// Kept short: users often press `Tab` twice in a row to bounce between panels,
-/// and a long window would steal that gesture.
-const DOUBLE_TAB_WINDOW: Duration = Duration::from_millis(280);
-
 /// How long `F9` waits for an arrow before the chord is abandoned.
 const LEADER_WINDOW: Duration = Duration::from_millis(2000);
 
@@ -85,8 +79,6 @@ pub struct App {
     pub should_quit: bool,
     /// Set when the screen must be repainted. Keeps idle CPU usage near zero.
     pub dirty: bool,
-    /// Timestamp of the previous single `Tab`, for double-Tab detection.
-    pub last_tab: Option<Instant>,
     /// Modifiers currently held down, used to show matching keys in the footer.
     pub held_modifiers: KeyModifiers,
     /// Physical modifier keys currently held (left/right tracked separately).
@@ -171,7 +163,6 @@ impl App {
             status,
             should_quit: false,
             dirty: true,
-            last_tab: None,
             held_modifiers: KeyModifiers::NONE,
             held_keys: Vec::new(),
             leader: None,
@@ -380,8 +371,6 @@ impl App {
         if let KeyCode::Modifier(modifier) = key.code {
             self.release_modifier(modifier);
         }
-        // Any release means the chord that was just pressed is over.
-        self.last_tab = None;
     }
 
     fn release_modifier(&mut self, modifier: ModifierKeyCode) {
@@ -480,8 +469,11 @@ impl App {
         }
 
         // Shift+Tab (BackTab) is the primary way into and out of favorites.
+        // `§` is the dedicated single key for the same action (requested
+        // because double-Tab felt unreliable on macOS).
         if matches!(key.code, KeyCode::BackTab)
             || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT))
+            || matches!(key.code, KeyCode::Char('§'))
         {
             self.toggle_favorites_focus();
             return;
@@ -530,20 +522,6 @@ impl App {
         }
 
         if key.code == KeyCode::Tab {
-            // A quick double Tab is the second way into favorites: the first
-            // press switches panels, the second one (within one tick) moves
-            // focus to the sidebar. Slower presses keep switching panels.
-            let now = Instant::now();
-            if self
-                .last_tab
-                .take()
-                .is_some_and(|last| now.saturating_duration_since(last) <= DOUBLE_TAB_WINDOW)
-            {
-                self.focus = Focus::Panels;
-                self.toggle_favorites_focus();
-                return;
-            }
-            self.last_tab = Some(now);
             self.focus = Focus::Panels;
             self.active ^= 1;
             self.status = format!(
@@ -1808,31 +1786,30 @@ mod tests {
     }
 
     #[test]
-    fn double_tab_opens_favorites() {
+    fn section_sign_opens_favorites() {
         let tmp = tempfile::tempdir().unwrap();
         let mut app = app_for(tmp.path(), tmp.path());
 
-        press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
-        assert_eq!(app.active, 1);
-        press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char('§'), KeyModifiers::NONE);
         assert_eq!(app.focus, Focus::Favorites);
         assert!(app.show_favorites);
-        // The first press still switched panels; the second moved focus.
-        assert_eq!(app.active, 1);
+
+        press(&mut app, KeyCode::Char('§'), KeyModifiers::NONE);
+        assert_eq!(app.focus, Focus::Panels);
     }
 
     #[test]
-    fn slow_tab_presses_keep_switching_panels() {
+    fn repeated_tab_keeps_switching_panels() {
         let tmp = tempfile::tempdir().unwrap();
         let mut app = app_for(tmp.path(), tmp.path());
 
         press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
-        // Simulate a slow second press by expiring the double-Tab window.
-        app.last_tab = Some(Instant::now() - DOUBLE_TAB_WINDOW * 2);
-        press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
-
+        assert_eq!(app.active, 1);
         assert_eq!(app.focus, Focus::Panels);
+
+        press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
         assert_eq!(app.active, 0);
+        assert_eq!(app.focus, Focus::Panels, "Tab must never steal focus");
     }
 
     #[test]

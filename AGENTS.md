@@ -20,7 +20,7 @@ filesystems, a GUI, sixel/Kitty image protocols.
 
 ## Current status (2026-11-11)
 
-Version `0.3.5` — MVP + quick view, thumbnails, background loading, logging,
+Version `0.3.6` — MVP + quick view, thumbnails, background loading, logging,
 sorting, type colours, bulk rename, trackpad gestures, a live footer, and a
 polished thumbnail grid with a separate extension column.
 
@@ -38,7 +38,7 @@ polished thumbnail grid with a separate extension column.
 - [x] Safe conflict policy: unique suffix instead of overwrite.
 - [x] Multi-select, select-all (`Ctrl+A`), bulk rename (`Ctrl+G`), sorting (`s`),
   file-type colours with a menu (`Ctrl+K`).
-- [x] Double-Tab favorites, trackpad scrolling/swipes, modifier-aware footer.
+- [x] `§` opens favorites; trackpad scrolling/swipes; modifier-aware footer.
 - [x] Folder/file thumbnail glyphs, `Ext` column in the list.
 - [x] `F9` chord: `F9` + arrows for cross-panel open / thumbnails.
 - [x] Key repeat and debounced trackpad swipes.
@@ -179,8 +179,8 @@ Detailed invariants and data flow: `docs/ARCHITECTURE.md`.
 
 ## Key handling summary
 
-Panel mode: `Tab` switches panel, a quick double `Tab` focuses favorites;
-`Shift+Tab` focuses favorites; arrows/`hjkl`
+Panel mode: `Tab` switches panel; `§` focuses favorites; `Shift+Tab` does
+the same; arrows/`hjkl`
 navigate; `Enter`/`l` opens a directory; `Backspace`/`h` goes up; `Space`
 selects and advances; `F5`/`c` copies; `F6`/`m` moves; `F7`/`n` mkdir;
 `F2`/`r` renames; `F8`/`d`/`Del` deletes (confirm with `Enter` or `y`);
