@@ -20,8 +20,9 @@ filesystems, a GUI, sixel/Kitty image protocols.
 
 ## Current status (2026-11-11)
 
-Version `0.3.2` — MVP + quick view, thumbnails, background loading, logging,
-sorting, type colours, bulk rename, trackpad gestures and a live footer.
+Version `0.3.3` — MVP + quick view, thumbnails, background loading, logging,
+sorting, type colours, bulk rename, trackpad gestures, a live footer, and a
+polished thumbnail grid with a separate extension column.
 
 - [x] Two panels, independent cwd/cursor/selection, active-panel highlighting.
 - [x] Path bar at the top of both panels (left-truncated, tail always visible).
@@ -38,7 +39,8 @@ sorting, type colours, bulk rename, trackpad gestures and a live footer.
 - [x] Multi-select, select-all (`Ctrl+A`), bulk rename (`Ctrl+G`), sorting (`s`),
   file-type colours with a menu (`Ctrl+K`).
 - [x] Double-Tab favorites, trackpad scrolling/swipes, modifier-aware footer.
-- [x] 52 unit tests + a real-PTY end-to-end test, all green.
+- [x] Folder/file thumbnail glyphs, `Ext` column in the list.
+- [x] 55 unit tests + a real-PTY end-to-end test, all green.
 - [x] `cargo fmt`, `cargo clippy -D warnings`, release build (≈2 MB binary).
 
 Known limitations and the next steps are in `docs/STATUS.md` and

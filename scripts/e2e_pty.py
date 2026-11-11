@@ -147,7 +147,7 @@ try:
     # Ctrl+H reveals hidden files; the same key hides them again.
     send(b"\x08")
     screen = drain(0.4)
-    assert b".hidden.txt" in screen, "Ctrl+H did not show hidden files"
+    assert b"hidden" in screen, "Ctrl+H did not show hidden files"
     send(b"\x08")
 
     # Ctrl+P turns the right panel into a quick viewer of hello.txt.

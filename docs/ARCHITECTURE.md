@@ -288,8 +288,10 @@ Panel layout:
   load is in flight the header says `Loading <path>…` and the previous list is
   kept visible;
 - `Thumbnails` — tile grid. Tiles are adaptive: 3 columns on wide panels, 2 on
-  narrow ones, tile width 22–32 cells and height `(width-2)/2 + 3` so the image
-  area is roughly square in pixels. The renderer sets `grid_cols`/`grid_rows`,
+  narrow ones, tile width 16–32 cells and height `(width-2)/2 + 3` so the image
+  area is roughly square in pixels. Directories draw a multi-row folder glyph
+  (`FOLDER_ART`), non-image files draw a bordered extension badge, and each tile
+  prints the stem on one row and the extension on the next. The renderer sets `grid_cols`/`grid_rows`,
   then draws visible tiles only. Image tiles call `ImageCache::render` and
   `render_halfblocks`; directories show `▸`, other files show their extension.
   The focused tile gets a background highlight.

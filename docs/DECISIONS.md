@@ -398,3 +398,30 @@ the arrows, and a footer that explains the chords of whichever modifier is held.
 send releases, and fall back to the static footer. Mouse capture means the
 terminal no longer handles selection/copy itself while yazi2d runs, which is the
 normal trade-off for TUI mouse support.
+
+## ADR-023 — Thumbnail tiles get real art; the extension moves to its own column
+
+**Status:** accepted (2026-11-11, `0.3.3`)
+
+**Context:** In the thumbnail grid a folder showed a single `▸` in a large black
+box, and any file that is not an image showed only a small grey extension label —
+the tiles looked broken. In the list the extension was glued to the name
+(`report.pdf`), so the name column could not be scanned by stem alone.
+
+**Decision:**
+
+1. Tiles paint a card background (`TILE_BG`) instead of `Color::Reset`, so empty
+   space reads as a card rather than a hole.
+2. Folders draw a four-row ASCII folder glyph (`FOLDER_ART`) centred in the body;
+   if the tile is too small it falls back to `▸`.
+3. Non-image files draw a coloured extension badge between two faint rules, in
+   the colour of their `FileGroup`.
+4. Each tile prints the stem on one row and the extension on the row below.
+5. The list gains an `Ext` column before `Size`, shown from 40 columns wide. When
+   the panel is narrower, the extension is appended to the name again so the
+   file type is never lost. `header_line` switched from a fixed three-column
+   layout to the same shared `build_row`.
+
+**Consequences:** The grid is legible without any image decoding, and the list
+can be scanned by name. `build_row` now takes six positional strings, which is
+the upper limit before a struct argument becomes worthwhile.

@@ -24,6 +24,8 @@ const SELECT_BG_ACTIVE: Color = Color::Rgb(0, 80, 110);
 const SELECT_BG: Color = Color::Rgb(55, 55, 65);
 const STATUS_BG: Color = Color::Rgb(30, 32, 40);
 const FOOTER_BG: Color = Color::Rgb(20, 20, 26);
+/// Slightly lighter than the panel so thumbnail tiles read as cards.
+const TILE_BG: Color = Color::Rgb(24, 26, 33);
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
@@ -547,7 +549,7 @@ fn draw_thumbnails(
     image_cache: &mut ImageCache,
     colors: &crate::colors::Colors,
 ) {
-    const TILE_MIN_WIDTH: u16 = 22;
+    const TILE_MIN_WIDTH: u16 = 16;
     const TILE_MAX_WIDTH: u16 = 32;
 
     if area.height == 0 || area.width == 0 {
@@ -557,7 +559,7 @@ fn draw_thumbnails(
     // Adaptive tiles: 3 columns on wide panels, 2 on narrow ones. The height is
     // chosen so the image area is roughly square in pixels (2 px per cell row).
     let tile_width = (area.width / 3).clamp(TILE_MIN_WIDTH, TILE_MAX_WIDTH);
-    let tile_height = ((tile_width.saturating_sub(2)) / 2 + 3).clamp(11, 22);
+    let tile_height = ((tile_width.saturating_sub(2)) / 2 + 3).clamp(8, 22);
 
     let cols = (area.width / tile_width).max(1) as usize;
     let rows = (area.height / tile_height).max(1) as usize;
@@ -620,14 +622,14 @@ fn draw_tile(
             SELECT_BG
         }
     } else {
-        Color::Reset
+        TILE_BG
     };
     frame.render_widget(
         Block::default().style(Style::default().bg(background)),
         tile,
     );
 
-    let image_area = Rect {
+    let body = Rect {
         x: tile.x + 1,
         y: tile.y,
         width: tile.width.saturating_sub(2),
@@ -639,43 +641,23 @@ fn draw_tile(
         width: tile.width,
         height: 1,
     };
+    let ext_area = Rect {
+        x: tile.x,
+        y: tile.y + tile.height.saturating_sub(1),
+        width: tile.width,
+        height: 1,
+    };
 
-    if image_area.width > 0 && image_area.height > 0 {
-        if !entry.is_dir && is_image_path(&entry.path) {
-            match image_cache.render(&entry.path, image_area.width, image_area.height) {
-                Some(image) => render_halfblocks(frame, &image, image_area),
-                None => {
-                    let message = if image_cache.is_loading() {
-                        "loading…"
-                    } else {
-                        "no preview"
-                    };
-                    render_message(frame, image_area, message);
-                }
+    if body.width > 0 && body.height > 0 {
+        if entry.is_dir {
+            draw_folder_icon(frame, body, colors.color(FileGroup::Directory), background);
+        } else if is_image_path(&entry.path) {
+            match image_cache.render(&entry.path, body.width, body.height) {
+                Some(image) => render_halfblocks(frame, &image, body),
+                None => render_message(frame, body, "…"),
             }
-        } else if entry.is_dir {
-            frame.render_widget(
-                Paragraph::new("▸").alignment(Alignment::Center).style(
-                    Style::default()
-                        .fg(colors.color(FileGroup::Directory))
-                        .bg(background),
-                ),
-                center_vertically(image_area, 1),
-            );
         } else {
-            let label = entry
-                .path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .map(|ext| format!(".{}", ext.to_lowercase()))
-                .unwrap_or_else(|| "file".to_string());
-            let group_color = colors.color(FileGroup::classify(&entry.path, false));
-            frame.render_widget(
-                Paragraph::new(label)
-                    .alignment(Alignment::Center)
-                    .style(Style::default().fg(group_color).bg(background)),
-                center_vertically(image_area, 1),
-            );
+            draw_file_badge(frame, entry, body, colors, background);
         }
     }
 
@@ -686,7 +668,7 @@ fn draw_tile(
     } else {
         ""
     };
-    let name = format!("{marker}{}", entry.name);
+    let name = format!("{marker}{}", entry_stem(entry));
     let name = truncate_right(&name, name_area.width as usize);
     let style = if selected || focused {
         Style::default()
@@ -702,6 +684,114 @@ fn draw_tile(
             .style(style.bg(background)),
         name_area,
     );
+
+    // The extension sits on its own line so it never glues itself to the name.
+    let extension = entry_extension(entry);
+    if !extension.is_empty() {
+        let style = if selected || focused {
+            Style::default().fg(Color::LightYellow).bg(background)
+        } else {
+            Style::default().fg(Color::DarkGray).bg(background)
+        };
+        frame.render_widget(
+            Paragraph::new(truncate_right(&extension, ext_area.width as usize))
+                .alignment(Alignment::Center)
+                .style(style),
+            ext_area,
+        );
+    }
+}
+
+/// A small folder glyph, big enough to read as a folder instead of a black box.
+const FOLDER_ART: [&str; 4] = ["  ▄▄▄▄▄▄  ", " ████████▄", "██████████", "▀▀▀▀▀▀▀▀▀▀"];
+
+fn draw_folder_icon(frame: &mut Frame, area: Rect, color: Color, background: Color) {
+    let art_height = FOLDER_ART.len() as u16;
+    let art_width = FOLDER_ART[0].chars().count() as u16;
+
+    if area.width < art_width || area.height < art_height {
+        // Too small for the glyph: a simple folder mark still beats nothing.
+        frame.render_widget(
+            Paragraph::new("▸")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(color).bg(background)),
+            center_vertically(area, 1),
+        );
+        return;
+    }
+
+    let y = area.y + (area.height - art_height) / 2;
+    for (offset, line) in FOLDER_ART.iter().enumerate() {
+        let line_area = Rect {
+            x: area.x,
+            y: y + offset as u16,
+            width: area.width,
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(*line)
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(color).bg(background)),
+            line_area,
+        );
+    }
+}
+
+/// Non-previewable file: show a large extension badge instead of empty space.
+fn draw_file_badge(
+    frame: &mut Frame,
+    entry: &Entry,
+    area: Rect,
+    colors: &crate::colors::Colors,
+    background: Color,
+) {
+    let group = FileGroup::classify(&entry.path, false);
+    let color = colors.color(group);
+    let extension = entry_extension(entry);
+    let label = if extension.is_empty() {
+        "file".to_string()
+    } else {
+        extension.trim_start_matches('.').to_uppercase()
+    };
+    let label = truncate_right(&label, area.width.saturating_sub(2).max(1) as usize);
+
+    // A faint frame makes the tile look deliberate rather than broken.
+    if area.width >= 6 && area.height >= 3 {
+        let box_area = Rect {
+            x: area.x,
+            y: area.y + area.height.saturating_sub(3) / 2,
+            width: area.width,
+            height: 3.min(area.height),
+        };
+        frame.render_widget(
+            Block::default()
+                .borders(Borders::TOP | Borders::BOTTOM)
+                .border_style(Style::default().fg(Color::Rgb(70, 74, 88)))
+                .style(Style::default().bg(background)),
+            box_area,
+        );
+        let inner = Rect {
+            y: box_area.y + 1,
+            height: 1,
+            ..box_area
+        };
+        frame.render_widget(
+            Paragraph::new(label).alignment(Alignment::Center).style(
+                Style::default()
+                    .fg(color)
+                    .bg(background)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            inner,
+        );
+    } else {
+        frame.render_widget(
+            Paragraph::new(label)
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(color).bg(background)),
+            center_vertically(area, 1),
+        );
+    }
 }
 
 fn render_halfblocks(frame: &mut Frame, image: &RgbImage, area: Rect) {
@@ -1241,6 +1331,45 @@ fn draw_prompt(frame: &mut Frame, area: Rect, prompt: &Prompt) {
     }
 }
 
+/// Name without its extension, plus `@` for symlinks and `/` for folders.
+fn entry_stem(entry: &Entry) -> String {
+    if entry.is_parent {
+        return "..".to_string();
+    }
+
+    let stem = entry
+        .path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(&entry.name)
+        .to_string();
+
+    if entry.is_symlink {
+        if entry.is_dir {
+            format!("{stem}@/")
+        } else {
+            format!("{stem}@")
+        }
+    } else if entry.is_dir {
+        format!("{stem}/")
+    } else {
+        stem
+    }
+}
+
+/// Extension including the dot, or an empty string when there is none.
+fn entry_extension(entry: &Entry) -> String {
+    if entry.is_parent || entry.is_dir {
+        return String::new();
+    }
+    entry
+        .path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| format!(".{}", ext.to_lowercase()))
+        .unwrap_or_default()
+}
+
 fn list_item(
     entry: &Entry,
     selected: bool,
@@ -1262,20 +1391,10 @@ fn list_item(
 
     let name = if entry.is_parent {
         "..".to_string()
-    } else if entry.is_dir {
-        format!("{}/", entry.name)
     } else {
-        entry.name.clone()
+        entry_stem(entry)
     };
-    let name = if entry.is_symlink {
-        if entry.is_dir {
-            format!("{}@/", entry.name)
-        } else {
-            format!("{name}@")
-        }
-    } else {
-        name
-    };
+    let extension = entry_extension(entry);
 
     let size = if entry.is_parent {
         String::new()
@@ -1300,9 +1419,12 @@ fn list_item(
     let styles = RowStyles {
         prefix: prefix_style,
         name: name_style,
+        extension: Style::default().fg(Color::DarkGray),
         detail: Style::default().fg(Color::DarkGray),
     };
-    ListItem::new(build_row(width, prefix, &name, &size, &date, styles))
+    ListItem::new(build_row(
+        width, prefix, &name, &extension, &size, &date, styles,
+    ))
 }
 
 fn header_line(width: usize) -> Line<'static> {
@@ -1310,11 +1432,13 @@ fn header_line(width: usize) -> Line<'static> {
         width,
         "  ",
         "Name",
+        "Ext",
         "Size",
         "Modified",
         RowStyles {
             prefix: Style::default(),
             name: Style::default().add_modifier(Modifier::BOLD),
+            extension: Style::default().add_modifier(Modifier::BOLD),
             detail: Style::default(),
         },
     )
@@ -1324,6 +1448,7 @@ fn header_line(width: usize) -> Line<'static> {
 struct RowStyles {
     prefix: Style,
     name: Style,
+    extension: Style,
     detail: Style,
 }
 
@@ -1331,23 +1456,37 @@ fn build_row(
     width: usize,
     prefix: &str,
     name: &str,
+    extension: &str,
     size: &str,
     date: &str,
     styles: RowStyles,
 ) -> Line<'static> {
     let show_date = width >= 52;
     let show_size = width >= 34;
+    let show_ext = width >= 40;
     let detail_width = (if show_size { 8 } else { 0 })
         + (if show_size && show_date { 1 } else { 0 })
-        + (if show_date { 16 } else { 0 });
+        + (if show_date { 16 } else { 0 })
+        + (if show_ext { 7 } else { 0 });
     let name_width = width.saturating_sub(2 + detail_width);
 
-    let name = truncate_right(name, name_width);
+    // Without a dedicated column the extension stays part of the name, so the
+    // file type is never hidden.
+    let full_name = if show_ext || extension.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}{extension}")
+    };
+    let name = truncate_right(&full_name, name_width);
     let mut spans = vec![
         Span::styled(prefix.to_string(), styles.prefix),
         Span::styled(pad_right(&name, name_width), styles.name),
     ];
 
+    if show_ext {
+        let extension = truncate_right(extension, 6);
+        spans.push(Span::styled(format!("{extension:<7}"), styles.extension));
+    }
     if show_size {
         spans.push(Span::styled(format!("{size:>8}"), styles.detail));
     }
@@ -1497,6 +1636,74 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn list_separates_the_extension_into_its_own_column() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("notes.txt"), "hello").unwrap();
+
+        let mut app = App::new(vec![tmp.path().to_path_buf(), tmp.path().to_path_buf()]);
+        app.panels[0].select_name("notes.txt");
+
+        let width = 140usize;
+        let text = render(&mut app, width as u16, 30);
+        assert!(text.contains("Ext"), "extension column header missing");
+        // `render` returns the raw cell stream, so rows are fixed-width chunks.
+        let rows: Vec<String> = text
+            .chars()
+            .collect::<Vec<_>>()
+            .chunks(width)
+            .map(|chunk| chunk.iter().collect())
+            .collect();
+        let row = rows
+            .iter()
+            .find(|line| line.contains("notes"))
+            .expect("notes row");
+        // The left panel starts after the 26-column favorites sidebar; inspect
+        // that panel's name cell only.
+        let panel_row: String = row.chars().skip(28).take(30).collect();
+        assert!(
+            panel_row.contains("notes") && !panel_row.contains("notes.txt"),
+            "extension still glued to the name: {panel_row:?}"
+        );
+        assert!(
+            row.contains(".txt"),
+            "extension column missing .txt: {row:?}"
+        );
+    }
+
+    #[test]
+    fn narrow_panels_keep_the_extension_with_the_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("notes.txt"), "hello").unwrap();
+
+        let mut app = App::new(vec![tmp.path().to_path_buf(), tmp.path().to_path_buf()]);
+        app.panels[0].select_name("notes.txt");
+
+        // 80 columns with the favorites bar leaves each panel too narrow for
+        // the Ext column; the extension must still be visible.
+        let text = render(&mut app, 80, 30);
+        assert!(
+            text.contains("notes.tx"),
+            "extension disappeared on a narrow panel"
+        );
+    }
+
+    #[test]
+    fn thumbnail_tiles_draw_a_folder_glyph_and_extension_badge() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join("projects")).unwrap();
+        fs::write(tmp.path().join("report.pdf"), "x").unwrap();
+
+        let mut app = App::new(vec![tmp.path().to_path_buf(), tmp.path().to_path_buf()]);
+        app.panels[0].set_mode(PanelMode::Thumbnails);
+
+        let text = render(&mut app, 140, 40);
+        assert!(text.contains("█"), "folder tile has no folder glyph");
+        assert!(text.contains("PDF"), "non-image tile has no ext badge");
+        assert!(text.contains("projects"), "folder name missing");
+        assert!(text.contains("report"), "file name missing");
     }
 
     #[test]
