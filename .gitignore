@@ -3,6 +3,9 @@
 /target/
 **/*.rs.bk
 
+# Generated macOS app bundle (rebuilt by packaging/macos/build-app.sh)
+/dist/
+
 # Local runtime data
 *.log
 yazi2d.log*

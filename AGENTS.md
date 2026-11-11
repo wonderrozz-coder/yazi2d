@@ -48,6 +48,7 @@ polished thumbnail grid with a separate extension column.
 - [x] Modifier footer incl. Command, `Ctrl+F` sidebar toggle, Shift/Cmd arrows.
 - [x] Copy/move confirmation, Alt-based cross-panel keys, footer recovery.
 - [x] Shift opens / Alt previews; modifier-safe file ops; full key menu.
+- [x] macOS `.app` bundle with a generated icon, installed to /Applications.
 - [x] 93 unit tests + a real-PTY end-to-end test, all green.
 - [x] `cargo fmt`, `cargo clippy -D warnings`, release build (≈2 MB binary).
 
@@ -97,6 +98,8 @@ src/logging.rs             append-only file log (timings, slow loads, panics)
 src/transfer.rs            background copy/move/delete engine + progress channel
 src/favorites.rs           favorites model and TOML persistence
 src/ui.rs                  ratatui rendering, layout, overlays, preview/thumbnails, UI tests
+packaging/render-icon.py   draws packaging/icon-source.png (stdlib only)
+packaging/macos/build-app.sh  builds and installs Yazi2D.app with the icon
 scripts/e2e_pty.py         end-to-end test in a real pseudo-terminal
 docs/CONCEPT.md            product concept and UX spec (Russian)
 docs/ARCHITECTURE.md       module/data-flow/design details (English)

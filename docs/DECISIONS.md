@@ -707,3 +707,32 @@ Finally the menu listed only older actions.
 for every modifier the terminal reports, and the key menu is a complete map of
 the app. Publishing requires the user's own GitHub credentials; the tree is
 already clean (`git status` shows no artifacts).
+
+## ADR-035 — macOS app bundle with a generated icon
+
+**Status:** accepted (2026-11-11, `0.5.3`)
+
+**Context:** The user asked for a launchable app with an icon. Yazi2D is a
+terminal UI: a `.app` that executes the binary directly has no PTY attached, so
+it cannot start. Bitmap generation via the image tool was unavailable, and
+shipping a binary blob that nobody can regenerate is poor practice.
+
+**Decision:**
+
+1. `packaging/render-icon.py` draws `packaging/icon-source.png` (1024×1024) with
+   only the standard library: rounded gradient background, two file-list
+   panels, a folder glyph and a cyan accent. The art is reproducible and
+   reviewable as code.
+2. `packaging/macos/build-app.sh` builds the release binary, converts the PNG
+   into an `.icns` through `sips` + `iconutil`, writes `Info.plist`, ad-hoc signs
+   the bundle and installs it to `/Applications`.
+3. `Contents/MacOS/Yazi2D` is a small shell launcher that asks Terminal.app to
+   run `Contents/Resources/bin/yazi2d` through `osascript`. That gives the
+   program a real PTY, which is what a curses-style UI requires.
+4. `LSUIElement` is set: the bundle needs no window of its own, only the
+   Terminal window it opens.
+
+**Consequences:** Double-clicking the icon starts Yazi2D in Terminal, and the app
+appears in Launchpad, Spotlight and the Dock with its icon. `dist/` is
+git-ignored because the bundle is reproducible from source. On Linux/Windows the
+plain binary remains the way to run it.

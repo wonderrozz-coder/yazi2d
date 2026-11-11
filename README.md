@@ -41,6 +41,7 @@ deliberately simplified Total Commander workflow.
 - **Layout-independent shortcuts**: they work with the Russian keyboard layout.
 - **Background directory loading** — no freezes on slow or cloud folders.
 - **Diagnostics log** with timings and `WARN` lines for slow paths.
+- **macOS app bundle** with a custom icon (`packaging/macos/build-app.sh`).
 
 ## Install
 
@@ -60,6 +61,20 @@ source "$HOME/.cargo/env"
 
 The binary lands in `target/release/yazi2d` (≈2 MB) and can be copied to
 `~/.local/bin` or `/usr/local/bin`.
+
+### macOS app icon
+
+```sh
+./packaging/macos/build-app.sh
+```
+
+This builds **Yazi2D.app** with a custom icon and installs it to
+`/Applications`, so it appears in Launchpad, Spotlight and the Dock. Because
+Yazi2D is a terminal UI, the app opens a Terminal window and starts there.
+Pass `--no-copy` to build into `dist/` without installing.
+
+The icon is generated from `packaging/icon-source.png`; regenerate it with
+`python3 packaging/render-icon.py` (no dependencies, pure stdlib).
 
 > If the repository lives in a synced folder (Nextcloud/Dropbox), keep build
 > artifacts out of it: `export CARGO_TARGET_DIR="$HOME/.cache/yazi2d-target"`.
@@ -248,6 +263,7 @@ two-panel model). No Yazi source is included.
 - **Горячие клавиши не зависят от раскладки**: работают и в русской.
 - **Фоновая загрузка каталогов** — без зависаний на медленных и облачных папках.
 - **Диагностический лог** с таймингами и `WARN` для медленных путей.
+- **Приложение для macOS** с иконкой (`packaging/macos/build-app.sh`).
 
 ## Установка и запуск
 
@@ -267,6 +283,20 @@ source "$HOME/.cargo/env"
 
 Готовый бинарник: `target/release/yazi2d` (≈2 МБ). Можно скопировать его в
 `~/.local/bin` или `/usr/local/bin` и запускать как `yazi2d`.
+
+### Приложение с иконкой для macOS
+
+```sh
+./packaging/macos/build-app.sh
+```
+
+Собирает **Yazi2D.app** с иконкой и устанавливает в `/Applications` — приложение
+появится в Launchpad, Spotlight и Dock. Yazi2D — терминальный интерфейс, поэтому
+при запуске открывается окно Terminal и программа стартует в нём. Флаг
+`--no-copy` собирает бандл в `dist/` без установки.
+
+Иконка генерируется из `packaging/icon-source.png`; перерисовать её можно
+командой `python3 packaging/render-icon.py` (без зависимостей, только stdlib).
 
 > Проект может лежать в синхронизируемой папке (Nextcloud/Dropbox). Чтобы не
 > синхронизировать гигабайты артефактов, вынесите каталог сборки:
