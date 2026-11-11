@@ -625,3 +625,32 @@ cross-panel arrows used Ctrl/Alt, both of which macOS often swallows.
 **Consequences:** Every modifier the terminal reports drives the footer, the
 sidebar has separate visibility and focus keys, and the settings menu can never
 make itself unreachable.
+
+## ADR-032 — Confirm transfers, Alt-based cross-panel keys, footer recovery
+
+**Status:** accepted (2026-11-11, `0.5.0`)
+
+**Context:** Three usability problems. Copy/move started immediately while delete
+asked for confirmation, which felt inconsistent for equally destructive actions.
+`Cmd+←/→` never reached the app on Ghostty: the terminal binds them to
+`Ctrl+A`/`Ctrl+E` ("natural text editing"), and `Option+←/→` become `ESC b`/
+`ESC f`. And the footer could stay stuck on a modifier hint because a lost
+release leaves `held_modifiers` set.
+
+**Decision:**
+
+1. `start_transfer` validates the request exactly as before, then stores
+   `Prompt::Transfer`. `do_transfer` runs the job only after `Enter`/`y`;
+   `n`/`Esc` cancels. The prompt shows verb, item count and destination.
+2. `cross_panel_target` accepts `Alt`+arrows **and** `Alt+b`/`Alt+f`, the
+   readline encodings Ghostty and iTerm2 produce. `Shift`+arrows duplicate the
+   action; `Ctrl`/`Super`+arrows preview. `Alt` is the primary binding, since it
+   is the one that survives on all three platforms (`Alt`/`Option`/`Alt`).
+3. `App::on_key` treats a key press with no modifiers as authoritative: it
+   clears `held_modifiers` and `held_keys`. That recovers from terminals that
+   never deliver a release, without needing the kitty protocol.
+
+**Consequences:** No file operation starts without explicit confirmation.
+Cross-panel navigation works on Ghostty and iTerm2 out of the box, and users who
+want `Cmd` can unbind Ghostty's defaults. The footer always returns to its
+default text on the next keystroke.

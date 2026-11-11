@@ -120,8 +120,12 @@ try:
     assert b"Favorites" in screen, "favorites sidebar was not rendered"
     assert b"hello.txt" in screen, "directory listing was not rendered"
 
-    # Copy the cursor entry (hello.txt) to the other panel.
+    # Copy the cursor entry (hello.txt) to the other panel. Copy now asks for
+    # confirmation, so Enter follows the key.
     send(b"c")
+    screen = plain(drain(0.3))
+    assert b"Confirm copy" in screen, "copy confirmation was not shown"
+    send(b"\r")
     deadline = time.time() + 5
     copied = os.path.join(right, "hello.txt")
     while time.time() < deadline and not os.path.exists(copied):
@@ -134,6 +138,9 @@ try:
     # Move the second entry to the other panel.
     send(b"j")  # cursor: hello.txt -> move-me.txt
     send(b"m")
+    screen = plain(drain(0.3))
+    assert b"Confirm move" in screen, "move confirmation was not shown"
+    send(b"\r")
     moved = os.path.join(right, "move-me.txt")
     deadline = time.time() + 5
     while time.time() < deadline and not os.path.exists(moved):
@@ -143,6 +150,12 @@ try:
     with open(moved) as f:
         assert f.read() == "move me"
     drain(0.5)  # let the UI consume JobMsg::Done
+
+    # Escape cancels a pending copy.
+    send(b"c")
+    send(b"\x1b")
+    screen = drain(0.3)
+    assert b"cancelled" in screen.lower(), "copy was not cancelled"
 
     # Ctrl+H reveals hidden files; the same key hides them again.
     send(b"\x08")

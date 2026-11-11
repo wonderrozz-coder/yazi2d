@@ -20,7 +20,7 @@ filesystems, a GUI, sixel/Kitty image protocols.
 
 ## Current status (2026-11-11)
 
-Version `0.4.1` — MVP + quick view, thumbnails, background loading, logging,
+Version `0.5.0` — MVP + quick view, thumbnails, background loading, logging,
 sorting, type colours, bulk rename, trackpad gestures, a live footer, and a
 polished thumbnail grid with a separate extension column.
 
@@ -46,7 +46,8 @@ polished thumbnail grid with a separate extension column.
 - [x] Block-art icons per file group in the thumbnail grid.
 - [x] Settings menu: rebindable keys, trackpad inversion.
 - [x] Modifier footer incl. Command, `Ctrl+F` sidebar toggle, Shift/Cmd arrows.
-- [x] 83 unit tests + a real-PTY end-to-end test, all green.
+- [x] Copy/move confirmation, Alt-based cross-panel keys, footer recovery.
+- [x] 88 unit tests + a real-PTY end-to-end test, all green.
 - [x] `cargo fmt`, `cargo clippy -D warnings`, release build (≈2 MB binary).
 
 Known limitations and the next steps are in `docs/STATUS.md` and
@@ -212,8 +213,9 @@ Chord: `F9` arms a leader; the next arrow opens the cursor folder in that
 panel (`←`/`→`) or toggles thumbnails (`↑`/`↓`). `Esc` or an unrelated key
 cancels it. This is the fallback for terminals that swallow Ctrl/Alt+arrow.
 
-Cross-panel: `Shift+←/→` opens the cursor folder in that panel,
-`Cmd+←/→` previews there, `Ctrl+←/→` and `Alt+←/→` remain as aliases.
+Cross-panel: `Alt+←/→` opens the cursor folder in that panel; `Alt+b`/`Alt+f`
+do the same because Ghostty and iTerm2 encode Alt+arrow as `ESC b`/`ESC f`.
+`Shift+←/→` duplicates it, `Ctrl+←/→` previews there.
 `Ctrl+F` only shows/hides the sidebar; focus is `§`/`Shift+Tab`/`Ctrl+D`.
 
 Settings: `Ctrl+E` opens the settings menu (`i` trackpad inversion, arrows +

@@ -1370,6 +1370,10 @@ fn draw_prompt(frame: &mut Frame, area: Rect, prompt: &Prompt) {
         Prompt::Rename { .. } => (" Rename ", 62, 3),
         Prompt::BulkRename { .. } => (" Bulk rename ", 72, 5),
         Prompt::Delete { .. } => (" Confirm delete ", 64, 5),
+        Prompt::Transfer { kind, .. } => match kind {
+            crate::transfer::JobKind::Copy => (" Confirm copy ", 68, 6),
+            _ => (" Confirm move ", 68, 6),
+        },
     };
 
     let width = preferred_width.min(area.width.saturating_sub(2));
@@ -1425,6 +1429,27 @@ fn draw_prompt(frame: &mut Frame, area: Rect, prompt: &Prompt) {
 
             let x = inner.x + 2 + buffer.width() as u16;
             frame.set_cursor_position((x.min(inner.right().saturating_sub(1)), inner.y));
+        }
+        Prompt::Transfer {
+            kind,
+            sources,
+            dest,
+        } => {
+            let verb = match kind {
+                crate::transfer::JobKind::Copy => "Copy",
+                _ => "Move",
+            };
+            let text = format!(
+                "{verb} {} item(s) to:\n{}\n\nPress Enter or y to confirm, n/Esc to cancel.",
+                sources.len(),
+                dest.display()
+            );
+            frame.render_widget(
+                Paragraph::new(text)
+                    .style(Style::default().fg(Color::Gray))
+                    .wrap(Wrap { trim: true }),
+                inner,
+            );
         }
         Prompt::Delete { sources } => {
             let text = format!(

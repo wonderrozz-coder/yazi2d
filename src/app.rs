@@ -40,6 +40,12 @@ pub enum Prompt {
         buffer: String,
         sources: Vec<PathBuf>,
     },
+    /// Copy/move confirmation: source count, destination, direction.
+    Transfer {
+        kind: JobKind,
+        sources: Vec<PathBuf>,
+        dest: PathBuf,
+    },
 }
 
 pub struct App {
@@ -411,10 +417,22 @@ impl App {
             return;
         }
 
-        // Remember which modifiers are held so the footer can show only the
-        // chords that are reachable right now.
-        if key.modifiers != self.held_modifiers && !self.held_modifiers.contains(key.modifiers) {
+        // A real key press reports exactly which modifiers are down, so trust
+        // it even when it clears bits: this is the recovery path for terminals
+        // that never send modifier releases. Without it the footer can stay
+        // stuck on "Ctrl · …" after the chord was used.
+        if !self.held_keys.is_empty() {
+            // The physical-key tracking is authoritative while it has entries.
             self.held_modifiers = key.modifiers;
+        } else if key.modifiers.is_empty() || !self.held_modifiers.contains(key.modifiers) {
+            self.held_modifiers = key.modifiers;
+        }
+
+        // Safety net: a press with no modifiers means nothing is held. This
+        // unsticks the footer when a terminal loses a release event.
+        if key.modifiers.is_empty() {
+            self.held_modifiers = KeyModifiers::NONE;
+            self.held_keys.clear();
         }
 
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
@@ -613,39 +631,21 @@ impl App {
         // Shift+←/→ opens the cursor folder in that panel; Command (Super)+←/→
         // opens the quick preview there. Both are offered because terminals
         // disagree about which modifier they deliver.
-        let shift_arrow = key.modifiers.contains(KeyModifiers::SHIFT)
-            && !key
-                .modifiers
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
-        let cmd_arrow = super_modifier(key.modifiers);
-
-        if shift_arrow || cmd_arrow {
-            match key.code {
-                KeyCode::Left | KeyCode::Right => {
-                    let target = usize::from(key.code == KeyCode::Right);
-                    if cmd_arrow {
-                        self.preview_panel(target);
-                    } else {
-                        self.open_entry_in_panel(target);
-                    }
-                    return;
-                }
-                _ => {}
+        // Cross-panel actions, in order of reliability:
+        //   Alt+←/→   open the cursor folder in that panel (primary)
+        //   Alt+b/f   the same, because Ghostty encodes Alt+←/→ as ESC b / ESC f
+        //   Shift+←→  same again, for terminals where Alt is swallowed
+        //   Cmd/Super+←→  quick preview there
+        //   Ctrl+←→   preview there (often bound by the OS)
+        if let Some(target) = cross_panel_target(key) {
+            let preview =
+                super_modifier(key.modifiers) || key.modifiers.contains(KeyModifiers::CONTROL);
+            if preview {
+                self.preview_panel(target);
+            } else {
+                self.open_entry_in_panel(target);
             }
-        }
-
-        if key.modifiers.contains(KeyModifiers::ALT) {
-            match key.code {
-                KeyCode::Left => {
-                    self.open_entry_in_panel(0);
-                    return;
-                }
-                KeyCode::Right => {
-                    self.open_entry_in_panel(1);
-                    return;
-                }
-                _ => {}
-            }
+            return;
         }
 
         match self.focus {
@@ -1130,6 +1130,27 @@ impl App {
     }
 
     fn handle_prompt_key(&mut self, key: KeyEvent) {
+        if matches!(self.prompt, Some(Prompt::Transfer { .. })) {
+            match key.code {
+                KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    if let Some(Prompt::Transfer {
+                        kind,
+                        sources,
+                        dest,
+                    }) = self.prompt.take()
+                    {
+                        self.do_transfer(kind, sources, dest);
+                    }
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.prompt = None;
+                    self.status = "Transfer cancelled".to_string();
+                }
+                _ => {}
+            }
+            return;
+        }
+
         if matches!(self.prompt, Some(Prompt::Delete { .. })) {
             match key.code {
                 KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
@@ -1258,6 +1279,22 @@ impl App {
             return;
         }
 
+        // Copy/move are destructive enough to deserve a confirmation, like
+        // delete. `do_transfer` performs the job after the user agrees.
+        self.prompt = Some(Prompt::Transfer {
+            kind,
+            sources,
+            dest,
+        });
+        self.status = format!(
+            "{} {} item(s)? Enter or y confirms, n/Esc cancels",
+            kind.verb(),
+            self.active().selection_or_current().len()
+        );
+    }
+
+    /// Start the transfer after confirmation.
+    fn do_transfer(&mut self, kind: JobKind, sources: Vec<PathBuf>, dest: PathBuf) {
         let count = sources.len();
         self.job = Some(transfer::spawn(kind, sources, Some(dest.clone())));
         self.status = format!("{} {} item(s) to {}...", kind.verb(), count, dest.display());
@@ -1747,6 +1784,36 @@ impl App {
     }
 }
 
+/// Which panel a cross-panel key targets, if any.
+///
+/// Returns `Some(0)` for "the left panel" and `Some(1)` for "the right panel".
+/// Both the arrow keys and the `b`/`f` letters are accepted: terminals that
+/// implement readline-style Alt bindings (Ghostty and iTerm2 by default) turn
+/// `Alt+←` into `ESC b` and `Alt+→` into `ESC f`, so the app never sees an
+/// arrow at all.
+fn cross_panel_target(key: KeyEvent) -> Option<usize> {
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT)
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+    let preview_modifier =
+        super_modifier(key.modifiers) || key.modifiers.contains(KeyModifiers::CONTROL);
+
+    if !(alt || shift || preview_modifier) {
+        return None;
+    }
+
+    match key.code {
+        KeyCode::Left => Some(0),
+        KeyCode::Right => Some(1),
+        // Ghostty/iTerm2 "natural text editing" sends these instead of arrows.
+        KeyCode::Char('b') if alt => Some(0),
+        KeyCode::Char('f') if alt => Some(1),
+        _ => None,
+    }
+}
+
 /// Key modifier bits produced by a physical modifier key.
 fn bit_of(modifier: ModifierKeyCode) -> KeyModifiers {
     match modifier {
@@ -2024,6 +2091,120 @@ mod tests {
         assert_eq!(app.panels[0].current_entry().unwrap().name, "b.txt");
         app.on_scroll(1);
         assert_eq!(app.panels[0].current_entry().unwrap().name, "a.txt");
+    }
+
+    #[test]
+    fn copy_asks_for_confirmation_before_starting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let left = tmp.path().join("left");
+        let right = tmp.path().join("right");
+        fs::create_dir_all(&left).unwrap();
+        fs::create_dir_all(&right).unwrap();
+        fs::write(left.join("a.txt"), "x").unwrap();
+
+        let mut app = app_for(&left, &right);
+        app.panels[0].select_name("a.txt");
+        press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE);
+
+        assert!(matches!(app.prompt, Some(Prompt::Transfer { .. })));
+        assert!(app.job.is_none(), "job must not start before confirmation");
+        assert!(!right.join("a.txt").exists());
+
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.prompt.is_none());
+        assert!(!right.join("a.txt").exists(), "cancel must copy nothing");
+    }
+
+    #[test]
+    fn confirming_copy_starts_the_job() {
+        let tmp = tempfile::tempdir().unwrap();
+        let left = tmp.path().join("left");
+        let right = tmp.path().join("right");
+        fs::create_dir_all(&left).unwrap();
+        fs::create_dir_all(&right).unwrap();
+        fs::write(left.join("a.txt"), "content").unwrap();
+
+        let mut app = app_for(&left, &right);
+        app.panels[0].select_name("a.txt");
+        press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+        assert!(app.job.is_some(), "Enter must start the copy");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && !right.join("a.txt").exists() {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(fs::read_to_string(right.join("a.txt")).unwrap(), "content");
+    }
+
+    #[test]
+    fn move_can_be_cancelled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let left = tmp.path().join("left");
+        let right = tmp.path().join("right");
+        fs::create_dir_all(&left).unwrap();
+        fs::create_dir_all(&right).unwrap();
+        fs::write(left.join("a.txt"), "x").unwrap();
+
+        let mut app = app_for(&left, &right);
+        app.panels[0].select_name("a.txt");
+        press(&mut app, KeyCode::Char('m'), KeyModifiers::NONE);
+        assert!(matches!(app.prompt, Some(Prompt::Transfer { .. })));
+        press(&mut app, KeyCode::Char('n'), KeyModifiers::NONE);
+
+        assert!(left.join("a.txt").exists(), "cancel must keep the source");
+        assert!(!right.join("a.txt").exists());
+    }
+
+    #[test]
+    fn alt_arrow_and_terminal_alt_letters_both_open_the_neighbour() {
+        let tmp = tempfile::tempdir().unwrap();
+        let left = tmp.path().join("left");
+        let right = tmp.path().join("right");
+        let one = left.join("one");
+        let two = left.join("two");
+        fs::create_dir_all(&one).unwrap();
+        fs::create_dir_all(&two).unwrap();
+        fs::create_dir_all(&right).unwrap();
+
+        let mut app = app_for(&left, &right);
+        app.panels[0].select_name("one");
+        press(&mut app, KeyCode::Right, KeyModifiers::ALT);
+        wait_for_loads(&mut app);
+        assert_eq!(app.panels[1].cwd, one);
+
+        // Ghostty encodes Alt+Right as ESC f, which arrives as Alt+f.
+        app.active = 0;
+        app.panels[0].select_name("two");
+        press(&mut app, KeyCode::Char('f'), KeyModifiers::ALT);
+        wait_for_loads(&mut app);
+        assert_eq!(app.panels[1].cwd, two);
+
+        // ...and Alt+Left as ESC b, which targets the left panel. The right
+        // panel currently sits in `two`, so its `..` row must open there.
+        app.active = 1;
+        app.panels[1].select_name("..");
+        press(&mut app, KeyCode::Char('b'), KeyModifiers::ALT);
+        wait_for_loads(&mut app);
+        assert_eq!(app.panels[0].cwd, left);
+    }
+
+    #[test]
+    fn the_footer_modifier_state_clears_when_a_plain_key_arrives() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+
+        press(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL);
+        assert!(app.held_modifiers.contains(KeyModifiers::CONTROL));
+
+        // A terminal that loses the release still recovers on the next key.
+        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert!(
+            app.held_modifiers.is_empty(),
+            "footer stayed stuck on Ctrl: {:?}",
+            app.held_modifiers
+        );
     }
 
     #[test]
