@@ -1,0 +1,25 @@
+[package]
+name = "yazi2d"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "Yazi2D — a fast dual-pane terminal file manager inspired by Yazi and Total Commander"
+license = "MIT"
+repository = "https://example.invalid/yazi2d"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+crossterm = "0.28"
+dirs = "5"
+ratatui = "0.29"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+unicode-width = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true
