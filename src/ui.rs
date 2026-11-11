@@ -134,6 +134,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.theme_menu {
         draw_theme_menu(frame, area, &app.colors);
     }
+    if app.settings_menu {
+        draw_settings_menu(frame, area, app);
+    }
     if let Some(prompt) = &app.prompt {
         draw_prompt(frame, area, prompt);
     }
@@ -499,43 +502,39 @@ fn draw_folder_grid(
         };
         let color = colors.color(FileGroup::classify(&child.path, child.is_dir));
 
-        if child.is_image && tile.width > 2 && tile.height > 3 {
-            let image_area = Rect {
-                x: tile.x + 1,
-                y: tile.y,
-                width: tile.width.saturating_sub(2),
-                height: tile.height.saturating_sub(2),
-            };
-            match image_cache.render(&child.path, image_area.width, image_area.height) {
-                Some(image) => render_halfblocks(frame, &image, image_area),
-                None => render_message(frame, image_area, "…"),
-            }
-        } else {
-            let label = if child.is_dir { "▸" } else { "·" };
-            let icon_area = Rect {
-                x: tile.x,
-                y: tile.y,
-                width: tile.width,
-                height: tile.height.saturating_sub(2),
-            };
-            frame.render_widget(
-                Paragraph::new(label)
-                    .alignment(Alignment::Center)
-                    .style(Style::default().fg(color)),
-                center_vertically(icon_area, 1),
-            );
-        }
-
+        // Same layout as the Ctrl+T grid: image thumbnail, or a block icon for
+        // the file group, then the name.
+        let body = Rect {
+            x: tile.x + 1,
+            y: tile.y,
+            width: tile.width.saturating_sub(2),
+            height: tile.height.saturating_sub(2),
+        };
         let name_area = Rect {
             x: tile.x,
             y: tile.y + tile.height.saturating_sub(1),
             width: tile.width,
             height: 1,
         };
+
+        if body.width > 0 && body.height > 0 {
+            if child.is_dir {
+                draw_group_icon(frame, body, FileGroup::Directory, color, TILE_BG);
+            } else if child.is_image && body.width > 2 {
+                match image_cache.render(&child.path, body.width, body.height) {
+                    Some(image) => render_halfblocks(frame, &image, body),
+                    None => render_message(frame, body, "…"),
+                }
+            } else {
+                let group = FileGroup::classify(&child.path, false);
+                draw_group_icon(frame, body, group, color, TILE_BG);
+            }
+        }
+
         frame.render_widget(
             Paragraph::new(truncate_right(&child.name, name_area.width as usize))
                 .alignment(Alignment::Center)
-                .style(Style::default().fg(color)),
+                .style(Style::default().fg(color).bg(TILE_BG)),
             name_area,
         );
     }
@@ -1056,7 +1055,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             " Yazi2D · operation in progress — navigation stays available"
         }
         Focus::Panels => {
-            " Yazi2D · Tab switch · § favs · Shift+Tab favs · Ctrl+Q/Ctrl+P preview · Ctrl+T thumbs · Ctrl+O open there · s sort · Ctrl+A all · F5/c copy · F6/m move · F8/d delete · ? help · q quit"
+            " Yazi2D · Tab switch · § favs · Ctrl+E settings · Ctrl+Q/Ctrl+P preview · Ctrl+T thumbs · Ctrl+O open there · s sort · Ctrl+A all · F5/c copy · F6/m move · F8/d delete · ? help · q quit"
         }
     };
 
@@ -1117,6 +1116,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         Line::from(Span::styled("SORT & COLOURS", header)),
         help_line("  s / Ctrl+S", "sort menu (name/size/type/date)", key),
         help_line("  Ctrl+K", "colour menu for file types", key),
+        help_line("  Ctrl+E", "settings: keys and trackpad", key),
         Line::from(Span::styled("VIEW & CROSS-PANEL", header)),
         help_line("  Ctrl+Q / Ctrl+P", "quick preview in the OTHER panel", key),
         help_line("  Ctrl+T", "thumbnail grid in the active panel", key),
@@ -1271,6 +1271,76 @@ fn draw_menu_overlay(frame: &mut Frame, area: Rect, title: &str, width: u16, lin
         .style(Style::default().bg(Color::Rgb(18, 18, 24)));
 
     frame.render_widget(Paragraph::new(lines).block(block), rect);
+}
+
+/// Settings overlay: trackpad direction plus every rebindable action.
+fn draw_settings_menu(frame: &mut Frame, area: Rect, app: &crate::app::App) {
+    let header = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let key = Style::default().fg(Color::LightYellow);
+    let custom = Style::default().fg(Color::LightGreen);
+    let muted = Style::default().fg(Color::DarkGray);
+
+    let mut lines = vec![
+        Line::from(Span::styled("TRACKPAD", header)),
+        Line::from(vec![
+            Span::styled("  i  ", key),
+            Span::styled(
+                if app.settings.invert_scroll {
+                    "inverted (drag the list)  ●"
+                } else {
+                    "normal (scroll moves the cursor)"
+                },
+                Style::default().fg(Color::Gray),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("KEY BINDINGS", header)),
+    ];
+
+    for (index, action) in crate::settings::Action::ALL.iter().enumerate() {
+        let selected = index == app.settings_cursor;
+        let marker = if selected { "▶" } else { " " };
+        let keys = app.settings.keys_label(*action);
+        let keys_style = if app.settings.is_custom(*action) {
+            custom
+        } else {
+            key
+        };
+
+        let label_style = if selected {
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {marker} "), Style::default().fg(Color::Cyan)),
+            Span::styled(format!("{:<24}", action.label()), label_style),
+            Span::styled(format!("{keys:<16}"), keys_style),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    if app.rebinding {
+        lines.push(Line::from(Span::styled(
+            "  Press the new key combination…  Esc cancels",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+    } else {
+        lines.push(help_line(
+            "  Enter · r · i · Esc",
+            "rebind · reset · invert trackpad · close",
+            muted,
+        ));
+    }
+
+    draw_menu_overlay(frame, area, " Settings ", 62, lines);
 }
 
 fn draw_prompt(frame: &mut Frame, area: Rect, prompt: &Prompt) {

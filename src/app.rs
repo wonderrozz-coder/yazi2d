@@ -10,6 +10,7 @@ use crate::favorites::Favorites;
 use crate::logging;
 use crate::panel::{LoadKind, LoadResult, Panel, PanelMode, SortKey, StatsUpdate};
 use crate::preview::{ImageCache, PreviewCache};
+use crate::settings::{Action, KeySpec, Settings};
 use crate::transfer::{self, Job, JobKind, JobMsg};
 
 /// How long `F9` waits for an arrow before the chord is abandoned.
@@ -58,6 +59,14 @@ pub struct App {
     pub stat_jobs: [Option<Receiver<StatsUpdate>>; 2],
     /// Sort menu overlay.
     pub sort_menu: bool,
+    /// Settings menu overlay.
+    pub settings_menu: bool,
+    /// Row selected in the settings menu.
+    pub settings_cursor: usize,
+    /// True while the settings menu waits for a key to bind.
+    pub rebinding: bool,
+    /// User settings: bindings and trackpad direction.
+    pub settings: Settings,
     /// Colour-theme menu overlay.
     pub theme_menu: bool,
     /// File-type colour palette.
@@ -143,6 +152,10 @@ impl App {
             loads: [None, None],
             stat_jobs: [None, None],
             sort_menu: false,
+            settings_menu: false,
+            settings_cursor: 0,
+            rebinding: false,
+            settings: Settings::load(),
             theme_menu: false,
             colors: Colors::new(),
             preview_cache: PreviewCache::new(),
@@ -453,8 +466,21 @@ impl App {
             return;
         }
 
+        if self.settings_menu {
+            self.handle_settings_key(key);
+            return;
+        }
+
         if key.code == KeyCode::Char('q') && !key.modifiers.contains(KeyModifiers::CONTROL) {
             self.should_quit = true;
+            return;
+        }
+
+        // A user override wins over the built-in handling below. Only actions
+        // that were explicitly rebound are consulted, so defaults keep their
+        // context-sensitive behaviour.
+        if let Some(action) = self.custom_binding(key) {
+            self.dispatch_action(action);
             return;
         }
 
@@ -591,6 +617,10 @@ impl App {
                     self.status = "Colour themes: 1 default · 2 vivid · 3 mono · Esc".into();
                     return;
                 }
+                KeyCode::Char('e') => {
+                    self.open_settings();
+                    return;
+                }
                 KeyCode::Char('g') => {
                     self.begin_bulk_rename();
                     return;
@@ -699,12 +729,26 @@ impl App {
     /// inverted here: swiping up moves the cursor down, like dragging the list.
     pub fn on_scroll(&mut self, delta: i32) {
         self.dirty = true;
-        if self.help || self.prompt.is_some() || self.sort_menu || self.theme_menu {
+        if self.help
+            || self.prompt.is_some()
+            || self.sort_menu
+            || self.theme_menu
+            || self.settings_menu
+        {
             return;
         }
 
-        let delta = -delta;
+        // Inverted (default) drags the list with the fingers, which feels
+        // natural on a trackpad; the settings menu can flip this.
+        let delta = if self.settings.invert_scroll {
+            -delta
+        } else {
+            delta
+        };
+        self.apply_scroll(delta);
+    }
 
+    fn apply_scroll(&mut self, delta: i32) {
         if self.focus == Focus::Favorites {
             let count = self.favorites.paths.len();
             if count == 0 {
@@ -898,6 +942,118 @@ impl App {
                 self.status.clear();
             }
             _ => {}
+        }
+    }
+
+    /// Only user-overridden bindings are matched here.
+    fn custom_binding(&self, key: KeyEvent) -> Option<Action> {
+        Action::ALL.into_iter().find(|action| {
+            self.settings.is_custom(*action)
+                && self
+                    .settings
+                    .keys_for(*action)
+                    .iter()
+                    .any(|spec| spec.matches(key))
+        })
+    }
+
+    /// Run an action chosen from a custom binding.
+    fn dispatch_action(&mut self, action: Action) {
+        match action {
+            Action::Quit => self.should_quit = true,
+            Action::Help => self.help = true,
+            Action::Settings => self.open_settings(),
+            Action::Copy => self.start_transfer(JobKind::Copy),
+            Action::Move => self.start_transfer(JobKind::Move),
+            Action::Mkdir => self.begin_mkdir(),
+            Action::Rename => self.begin_rename(),
+            Action::Delete => self.begin_delete(),
+            Action::SelectAll => {
+                let count = self.active_mut().select_all();
+                self.status = format!("Selected {count} item(s)");
+            }
+            Action::BulkRename => self.begin_bulk_rename(),
+            Action::ToggleHidden => self.toggle_hidden(),
+            Action::Refresh => {
+                self.reload_panel_async(0);
+                self.reload_panel_async(1);
+            }
+            Action::SortMenu => self.sort_menu = true,
+            Action::ColourMenu => self.theme_menu = true,
+            Action::TogglePreview => self.toggle_preview(),
+            Action::ToggleThumbnails => self.toggle_thumbnails(),
+            Action::OpenInOther => self.open_entry_in_panel(1 - self.active),
+            Action::AddFavorite => self.add_favorite(),
+            Action::FocusFavorites => self.toggle_favorites_focus(),
+        }
+    }
+
+    fn open_settings(&mut self) {
+        self.settings_menu = true;
+        self.settings_cursor = 0;
+        self.rebinding = false;
+        self.status = "Settings: ↑↓ move · Enter rebind · r reset · i invert trackpad · Esc close"
+            .to_string();
+    }
+
+    fn handle_settings_key(&mut self, key: KeyEvent) {
+        // Rebinding swallows the next key, whatever it is.
+        if self.rebinding {
+            if key.code == KeyCode::Esc {
+                self.rebinding = false;
+                self.status = "Rebind cancelled".to_string();
+                return;
+            }
+            let action = Action::ALL[self.settings_cursor.min(Action::ALL.len() - 1)];
+            let spec = KeySpec::from_event(key);
+            self.settings.rebind(action, spec);
+            self.persist_settings();
+            self.rebinding = false;
+            self.status = format!("{} is now {}", action.label(), spec.label());
+            return;
+        }
+
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.settings_cursor = self.settings_cursor.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.settings_cursor =
+                    (self.settings_cursor + 1).min(Action::ALL.len().saturating_sub(1));
+            }
+            KeyCode::Char('i') => {
+                self.settings.invert_scroll = !self.settings.invert_scroll;
+                self.persist_settings();
+                self.status = format!(
+                    "Trackpad: {}",
+                    if self.settings.invert_scroll {
+                        "inverted (drag the list)"
+                    } else {
+                        "normal (scroll moves the cursor)"
+                    }
+                );
+            }
+            KeyCode::Char('r') => {
+                let action = Action::ALL[self.settings_cursor.min(Action::ALL.len() - 1)];
+                self.settings.reset(action);
+                self.persist_settings();
+                self.status = format!("{} reset to defaults", action.label());
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                self.rebinding = true;
+                self.status = "Press the new key combination, Esc to cancel".to_string();
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.settings_menu = false;
+                self.status.clear();
+            }
+            _ => {}
+        }
+    }
+
+    fn persist_settings(&mut self) {
+        if let Err(error) = self.settings.save() {
+            self.status = format!("Could not save settings: {error}");
         }
     }
 
@@ -1578,7 +1734,11 @@ mod tests {
     use std::time::{Duration, Instant};
 
     fn app_for(left: &Path, right: &Path) -> App {
-        App::new(vec![left.to_path_buf(), right.to_path_buf()])
+        let mut app = App::new(vec![left.to_path_buf(), right.to_path_buf()]);
+        // Tests must never depend on the developer's real settings file.
+        app.settings.invert_scroll = true;
+        app.settings.bindings.clear();
+        app
     }
 
     fn press(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
@@ -1811,6 +1971,82 @@ mod tests {
         app.on_scroll(-1);
         assert_eq!(app.panels[0].current_entry().unwrap().name, "b.txt");
         app.on_scroll(1);
+        assert_eq!(app.panels[0].current_entry().unwrap().name, "a.txt");
+    }
+
+    #[test]
+    fn settings_menu_opens_and_toggles_trackpad_inversion() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+
+        press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL);
+        assert!(app.settings_menu);
+
+        let before = app.settings.invert_scroll;
+        press(&mut app, KeyCode::Char('i'), KeyModifiers::NONE);
+        assert_eq!(app.settings.invert_scroll, !before);
+
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!app.settings_menu);
+    }
+
+    #[test]
+    fn settings_menu_rebinds_an_action() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+        app.settings_menu = true;
+        app.settings_cursor = crate::settings::Action::ALL
+            .iter()
+            .position(|action| *action == crate::settings::Action::Copy)
+            .unwrap();
+
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.rebinding);
+
+        press(&mut app, KeyCode::Char('y'), KeyModifiers::CONTROL);
+        assert!(!app.rebinding);
+        assert_eq!(
+            app.settings
+                .keys_for(crate::settings::Action::Copy)
+                .first()
+                .map(|spec| spec.label()),
+            Some("ctrl+y".to_string())
+        );
+    }
+
+    #[test]
+    fn a_rebound_key_overrides_the_old_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let left = tmp.path().join("left");
+        let right = tmp.path().join("right");
+        fs::create_dir_all(&left).unwrap();
+        fs::create_dir_all(&right).unwrap();
+        fs::write(left.join("a.txt"), "x").unwrap();
+
+        let mut app = app_for(&left, &right);
+        app.settings.rebind(
+            crate::settings::Action::Delete,
+            crate::settings::KeySpec::f(9),
+        );
+        app.panels[0].select_name("a.txt");
+
+        // F9 now arms the delete prompt instead of the F9 leader chord.
+        press(&mut app, KeyCode::F(9), KeyModifiers::NONE);
+        assert!(matches!(app.prompt, Some(Prompt::Delete { .. })));
+    }
+
+    #[test]
+    fn non_inverted_scroll_follows_the_finger_direction() {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            fs::write(tmp.path().join(name), "x").unwrap();
+        }
+        let mut app = app_for(tmp.path(), tmp.path());
+        app.settings.invert_scroll = false;
+        app.panels[0].select_name("b.txt");
+
+        // ScrollUp (-1) moves up when the inversion is off.
+        app.on_scroll(-1);
         assert_eq!(app.panels[0].current_entry().unwrap().name, "a.txt");
     }
 

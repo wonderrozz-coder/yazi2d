@@ -20,7 +20,7 @@ filesystems, a GUI, sixel/Kitty image protocols.
 
 ## Current status (2026-11-11)
 
-Version `0.3.9` — MVP + quick view, thumbnails, background loading, logging,
+Version `0.4.0` — MVP + quick view, thumbnails, background loading, logging,
 sorting, type colours, bulk rename, trackpad gestures, a live footer, and a
 polished thumbnail grid with a separate extension column.
 
@@ -44,7 +44,8 @@ polished thumbnail grid with a separate extension column.
 - [x] Key repeat and debounced trackpad swipes.
 - [x] Layout-independent shortcuts (`src/keys.rs`), `Enter` opens files.
 - [x] Block-art icons per file group in the thumbnail grid.
-- [x] 69 unit tests + a real-PTY end-to-end test, all green.
+- [x] Settings menu: rebindable keys, trackpad inversion.
+- [x] 79 unit tests + a real-PTY end-to-end test, all green.
 - [x] `cargo fmt`, `cargo clippy -D warnings`, release build (≈2 MB binary).
 
 Known limitations and the next steps are in `docs/STATUS.md` and
@@ -88,6 +89,7 @@ src/preview.rs             async preview/image caches, image resampling
 src/colors.rs              file-type groups, colour presets, persisted theme
 src/keys.rs                Cyrillic→Latin key mapping so shortcuts ignore layout
 src/icons.rs               block-art icons per FileGroup for the thumbnail grid
+src/settings.rs            key bindings + trackpad settings, persisted TOML
 src/logging.rs             append-only file log (timings, slow loads, panics)
 src/transfer.rs            background copy/move/delete engine + progress channel
 src/favorites.rs           favorites model and TOML persistence
@@ -208,6 +210,10 @@ Favorites focus: arrows/`jk`, `Enter` navigate, `Del`/`d` remove,
 Chord: `F9` arms a leader; the next arrow opens the cursor folder in that
 panel (`←`/`→`) or toggles thumbnails (`↑`/`↓`). `Esc` or an unrelated key
 cancels it. This is the fallback for terminals that swallow Ctrl/Alt+arrow.
+
+Settings: `Ctrl+E` opens the settings menu (`i` trackpad inversion, arrows +
+`Enter` to rebind, `r` to reset). Bindings live in `settings.toml` and only
+override the defaults when explicitly customised.
 
 Selection & tools: `Ctrl+A` selects all, `Ctrl+G` bulk rename (`{name}`,
 `{ext}`, `{n}`, `%e=ext`), `s`/`Ctrl+S` sort menu, `Ctrl+K` colour menu.

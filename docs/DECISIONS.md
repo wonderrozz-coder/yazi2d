@@ -567,3 +567,33 @@ of the tile as a black hole — the user described them as "black spots".
 **Consequences:** Every tile is visually distinct without decoding anything, so
 the grid is fast even for folders full of archives and models. Icon shapes are
 ASCII/box-drawing only, which any monospace font renders consistently.
+
+## ADR-030 — Settings menu with rebindable keys and trackpad inversion
+
+**Status:** accepted (2026-11-11, `0.4.0`)
+
+**Context:** Bindings were hard-coded, the trackpad direction was not adjustable,
+and the folder preview (`Ctrl+Q`) still drew a single `·` for non-image entries
+while the `Ctrl+T` grid already had block icons.
+
+**Decision:**
+
+1. `Ctrl+Q` folder tiles call `draw_group_icon`, the same helper the thumbnail
+   grid uses, so both views agree.
+2. `src/settings.rs` introduces `Action` (19 rebindable commands) and `KeySpec`
+   (code + modifiers with `label()`/`parse()`), stored in
+   `$YAZI2D_CONFIG_DIR/settings.toml` as `key.<action> = "<spec>"` plus
+   `invert_scroll`. A small flat `key = value` parser avoids a TOML dependency
+   for a file that only ever holds scalars.
+3. An override *replaces* all default keys for that action. `App::on_key`
+   consults overrides before the built-in match, so defaults keep their
+   context-sensitive handling while custom bindings win outright.
+4. An override is matched against the event, so the settings menu needs no
+   lookup table inside every handler.
+5. `App::on_scroll` applies `settings.invert_scroll` before moving, and the menu
+   writes the setting back to disk immediately.
+
+**Consequences:** Users can fix conflicts without editing source, and the
+trackpad direction is personal. Rebound keys are matched greedily, so binding a
+plain letter steals that letter from list navigation — the menu shows the
+current binding in green to make that visible.

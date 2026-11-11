@@ -6,6 +6,7 @@ mod keys;
 mod logging;
 mod panel;
 mod preview;
+mod settings;
 mod transfer;
 mod ui;
 
@@ -198,7 +199,8 @@ fn print_help() {
          \x20 Ctrl+A          select everything\n\
          \x20 Ctrl+G          bulk rename ({{name}} {{ext}} {{n}} or %e=ext)\n\
          \x20 s / Ctrl+S      sort menu (name/size/type/date, r reverse)\n\
-         \x20 Ctrl+K          colour menu for file types\n\
+         \x20 Ctrl+K          colour menu for file types\n
+\x20 Ctrl+E          settings: key bindings and trackpad\n\
          \x20 F9 + Left/Right open cursor folder in that panel\n\
          \x20 F9 + Up/Down    thumbnail grid on / off\n\
          \x20 Ctrl+Q / Ctrl+P quick preview in the OTHER panel\n\
