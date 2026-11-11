@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{Local, TimeZone};
-use crossterm::event::KeyModifiers;
 use image::RgbImage;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -1034,33 +1033,55 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+/// Modifier-specific hints shown while the key is held.
+///
+/// Only combinations that actually exist are listed, so the footer never
+/// promises a chord the app does not implement.
+fn modifier_hint(modifiers: crossterm::event::KeyModifiers) -> Option<&'static str> {
+    use crossterm::event::KeyModifiers as M;
+
+    if modifiers.intersects(M::SUPER | M::META) {
+        return Some(" Command · ← / → quick preview in that panel");
+    }
+    if modifiers.contains(M::CONTROL) {
+        return Some(
+            " Ctrl · B add fav · D focus favs · F show/hide favs · Q/P preview other · T thumbs \
+             · O open there · A all · G rename · K colours · S sort · R refresh · H hidden · E settings",
+        );
+    }
+    if modifiers.contains(M::ALT) {
+        return Some(" Option · ← / → open the cursor folder in that panel");
+    }
+    if modifiers.contains(M::SHIFT) {
+        return Some(" Shift · ← / → open the cursor folder in that panel · Tab focus favorites");
+    }
+    None
+}
+
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let text = match app.focus {
-        _ if app.held_modifiers.contains(KeyModifiers::CONTROL) => {
-            " Ctrl · B favorites add · D focus favorites · F toggle favorites · Q/P preview other · T thumbs · O open there · A select all · G bulk rename · K colours · S sort · R refresh · H hidden · C quit"
-        }
-        _ if app.held_modifiers.contains(KeyModifiers::ALT) => {
-            " Alt · ← / → open the cursor folder in that panel"
-        }
-        _ if app.leader.is_some() => {
-            " F9 + ←/→ open the cursor folder there · F9 + ↑/↓ thumbnails · Esc cancels"
-        }
-        _ if app.held_modifiers.contains(KeyModifiers::SHIFT) => {
-            " Shift · Tab focus favorites · Home/End jump · (arrows and letters work as usual)"
-        }
-        Focus::Favorites => {
-            " Yazi2D · Favorites: ↑↓/jk move · Enter open · Del remove · Ctrl+B add · §/Shift+Tab/Ctrl+D panels · ? help · q quit"
-        }
-        Focus::Panels if app.job.is_some() => {
-            " Yazi2D · operation in progress — navigation stays available"
-        }
-        Focus::Panels => {
-            " Yazi2D · Tab switch · § favs · Ctrl+E settings · Ctrl+Q/Ctrl+P preview · Ctrl+T thumbs · Ctrl+O open there · s sort · Ctrl+A all · F5/c copy · F6/m move · F8/d delete · ? help · q quit"
+    let hint = modifier_hint(app.held_modifiers);
+
+    let text = if let Some(hint) = hint {
+        hint
+    } else {
+        match app.focus {
+            Focus::Favorites => {
+                " Yazi2D · Favorites: ↑↓/jk move · Enter open · Del remove · Ctrl+B add · §/Shift+Tab/Ctrl+D panels · ? help · q quit"
+            }
+            _ if app.leader.is_some() => {
+                " F9 + ←/→ open the cursor folder there · F9 + ↑/↓ thumbnails · Esc cancels"
+            }
+            Focus::Panels if app.job.is_some() => {
+                " Yazi2D · operation in progress — navigation stays available"
+            }
+            Focus::Panels => {
+                " Yazi2D · Tab switch · § favs · Ctrl+E settings · Ctrl+Q preview · Ctrl+T thumbs · Shift+←/→ open there · s sort · F5/c copy · F6/m move · F8/d delete · ? help"
+            }
         }
     };
 
     let text = truncate_right(text, area.width as usize);
-    let style = if app.held_modifiers.contains(KeyModifiers::CONTROL) {
+    let style = if hint.is_some() {
         Style::default()
             .bg(FOOTER_BG)
             .fg(Color::Cyan)
@@ -1124,11 +1145,11 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         help_line("  F9 + ← / F9 + →", "open cursor folder in that panel", key),
         help_line("  F9 + ↑ / F9 + ↓", "thumbnail grid on / off", key),
         help_line(
-            "  Ctrl+← / Ctrl+→",
-            "preview in that panel (may be OS-bound)",
+            "  Shift+←/→ · Alt+←/→",
+            "open cursor folder in that panel",
             key,
         ),
-        help_line("  Alt+← / Alt+→", "open cursor folder in that panel", key),
+        help_line("  Cmd+←/→ · Ctrl+←/→", "quick preview in that panel", key),
         Line::from(Span::styled("PANELS & FAVORITES", header)),
         help_line("  Tab", "switch active panel", key),
         help_line(
@@ -1137,7 +1158,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
             key,
         ),
         help_line("  Ctrl+B / a", "add current dir to favorites", key),
-        help_line("  Ctrl+F / f", "toggle favorites sidebar", key),
+        help_line("  Ctrl+F", "show / hide the favorites sidebar", key),
         help_line("  Ctrl+R", "refresh both panels", key),
         help_line("  Ctrl+H / .", "toggle hidden files", key),
         help_line("  Esc while loading", "cancel the directory load", key),

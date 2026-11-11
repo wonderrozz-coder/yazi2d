@@ -35,11 +35,13 @@ pub enum Action {
 }
 
 impl Action {
-    /// Every action, in the order shown by the key-binding screen.
-    pub const ALL: [Action; 19] = [
+    /// Every rebindable action, in the order shown by the settings screen.
+    ///
+    /// `Settings` is deliberately absent: rebinding the key that opens the
+    /// settings menu would make the menu unreachable.
+    pub const ALL: [Action; 18] = [
         Action::Quit,
         Action::Help,
-        Action::Settings,
         Action::Copy,
         Action::Move,
         Action::Mkdir,
@@ -353,8 +355,15 @@ impl Settings {
     }
 
     /// Replace every binding of an action with a single key.
-    pub fn rebind(&mut self, action: Action, spec: KeySpec) {
+    ///
+    /// Returns `false` when the combination is reserved, so the menu can
+    /// explain why nothing changed.
+    pub fn rebind(&mut self, action: Action, spec: KeySpec) -> bool {
+        if is_reserved(spec) || action == Action::Settings {
+            return false;
+        }
         self.bindings.insert(action.id().to_string(), spec);
+        true
     }
 
     /// Drop the override so the built-in keys apply again.
@@ -382,6 +391,14 @@ impl Settings {
             .collect::<Vec<_>>()
             .join(", ")
     }
+}
+
+/// Keys that the app relies on being always available.
+pub fn is_reserved(spec: KeySpec) -> bool {
+    matches!(
+        (spec.code, spec.modifiers),
+        (KeyCode::Char('e'), m) if m.contains(KeyModifiers::CONTROL)
+    ) || spec.code == KeyCode::Esc
 }
 
 fn settings_file() -> PathBuf {
@@ -472,7 +489,7 @@ mod tests {
             .iter()
             .any(|spec| *spec == KeySpec::f(5)));
 
-        settings.rebind(Action::Copy, KeySpec::ctrl('y'));
+        assert!(settings.rebind(Action::Copy, KeySpec::ctrl('y')));
         assert_eq!(settings.keys_for(Action::Copy), vec![KeySpec::ctrl('y')]);
         assert!(settings.is_custom(Action::Copy));
 

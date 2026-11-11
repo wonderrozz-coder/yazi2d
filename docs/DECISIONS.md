@@ -597,3 +597,31 @@ while the `Ctrl+T` grid already had block icons.
 trackpad direction is personal. Rebound keys are matched greedily, so binding a
 plain letter steals that letter from list navigation — the menu shows the
 current binding in green to make that visible.
+
+## ADR-031 — Command/Super support, Ctrl+F sidebar toggle, protected bindings
+
+**Status:** accepted (2026-11-11, `0.4.1`)
+
+**Context:** Four gaps surfaced in use. The footer ignored Command because the
+modifier was never added to `held_modifiers`. `Ctrl+F` moved focus into the
+sidebar instead of toggling it, so hiding required `Esc`. The settings menu
+allowed rebinding `Ctrl+E` itself, which could lock the user out. And the
+cross-panel arrows used Ctrl/Alt, both of which macOS often swallows.
+
+**Decision:**
+
+1. `bit_of(ModifierKeyCode)` maps every physical modifier to its bit, including
+   `SUPER`/`META`; `on_key` and `on_key_release` both use it, so Command works in
+   the footer and cannot get stuck.
+2. `modifier_hint` builds the footer text for Command, Ctrl, Alt and Shift; it
+   lists only chords the app implements.
+3. `Ctrl+F` calls `toggle_favorites_sidebar` (visibility only). Focus stays on
+   `§`, `Shift+Tab` and `Ctrl+D`.
+4. `Shift+←/→` opens the cursor folder in the named panel; `Cmd+←/→` (Super or
+   Meta) previews there. Ctrl/Alt arrows stay as aliases.
+5. `Action::Settings` is removed from `Action::ALL` and `is_reserved` rejects
+   `Ctrl+E` and `Esc`, so a rebind attempt reports "reserved" and changes nothing.
+
+**Consequences:** Every modifier the terminal reports drives the footer, the
+sidebar has separate visibility and focus keys, and the settings menu can never
+make itself unreachable.

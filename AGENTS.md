@@ -20,7 +20,7 @@ filesystems, a GUI, sixel/Kitty image protocols.
 
 ## Current status (2026-11-11)
 
-Version `0.4.0` — MVP + quick view, thumbnails, background loading, logging,
+Version `0.4.1` — MVP + quick view, thumbnails, background loading, logging,
 sorting, type colours, bulk rename, trackpad gestures, a live footer, and a
 polished thumbnail grid with a separate extension column.
 
@@ -45,7 +45,8 @@ polished thumbnail grid with a separate extension column.
 - [x] Layout-independent shortcuts (`src/keys.rs`), `Enter` opens files.
 - [x] Block-art icons per file group in the thumbnail grid.
 - [x] Settings menu: rebindable keys, trackpad inversion.
-- [x] 79 unit tests + a real-PTY end-to-end test, all green.
+- [x] Modifier footer incl. Command, `Ctrl+F` sidebar toggle, Shift/Cmd arrows.
+- [x] 83 unit tests + a real-PTY end-to-end test, all green.
 - [x] `cargo fmt`, `cargo clippy -D warnings`, release build (≈2 MB binary).
 
 Known limitations and the next steps are in `docs/STATUS.md` and
@@ -210,6 +211,10 @@ Favorites focus: arrows/`jk`, `Enter` navigate, `Del`/`d` remove,
 Chord: `F9` arms a leader; the next arrow opens the cursor folder in that
 panel (`←`/`→`) or toggles thumbnails (`↑`/`↓`). `Esc` or an unrelated key
 cancels it. This is the fallback for terminals that swallow Ctrl/Alt+arrow.
+
+Cross-panel: `Shift+←/→` opens the cursor folder in that panel,
+`Cmd+←/→` previews there, `Ctrl+←/→` and `Alt+←/→` remain as aliases.
+`Ctrl+F` only shows/hides the sidebar; focus is `§`/`Shift+Tab`/`Ctrl+D`.
 
 Settings: `Ctrl+E` opens the settings menu (`i` trackpad inversion, arrows +
 `Enter` to rebind, `r` to reset). Bindings live in `settings.toml` and only

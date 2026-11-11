@@ -373,23 +373,11 @@ impl App {
 
     fn release_modifier(&mut self, modifier: ModifierKeyCode) {
         let was = self.held_modifiers;
-        let bit = match modifier {
-            ModifierKeyCode::LeftControl | ModifierKeyCode::RightControl => KeyModifiers::CONTROL,
-            ModifierKeyCode::LeftAlt | ModifierKeyCode::RightAlt => KeyModifiers::ALT,
-            ModifierKeyCode::LeftShift | ModifierKeyCode::RightShift => KeyModifiers::SHIFT,
-            _ => KeyModifiers::NONE,
-        };
+        let bit = bit_of(modifier);
         // Right/left pairs share a bit, but a release of one should not clear the
         // other. Track presses per physical key to stay correct.
         self.held_keys.retain(|held| *held != modifier);
-        let still_held = self.held_keys.iter().any(|held| match held {
-            ModifierKeyCode::LeftControl | ModifierKeyCode::RightControl => {
-                bit == KeyModifiers::CONTROL
-            }
-            ModifierKeyCode::LeftAlt | ModifierKeyCode::RightAlt => bit == KeyModifiers::ALT,
-            ModifierKeyCode::LeftShift | ModifierKeyCode::RightShift => bit == KeyModifiers::SHIFT,
-            _ => false,
-        });
+        let still_held = self.held_keys.iter().any(|held| bit_of(*held) == bit);
         if bit != KeyModifiers::NONE && !still_held {
             self.held_modifiers.remove(bit);
         }
@@ -416,14 +404,7 @@ impl App {
             if !self.held_keys.contains(&modifier) {
                 self.held_keys.push(modifier);
             }
-            let bit = match modifier {
-                ModifierKeyCode::LeftControl | ModifierKeyCode::RightControl => {
-                    KeyModifiers::CONTROL
-                }
-                ModifierKeyCode::LeftAlt | ModifierKeyCode::RightAlt => KeyModifiers::ALT,
-                ModifierKeyCode::LeftShift | ModifierKeyCode::RightShift => KeyModifiers::SHIFT,
-                _ => KeyModifiers::NONE,
-            };
+            let bit = bit_of(modifier);
             if bit != KeyModifiers::NONE {
                 self.held_modifiers.insert(bit);
             }
@@ -563,7 +544,7 @@ impl App {
                     return;
                 }
                 KeyCode::Char('f') => {
-                    self.toggle_favorites_focus();
+                    self.toggle_favorites_sidebar();
                     return;
                 }
                 KeyCode::Char('d') => {
@@ -623,6 +604,30 @@ impl App {
                 }
                 KeyCode::Char('g') => {
                     self.begin_bulk_rename();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // Shift+←/→ opens the cursor folder in that panel; Command (Super)+←/→
+        // opens the quick preview there. Both are offered because terminals
+        // disagree about which modifier they deliver.
+        let shift_arrow = key.modifiers.contains(KeyModifiers::SHIFT)
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let cmd_arrow = super_modifier(key.modifiers);
+
+        if shift_arrow || cmd_arrow {
+            match key.code {
+                KeyCode::Left | KeyCode::Right => {
+                    let target = usize::from(key.code == KeyCode::Right);
+                    if cmd_arrow {
+                        self.preview_panel(target);
+                    } else {
+                        self.open_entry_in_panel(target);
+                    }
                     return;
                 }
                 _ => {}
@@ -1006,10 +1011,20 @@ impl App {
             }
             let action = Action::ALL[self.settings_cursor.min(Action::ALL.len() - 1)];
             let spec = KeySpec::from_event(key);
-            self.settings.rebind(action, spec);
-            self.persist_settings();
             self.rebinding = false;
-            self.status = format!("{} is now {}", action.label(), spec.label());
+            if crate::settings::is_reserved(spec) {
+                self.status = format!(
+                    "{} is reserved by the app and cannot be rebound",
+                    spec.label()
+                );
+                return;
+            }
+            if self.settings.rebind(action, spec) {
+                self.persist_settings();
+                self.status = format!("{} is now {}", action.label(), spec.label());
+            } else {
+                self.status = format!("Cannot rebind {}", action.label());
+            }
             return;
         }
 
@@ -1512,6 +1527,23 @@ impl App {
     }
 
     /// Ctrl+F: toggle the sidebar; when it is already focused, return to panels.
+    /// Ctrl+F: show or hide the sidebar as a whole.
+    ///
+    /// Entering keyboard focus is a separate action (`§`, `Shift+Tab`,
+    /// `Ctrl+D`), so one key controls visibility and another controls focus.
+    fn toggle_favorites_sidebar(&mut self) {
+        if self.show_favorites {
+            self.show_favorites = false;
+            if self.focus == Focus::Favorites {
+                self.focus = Focus::Panels;
+            }
+            self.status = "Favorites hidden".to_string();
+        } else {
+            self.show_favorites = true;
+            self.status = "Favorites shown".to_string();
+        }
+    }
+
     fn toggle_favorites_focus(&mut self) {
         if self.show_favorites && self.focus == Focus::Favorites {
             self.focus = Focus::Panels;
@@ -1713,6 +1745,26 @@ impl App {
             }
         }
     }
+}
+
+/// Key modifier bits produced by a physical modifier key.
+fn bit_of(modifier: ModifierKeyCode) -> KeyModifiers {
+    match modifier {
+        ModifierKeyCode::LeftControl | ModifierKeyCode::RightControl => KeyModifiers::CONTROL,
+        ModifierKeyCode::LeftAlt | ModifierKeyCode::RightAlt => KeyModifiers::ALT,
+        ModifierKeyCode::LeftShift | ModifierKeyCode::RightShift => KeyModifiers::SHIFT,
+        ModifierKeyCode::LeftSuper | ModifierKeyCode::RightSuper => KeyModifiers::SUPER,
+        ModifierKeyCode::LeftMeta | ModifierKeyCode::RightMeta => KeyModifiers::META,
+        _ => KeyModifiers::NONE,
+    }
+}
+
+/// True when the Command key (Super) is held.
+///
+/// Terminals report it as SUPER; a few report META. Both mean Command on macOS
+/// and the Windows/Super key elsewhere.
+fn super_modifier(modifiers: KeyModifiers) -> bool {
+    modifiers.intersects(KeyModifiers::SUPER | KeyModifiers::META)
 }
 
 fn pick_dir(path: Option<&PathBuf>, fallback: &Path) -> PathBuf {
@@ -1972,6 +2024,97 @@ mod tests {
         assert_eq!(app.panels[0].current_entry().unwrap().name, "b.txt");
         app.on_scroll(1);
         assert_eq!(app.panels[0].current_entry().unwrap().name, "a.txt");
+    }
+
+    #[test]
+    fn ctrl_f_shows_and_hides_the_sidebar_without_taking_focus() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+        assert!(app.show_favorites);
+
+        press(&mut app, KeyCode::Char('f'), KeyModifiers::CONTROL);
+        assert!(!app.show_favorites);
+        assert_eq!(
+            app.focus,
+            Focus::Panels,
+            "Ctrl+F must not enter the sidebar"
+        );
+
+        press(&mut app, KeyCode::Char('f'), KeyModifiers::CONTROL);
+        assert!(app.show_favorites);
+        assert_eq!(app.focus, Focus::Panels);
+    }
+
+    #[test]
+    fn shift_arrow_opens_the_cursor_folder_in_the_indicated_panel() {
+        let tmp = tempfile::tempdir().unwrap();
+        let left = tmp.path().join("left");
+        let right = tmp.path().join("right");
+        let child = left.join("child");
+        fs::create_dir_all(&child).unwrap();
+        fs::create_dir_all(&right).unwrap();
+
+        let mut app = app_for(&left, &right);
+        app.panels[0].select_name("child");
+
+        // Shift+Right from the left panel opens it on the right.
+        press(&mut app, KeyCode::Right, KeyModifiers::SHIFT);
+        wait_for_loads(&mut app);
+        assert_eq!(app.panels[1].cwd, child);
+
+        // Now the mirror case: the right panel holds the cursor, Shift+Left
+        // must open that folder in the left panel.
+        let nested = child.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        app.active = 1;
+        app.reload_panel_async(1);
+        wait_for_loads(&mut app);
+        wait_for_stats(&mut app);
+        app.panels[1].select_name("nested");
+        press(&mut app, KeyCode::Left, KeyModifiers::SHIFT);
+        wait_for_loads(&mut app);
+        assert_eq!(app.panels[0].cwd, nested);
+    }
+
+    #[test]
+    fn command_arrow_previews_in_the_indicated_panel() {
+        let tmp = tempfile::tempdir().unwrap();
+        let left = tmp.path().join("left");
+        let right = tmp.path().join("right");
+        fs::create_dir_all(&left).unwrap();
+        fs::create_dir_all(&right).unwrap();
+        fs::write(left.join("a.txt"), "x").unwrap();
+
+        let mut app = app_for(&left, &right);
+        app.panels[0].select_name("a.txt");
+
+        // Command+Right makes the right panel a viewer.
+        press(&mut app, KeyCode::Right, KeyModifiers::SUPER);
+        assert_eq!(app.panels[1].mode, PanelMode::Preview);
+        assert_eq!(app.panels[0].mode, PanelMode::List);
+
+        press(&mut app, KeyCode::Right, KeyModifiers::SUPER);
+        assert_eq!(app.panels[1].mode, PanelMode::List);
+
+        app.active = 1;
+        press(&mut app, KeyCode::Left, KeyModifiers::SUPER);
+        assert_eq!(app.panels[0].mode, PanelMode::Preview);
+    }
+
+    #[test]
+    fn settings_menu_cannot_be_rebound_and_reserved_keys_are_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+        app.settings_menu = true;
+
+        // The settings action is not offered for rebinding at all.
+        assert!(!crate::settings::Action::ALL.contains(&Action::Settings));
+
+        // Ctrl+E is reserved, so a rebind attempt leaves both intact.
+        assert!(!app.settings.rebind(Action::Copy, KeySpec::ctrl('e')));
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL);
+        assert!(app.settings_menu, "Ctrl+E must still open settings");
     }
 
     #[test]
