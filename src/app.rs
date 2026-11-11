@@ -1,8 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError};
+use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, ModifierKeyCode};
 
 use crate::colors::Colors;
 use crate::favorites::Favorites;
@@ -10,6 +11,12 @@ use crate::logging;
 use crate::panel::{LoadKind, LoadResult, Panel, PanelMode, SortKey, StatsUpdate};
 use crate::preview::{ImageCache, PreviewCache};
 use crate::transfer::{self, Job, JobKind, JobMsg};
+
+/// Two `Tab` presses within this window count as "double Tab" and open favorites.
+///
+/// Kept short: users often press `Tab` twice in a row to bounce between panels,
+/// and a long window would steal that gesture.
+const DOUBLE_TAB_WINDOW: Duration = Duration::from_millis(280);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Focus {
@@ -65,6 +72,12 @@ pub struct App {
     pub should_quit: bool,
     /// Set when the screen must be repainted. Keeps idle CPU usage near zero.
     pub dirty: bool,
+    /// Timestamp of the previous single `Tab`, for double-Tab detection.
+    pub last_tab: Option<Instant>,
+    /// Modifiers currently held down, used to show matching keys in the footer.
+    pub held_modifiers: KeyModifiers,
+    /// Physical modifier keys currently held (left/right tracked separately).
+    pub held_keys: Vec<ModifierKeyCode>,
 }
 
 impl App {
@@ -136,6 +149,9 @@ impl App {
             status,
             should_quit: false,
             dirty: true,
+            last_tab: None,
+            held_modifiers: KeyModifiers::NONE,
+            held_keys: Vec::new(),
         }
     }
 
@@ -329,8 +345,72 @@ impl App {
         self.status = "Load cancelled".to_string();
     }
 
+    /// Handle a key-release event (only delivered with keyboard enhancement).
+    ///
+    /// Pressing and releasing a bare modifier produces no `Press` event on most
+    /// terminals, so this is the only way to know when Ctrl/Alt/Shift is held.
+    pub fn on_key_release(&mut self, key: KeyEvent) {
+        if let KeyCode::Modifier(modifier) = key.code {
+            self.release_modifier(modifier);
+        }
+        // Any release means the chord that was just pressed is over.
+        self.last_tab = None;
+    }
+
+    fn release_modifier(&mut self, modifier: ModifierKeyCode) {
+        let was = self.held_modifiers;
+        let bit = match modifier {
+            ModifierKeyCode::LeftControl | ModifierKeyCode::RightControl => KeyModifiers::CONTROL,
+            ModifierKeyCode::LeftAlt | ModifierKeyCode::RightAlt => KeyModifiers::ALT,
+            ModifierKeyCode::LeftShift | ModifierKeyCode::RightShift => KeyModifiers::SHIFT,
+            _ => KeyModifiers::NONE,
+        };
+        // Right/left pairs share a bit, but a release of one should not clear the
+        // other. Track presses per physical key to stay correct.
+        self.held_keys.retain(|held| *held != modifier);
+        let still_held = self.held_keys.iter().any(|held| match held {
+            ModifierKeyCode::LeftControl | ModifierKeyCode::RightControl => {
+                bit == KeyModifiers::CONTROL
+            }
+            ModifierKeyCode::LeftAlt | ModifierKeyCode::RightAlt => bit == KeyModifiers::ALT,
+            ModifierKeyCode::LeftShift | ModifierKeyCode::RightShift => bit == KeyModifiers::SHIFT,
+            _ => false,
+        });
+        if bit != KeyModifiers::NONE && !still_held {
+            self.held_modifiers.remove(bit);
+        }
+        if self.held_modifiers != was {
+            self.dirty = true;
+        }
+    }
+
     pub fn on_key(&mut self, key: KeyEvent) {
         self.dirty = true;
+
+        // Track bare modifier presses so the footer reacts while the key is held.
+        if let KeyCode::Modifier(modifier) = key.code {
+            if !self.held_keys.contains(&modifier) {
+                self.held_keys.push(modifier);
+            }
+            let bit = match modifier {
+                ModifierKeyCode::LeftControl | ModifierKeyCode::RightControl => {
+                    KeyModifiers::CONTROL
+                }
+                ModifierKeyCode::LeftAlt | ModifierKeyCode::RightAlt => KeyModifiers::ALT,
+                ModifierKeyCode::LeftShift | ModifierKeyCode::RightShift => KeyModifiers::SHIFT,
+                _ => KeyModifiers::NONE,
+            };
+            if bit != KeyModifiers::NONE {
+                self.held_modifiers.insert(bit);
+            }
+            return;
+        }
+
+        // Remember which modifiers are held so the footer can show only the
+        // chords that are reachable right now.
+        if key.modifiers != self.held_modifiers && !self.held_modifiers.contains(key.modifiers) {
+            self.held_modifiers = key.modifiers;
+        }
 
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
@@ -381,6 +461,20 @@ impl App {
         }
 
         if key.code == KeyCode::Tab {
+            // A quick double Tab is the second way into favorites: the first
+            // press switches panels, the second one (within one tick) moves
+            // focus to the sidebar. Slower presses keep switching panels.
+            let now = Instant::now();
+            if self
+                .last_tab
+                .take()
+                .is_some_and(|last| now.saturating_duration_since(last) <= DOUBLE_TAB_WINDOW)
+            {
+                self.focus = Focus::Panels;
+                self.toggle_favorites_focus();
+                return;
+            }
+            self.last_tab = Some(now);
             self.focus = Focus::Panels;
             self.active ^= 1;
             self.status = format!(
@@ -553,6 +647,79 @@ impl App {
             KeyCode::Char(' ') | KeyCode::Insert => self.active_mut().toggle_selection(),
             KeyCode::Esc => self.clear_selection(),
             _ => {}
+        }
+    }
+
+    /// Handle a vertical two-finger gesture.
+    ///
+    /// Terminal scroll events report the finger direction, while the user asked
+    /// for the list to follow the natural (content) direction, so the delta is
+    /// inverted here: swiping up moves the cursor down, like dragging the list.
+    pub fn on_scroll(&mut self, delta: i32) {
+        self.dirty = true;
+        if self.help || self.prompt.is_some() || self.sort_menu || self.theme_menu {
+            return;
+        }
+
+        let delta = -delta;
+
+        if self.focus == Focus::Favorites {
+            let count = self.favorites.paths.len();
+            if count == 0 {
+                return;
+            }
+            let next = (self.fav_cursor as i32 + delta).clamp(0, count as i32 - 1);
+            self.fav_cursor = next as usize;
+            return;
+        }
+
+        if self.active().loading {
+            return;
+        }
+
+        match self.active().mode {
+            PanelMode::Preview => self.active_mut().scroll_preview(delta, 0),
+            PanelMode::Thumbnails => {
+                let cols = self.active().grid_cols.max(1) as i32;
+                self.active_mut().move_grid(delta * cols);
+            }
+            PanelMode::List => self.active_mut().move_cursor(delta),
+        }
+    }
+
+    /// Handle a two-finger horizontal swipe.
+    ///
+    /// macOS sends these as `ScrollLeft`/`ScrollRight` when a trackpad is used
+    /// inside a terminal. They mirror the horizontal arrows in the current
+    /// mode: in a list they open the cursor folder or go to the parent, in the
+    /// preview they pan, in a grid they move the cursor.
+    pub fn on_horizontal_gesture(&mut self, left: bool) {
+        self.dirty = true;
+        if self.help || self.prompt.is_some() || self.sort_menu || self.theme_menu {
+            return;
+        }
+        if self.focus != Focus::Panels {
+            return;
+        }
+        if self.active().loading {
+            return;
+        }
+
+        match self.active().mode {
+            PanelMode::Preview => {
+                self.active_mut()
+                    .scroll_preview(0, if left { -1 } else { 1 });
+            }
+            PanelMode::Thumbnails => {
+                self.active_mut().move_grid(if left { -1 } else { 1 });
+            }
+            PanelMode::List => {
+                if left {
+                    self.go_parent();
+                } else {
+                    self.enter_current();
+                }
+            }
         }
     }
 
@@ -1484,6 +1651,91 @@ mod tests {
 
         press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
         assert_eq!(app.focus, Focus::Panels);
+    }
+
+    #[test]
+    fn double_tab_opens_favorites() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+
+        press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(app.active, 1);
+        press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(app.focus, Focus::Favorites);
+        assert!(app.show_favorites);
+        // The first press still switched panels; the second moved focus.
+        assert_eq!(app.active, 1);
+    }
+
+    #[test]
+    fn slow_tab_presses_keep_switching_panels() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+
+        press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        // Simulate a slow second press by expiring the double-Tab window.
+        app.last_tab = Some(Instant::now() - DOUBLE_TAB_WINDOW * 2);
+        press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+
+        assert_eq!(app.focus, Focus::Panels);
+        assert_eq!(app.active, 0);
+    }
+
+    #[test]
+    fn vertical_scroll_moves_the_cursor_in_the_opposite_direction() {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            fs::write(tmp.path().join(name), "x").unwrap();
+        }
+        let mut app = app_for(tmp.path(), tmp.path());
+        app.panels[0].select_name("a.txt");
+
+        // Swiping up (ScrollUp -> -1) moves the cursor down, like dragging.
+        app.on_scroll(-1);
+        assert_eq!(app.panels[0].current_entry().unwrap().name, "b.txt");
+        app.on_scroll(1);
+        assert_eq!(app.panels[0].current_entry().unwrap().name, "a.txt");
+    }
+
+    #[test]
+    fn horizontal_swipe_mirrors_the_arrow_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let left = tmp.path().join("left");
+        let child = left.join("child");
+        let right = tmp.path().join("right");
+        fs::create_dir_all(&child).unwrap();
+        fs::create_dir_all(&right).unwrap();
+
+        let mut app = app_for(&left, &right);
+        app.panels[0].select_name("child");
+
+        // Swipe right -> enter the folder, exactly like the Right arrow.
+        app.on_horizontal_gesture(false);
+        wait_for_loads(&mut app);
+        assert_eq!(app.panels[0].cwd, child);
+
+        // Swipe left -> go back to the parent.
+        app.on_horizontal_gesture(true);
+        wait_for_loads(&mut app);
+        assert_eq!(app.panels[0].cwd, left);
+    }
+
+    #[test]
+    fn holding_control_switches_the_footer_to_control_chords() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+
+        app.on_key(KeyEvent::new(
+            KeyCode::Modifier(ModifierKeyCode::LeftControl),
+            KeyModifiers::NONE,
+        ));
+        assert!(app.held_modifiers.contains(KeyModifiers::CONTROL));
+
+        app.on_key_release(KeyEvent::new(
+            KeyCode::Modifier(ModifierKeyCode::LeftControl),
+            KeyModifiers::NONE,
+        ));
+        assert!(!app.held_modifiers.contains(KeyModifiers::CONTROL));
     }
 
     #[test]

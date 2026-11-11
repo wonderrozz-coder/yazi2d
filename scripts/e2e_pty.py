@@ -230,6 +230,9 @@ try:
 
     send(b"\t")  # focus the right panel (inside sub)
     send(b"\x7f")  # Backspace: go up to the parent
+    # Wait out the double-Tab window before coming back, so two quick Tabs are
+    # not mistaken for the "open favorites" gesture.
+    time.sleep(0.45)
     send(b"\t")  # back to the left panel
     time.sleep(0.3)
     send(b"d")
@@ -238,6 +241,17 @@ try:
     while time.time() < deadline and os.path.isdir(os.path.join(left, "sub")):
         drain(0.1)
     assert not os.path.isdir(os.path.join(left, "sub")), "second delete failed"
+
+    # Trackpad gestures are checked last: a horizontal swipe changes directory,
+    # so it would disturb the file operations above.
+    send(b"\x1b[<64;20;10M")  # scroll up
+    send(b"\x1b[<65;20;10M")  # scroll down
+    screen = drain(0.3)
+    assert b"Left" in screen and b"Right" in screen, "panels broke after vertical scrolling"
+
+    send(b"\x1b[<67;20;10M")  # scroll right
+    screen = drain(0.4)
+    assert b"Left" in screen and b"Right" in screen, "panels broke after a horizontal swipe"
 
     send(b"q")
     deadline = time.time() + 5

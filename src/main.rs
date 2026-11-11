@@ -12,7 +12,10 @@ use std::panic;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event, KeyEventKind};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, KeyboardEnhancementFlags,
+    MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -44,7 +47,20 @@ fn main() -> io::Result<()> {
 
     enable_raw_mode()?;
     let mut out = stdout();
-    execute!(out, EnterAlternateScreen)?;
+    execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
+    // Ask the terminal to report key press *and release* events, so the footer
+    // can light up while a modifier is held. Terminals without kitty-protocol
+    // support silently ignore the sequence; releases then simply never arrive.
+    // We deliberately do not probe support first: the probe blocks for up to
+    // two seconds waiting for a reply.
+    let keyboard_enhanced = execute!(
+        out,
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+        )
+    )
+    .is_ok();
     let backend = CrosstermBackend::new(out);
     let mut terminal = Terminal::new(backend)?;
 
@@ -76,17 +92,28 @@ fn main() -> io::Result<()> {
                 .unwrap_or_else(|| "disabled".to_string())
         ));
     }
-    let result = run(&mut terminal, &mut app);
+    let result = run(&mut terminal, &mut app, keyboard_enhanced);
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    if keyboard_enhanced {
+        let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
+    }
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
 
     logging::info("exit");
     result
 }
 
-fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> io::Result<()> {
+fn run(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+    keyboard_enhanced: bool,
+) -> io::Result<()> {
     loop {
         app.tick();
 
@@ -101,20 +128,37 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
 
         if event::poll(Duration::from_millis(80))? {
             match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    let started = Instant::now();
-                    app.on_key(key);
-                    let elapsed = started.elapsed();
-                    if elapsed.as_millis() > 100 {
-                        logging::warn(format!(
-                            "slow key handling ({} ms): {:?} {:?}",
-                            elapsed.as_millis(),
-                            key.code,
-                            key.modifiers
-                        ));
+                Event::Key(key) => match key.kind {
+                    KeyEventKind::Press => {
+                        let started = Instant::now();
+                        app.on_key(key);
+                        let elapsed = started.elapsed();
+                        if elapsed.as_millis() > 100 {
+                            logging::warn(format!(
+                                "slow key handling ({} ms): {:?} {:?}",
+                                elapsed.as_millis(),
+                                key.code,
+                                key.modifiers
+                            ));
+                        }
                     }
-                }
+                    // With keyboard enhancement the terminal also reports
+                    // releases, which is exactly what the footer needs to know
+                    // when a modifier is let go.
+                    KeyEventKind::Release if keyboard_enhanced => app.on_key_release(key),
+                    _ => {}
+                },
                 Event::Resize(_, _) => app.dirty = true,
+                // Trackpad two-finger gestures arrive as scroll events. Vertical
+                // scrolling moves the list (inverted, see `on_scroll`); horizontal
+                // swipes mirror the left/right arrows.
+                Event::Mouse(mouse) => match mouse.kind {
+                    MouseEventKind::ScrollUp => app.on_scroll(-1),
+                    MouseEventKind::ScrollDown => app.on_scroll(1),
+                    MouseEventKind::ScrollLeft => app.on_horizontal_gesture(true),
+                    MouseEventKind::ScrollRight => app.on_horizontal_gesture(false),
+                    _ => {}
+                },
                 _ => {}
             }
         }

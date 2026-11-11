@@ -20,8 +20,8 @@ filesystems, a GUI, sixel/Kitty image protocols.
 
 ## Current status (2026-11-11)
 
-Version `0.3.1` — MVP + quick view, thumbnails, background loading, logging,
-sorting, type colours and bulk rename.
+Version `0.3.2` — MVP + quick view, thumbnails, background loading, logging,
+sorting, type colours, bulk rename, trackpad gestures and a live footer.
 
 - [x] Two panels, independent cwd/cursor/selection, active-panel highlighting.
 - [x] Path bar at the top of both panels (left-truncated, tail always visible).
@@ -37,7 +37,8 @@ sorting, type colours and bulk rename.
 - [x] Safe conflict policy: unique suffix instead of overwrite.
 - [x] Multi-select, select-all (`Ctrl+A`), bulk rename (`Ctrl+G`), sorting (`s`),
   file-type colours with a menu (`Ctrl+K`).
-- [x] 47 unit tests + a real-PTY end-to-end test, all green.
+- [x] Double-Tab favorites, trackpad scrolling/swipes, modifier-aware footer.
+- [x] 52 unit tests + a real-PTY end-to-end test, all green.
 - [x] `cargo fmt`, `cargo clippy -D warnings`, release build (≈2 MB binary).
 
 Known limitations and the next steps are in `docs/STATUS.md` and
@@ -171,7 +172,8 @@ Detailed invariants and data flow: `docs/ARCHITECTURE.md`.
 
 ## Key handling summary
 
-Panel mode: `Tab` switches panel; `Shift+Tab` focuses favorites; arrows/`hjkl`
+Panel mode: `Tab` switches panel, a quick double `Tab` focuses favorites;
+`Shift+Tab` focuses favorites; arrows/`hjkl`
 navigate; `Enter`/`l` opens a directory; `Backspace`/`h` goes up; `Space`
 selects and advances; `F5`/`c` copies; `F6`/`m` moves; `F7`/`n` mkdir;
 `F2`/`r` renames; `F8`/`d`/`Del` deletes (confirm with `Enter` or `y`);
@@ -191,6 +193,10 @@ Favorites focus: arrows/`jk`, `Enter` navigate, `Del`/`d` remove,
 
 Selection & tools: `Ctrl+A` selects all, `Ctrl+G` bulk rename (`{name}`,
 `{ext}`, `{n}`, `%e=ext`), `s`/`Ctrl+S` sort menu, `Ctrl+K` colour menu.
+
+Gestures: two-finger scroll moves the cursor (vertical, inverted), swipes
+mirror the left/right arrows. The footer shows Ctrl/Alt/Shift chords while the
+modifier is held when the terminal supports key-release events.
 
 Global: `Ctrl+C` quits, `q` quits outside prompts/help, `?`/`F1` help.
 

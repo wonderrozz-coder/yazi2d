@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{Local, TimeZone};
+use crossterm::event::KeyModifiers;
 use image::RgbImage;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -930,6 +931,15 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     let text = match app.focus {
+        _ if app.held_modifiers.contains(KeyModifiers::CONTROL) => {
+            " Ctrl · B favorites add · D focus favorites · F toggle favorites · Q/P preview other · T thumbs · O open there · A select all · G bulk rename · K colours · S sort · R refresh · H hidden · C quit"
+        }
+        _ if app.held_modifiers.contains(KeyModifiers::ALT) => {
+            " Alt · ← / → open the cursor folder in that panel"
+        }
+        _ if app.held_modifiers.contains(KeyModifiers::SHIFT) => {
+            " Shift · Tab focus favorites · Home/End jump · (arrows and letters work as usual)"
+        }
         Focus::Favorites => {
             " Yazi2D · Favorites: ↑↓/jk move · Enter open · Del remove · Ctrl+B add · Shift+Tab/Ctrl+D panels · ? help · q quit"
         }
@@ -937,15 +947,21 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             " Yazi2D · operation in progress — navigation stays available"
         }
         Focus::Panels => {
-            " Yazi2D · Tab switch · Shift+Tab favs · Ctrl+Q/Ctrl+P preview · Ctrl+T thumbs · Ctrl+O open there · s sort · Ctrl+A all · F5/c copy · F6/m move · F8/d delete · ? help · q quit"
+            " Yazi2D · Tab switch · Tab Tab favs · Shift+Tab favs · Ctrl+Q/Ctrl+P preview · Ctrl+T thumbs · Ctrl+O open there · s sort · Ctrl+A all · F5/c copy · F6/m move · F8/d delete · ? help · q quit"
         }
     };
 
     let text = truncate_right(text, area.width as usize);
-    frame.render_widget(
-        Paragraph::new(text).style(Style::default().bg(FOOTER_BG).fg(Color::DarkGray)),
-        area,
-    );
+    let style = if app.held_modifiers.contains(KeyModifiers::CONTROL) {
+        Style::default()
+            .bg(FOOTER_BG)
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().bg(FOOTER_BG).fg(Color::DarkGray)
+    };
+
+    frame.render_widget(Paragraph::new(text).style(style), area);
 }
 
 fn draw_help(frame: &mut Frame, area: Rect) {

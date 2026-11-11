@@ -370,3 +370,31 @@ folder is the subject, plus sorting, colour groups with a menu, bulk rename,
 
 **Consequences:** Six user requests are covered without adding dependencies.
 Colours are presets, not per-extension rules; bulk rename has no preview step.
+
+## ADR-022 — Double Tab, trackpad gestures, modifier-aware footer
+
+**Status:** accepted (2026-11-11, `0.3.2`)
+
+**Context:** The user wanted a `Tab`-based way into favorites without a
+modifier, natural (inverted) two-finger scrolling, horizontal swipes that mirror
+the arrows, and a footer that explains the chords of whichever modifier is held.
+
+**Decision:**
+
+1. Two `Tab` presses within 280 ms open favorites; slower presses keep switching
+   panels. The window is deliberately short so bouncing between panels with
+   repeated `Tab` does not get hijacked. `Shift+Tab` and `Ctrl+D` stay.
+2. Mouse capture is always enabled. `ScrollUp`/`ScrollDown` move the cursor,
+   with the sign inverted so the gesture drags the list. `ScrollLeft`/
+   `ScrollRight` mirror `←`/`→` per mode: list → parent/open, preview → pan,
+   grid → move.
+3. `PushKeyboardEnhancementFlags(REPORT_EVENT_TYPES)` asks for key-release
+   events. A release of a bare modifier clears it from `held_modifiers`, and the
+   footer then prints only Ctrl/Alt/Shift chords in that colour. Support is
+   probed by simply sending the sequence: `supports_keyboard_enhancement()`
+   blocks for up to two seconds waiting for a reply, which stalled startup.
+
+**Consequences:** Terminals without the kitty protocol ignore the push, never
+send releases, and fall back to the static footer. Mouse capture means the
+terminal no longer handles selection/copy itself while yazi2d runs, which is the
+normal trade-off for TUI mouse support.
