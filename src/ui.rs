@@ -770,7 +770,7 @@ fn draw_file_icon(
     let color = colors.color(group);
     let icon_height = crate::icons::ICON_HEIGHT as u16;
 
-    let (icon_area, label_area) = if area.height >= icon_height + 1 {
+    let (icon_area, label_area) = if area.height > icon_height {
         (
             Rect {
                 height: area.height - 1,
