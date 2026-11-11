@@ -44,6 +44,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let right_target = app.panels[0]
         .current_entry()
         .map(|entry| entry.path.clone());
+    let left_loading = app.panels[1].loading;
+    let right_loading = app.panels[0].loading;
     let hidden = app.hidden;
 
     if show_favorites {
@@ -60,6 +62,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             frame,
             &mut app.panels[0],
             left_target,
+            left_loading,
             cols[1],
             app.active == 0,
             "Left",
@@ -71,6 +74,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             frame,
             &mut app.panels[1],
             right_target,
+            right_loading,
             cols[2],
             app.active == 1,
             "Right",
@@ -87,6 +91,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             frame,
             &mut app.panels[0],
             left_target,
+            left_loading,
             cols[0],
             app.active == 0,
             "Left",
@@ -98,6 +103,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             frame,
             &mut app.panels[1],
             right_target,
+            right_loading,
             cols[1],
             app.active == 1,
             "Right",
@@ -123,6 +129,7 @@ fn draw_panel(
     frame: &mut Frame,
     panel: &mut Panel,
     preview_target: Option<PathBuf>,
+    preview_loading: bool,
     area: Rect,
     active: bool,
     label: &str,
@@ -187,20 +194,28 @@ fn draw_panel(
     match mode {
         PanelMode::List => {
             if rows[1].height > 0 {
-                frame.render_widget(
-                    Paragraph::new(header_line(rows[1].width as usize))
-                        .style(Style::default().fg(Color::DarkGray)),
-                    rows[1],
-                );
+                if panel.loading {
+                    draw_caption(frame, rows[1], &loading_caption(panel));
+                } else {
+                    frame.render_widget(
+                        Paragraph::new(header_line(rows[1].width as usize))
+                            .style(Style::default().fg(Color::DarkGray)),
+                        rows[1],
+                    );
+                }
             }
             draw_list(frame, panel, rows[2], active);
         }
         PanelMode::Thumbnails => {
             if rows[1].height > 0 {
-                let caption = format!(
-                    " {} items · arrows move · Ctrl+T list ",
-                    panel.entries.len().saturating_sub(1)
-                );
+                let caption = if panel.loading {
+                    loading_caption(panel)
+                } else {
+                    format!(
+                        " {} items · arrows move · Ctrl+T list ",
+                        panel.entries.len().saturating_sub(1)
+                    )
+                };
                 draw_caption(frame, rows[1], &caption);
             }
             draw_thumbnails(frame, panel, rows[2], active, image_cache);
@@ -210,6 +225,7 @@ fn draw_panel(
                 frame,
                 panel,
                 preview_target.as_deref(),
+                preview_loading,
                 rows[1],
                 rows[2],
                 preview_cache,
@@ -220,6 +236,11 @@ fn draw_panel(
     }
 }
 
+fn loading_caption(panel: &Panel) -> String {
+    let subject = panel.loading_label().unwrap_or_else(|| "…".to_string());
+    format!(" Loading {subject}… · Esc cancels ")
+}
+
 fn draw_list(frame: &mut Frame, panel: &mut Panel, list_area: Rect, active: bool) {
     if list_area.height == 0 {
         return;
@@ -228,11 +249,12 @@ fn draw_list(frame: &mut Frame, panel: &mut Panel, list_area: Rect, active: bool
     panel.ensure_visible();
 
     if panel.entries.is_empty() {
-        render_message(
-            frame,
-            list_area,
-            &panel.error.clone().unwrap_or_else(|| "(empty)".to_string()),
-        );
+        let message = if panel.loading {
+            format!("Loading {}…", panel.loading_label().unwrap_or_default())
+        } else {
+            panel.error.clone().unwrap_or_else(|| "(empty)".to_string())
+        };
+        render_message(frame, list_area, &message);
         return;
     }
 
@@ -265,6 +287,7 @@ fn draw_preview(
     frame: &mut Frame,
     panel: &mut Panel,
     target: Option<&Path>,
+    loading: bool,
     header: Rect,
     area: Rect,
     preview_cache: &mut PreviewCache,
@@ -273,6 +296,11 @@ fn draw_preview(
 ) {
     panel.page_size = area.height.max(1) as usize;
 
+    if loading {
+        draw_caption(frame, header, " preview · waiting for the other panel ");
+        render_message(frame, area, "Loading…");
+        return;
+    }
     let Some(path) = target else {
         draw_caption(frame, header, " preview · move the other panel's cursor ");
         render_message(frame, area, "Nothing to preview");
@@ -426,26 +454,32 @@ fn draw_thumbnails(
     active: bool,
     image_cache: &mut ImageCache,
 ) {
-    const TILE_WIDTH: u16 = 20;
-    const TILE_HEIGHT: u16 = 11;
+    const TILE_MIN_WIDTH: u16 = 22;
+    const TILE_MAX_WIDTH: u16 = 32;
 
     if area.height == 0 || area.width == 0 {
         return;
     }
 
-    let cols = (area.width / TILE_WIDTH).max(1) as usize;
-    let rows = (area.height / TILE_HEIGHT).max(1) as usize;
+    // Adaptive tiles: 3 columns on wide panels, 2 on narrow ones. The height is
+    // chosen so the image area is roughly square in pixels (2 px per cell row).
+    let tile_width = (area.width / 3).clamp(TILE_MIN_WIDTH, TILE_MAX_WIDTH);
+    let tile_height = ((tile_width.saturating_sub(2)) / 2 + 3).clamp(11, 22);
+
+    let cols = (area.width / tile_width).max(1) as usize;
+    let rows = (area.height / tile_height).max(1) as usize;
     panel.grid_cols = cols;
     panel.grid_rows = rows;
     panel.page_size = cols * rows;
     panel.ensure_grid_visible();
 
     if panel.entries.is_empty() {
-        render_message(
-            frame,
-            area,
-            &panel.error.clone().unwrap_or_else(|| "(empty)".to_string()),
-        );
+        let message = if panel.loading {
+            format!("Loading {}…", panel.loading_label().unwrap_or_default())
+        } else {
+            panel.error.clone().unwrap_or_else(|| "(empty)".to_string())
+        };
+        render_message(frame, area, &message);
         return;
     }
 
@@ -455,10 +489,10 @@ fn draw_thumbnails(
     for index in start..end {
         let relative = index - start;
         let tile = Rect {
-            x: area.x + (relative % cols) as u16 * TILE_WIDTH,
-            y: area.y + (relative / cols) as u16 * TILE_HEIGHT,
-            width: TILE_WIDTH,
-            height: TILE_HEIGHT,
+            x: area.x + (relative % cols) as u16 * tile_width,
+            y: area.y + (relative / cols) as u16 * tile_height,
+            width: tile_width,
+            height: tile_height,
         };
         let entry = &panel.entries[index];
         let selected = !entry.is_parent && panel.selected.contains(&entry.path);
@@ -794,13 +828,13 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     let text = match app.focus {
         Focus::Favorites => {
-            " Yazi2D · Favorites: ↑↓/jk move · Enter open · Del remove · Ctrl+B add · Ctrl+D/ Ctrl+F panels · ? help · q quit"
+            " Yazi2D · Favorites: ↑↓/jk move · Enter open · Del remove · Ctrl+B add · Shift+Tab/Ctrl+D panels · ? help · q quit"
         }
         Focus::Panels if app.job.is_some() => {
             " Yazi2D · operation in progress — navigation stays available"
         }
         Focus::Panels => {
-            " Yazi2D · Tab switch · Ctrl+Q preview · Ctrl+T thumbs · Ctrl+←/→ preview other · Alt+←/→ open there · F5/c copy · F6/m move · F8/d delete · ? help · q quit"
+            " Yazi2D · Tab switch · Shift+Tab favs · Ctrl+Q/Ctrl+P preview other · Ctrl+T thumbs · Ctrl+O open there · F5/c copy · F6/m move · F8/d delete · ? help · q quit"
         }
     };
 
@@ -843,21 +877,28 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         help_line("  F8 / d / Del", "delete (Enter or y confirms)", key),
         Line::from(""),
         Line::from(Span::styled("VIEW & CROSS-PANEL", header)),
-        help_line("  Ctrl+Q", "quick preview in the active panel", key),
+        help_line("  Ctrl+Q / Ctrl+P", "quick preview in the OTHER panel", key),
         help_line("  Ctrl+T", "thumbnail grid in the active panel", key),
+        help_line("  Ctrl+O", "open cursor folder in the other panel", key),
         help_line(
             "  Ctrl+← / Ctrl+→",
-            "neighbouring panel becomes a viewer",
+            "preview in that panel (may be OS-bound)",
             key,
         ),
         help_line("  Alt+← / Alt+→", "open cursor folder in that panel", key),
         Line::from(""),
         Line::from(Span::styled("PANELS & FAVORITES", header)),
         help_line("  Tab", "switch active panel", key),
+        help_line(
+            "  Shift+Tab / Ctrl+D",
+            "focus favorites / back to panels",
+            key,
+        ),
         help_line("  Ctrl+B / a", "add current dir to favorites", key),
-        help_line("  Ctrl+D / Ctrl+F / f", "focus or toggle favorites", key),
+        help_line("  Ctrl+F / f", "toggle favorites sidebar", key),
         help_line("  Ctrl+R", "refresh both panels", key),
         help_line("  Ctrl+H / .", "toggle hidden files", key),
+        help_line("  Esc while loading", "cancel the directory load", key),
         Line::from(""),
         Line::from(Span::styled(
             "  ? / F1 close help      q / Ctrl+C quit",
@@ -1232,6 +1273,18 @@ mod tests {
         assert!(text.contains("preview"));
         assert!(text.contains("notes.txt"));
         assert!(text.contains("hello preview"));
+    }
+
+    #[test]
+    fn renders_a_loading_state_while_a_directory_loads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = App::new(vec![tmp.path().to_path_buf(), tmp.path().to_path_buf()]);
+        app.panels[0].loading = true;
+        app.panels[0].loading_path = Some(tmp.path().join("slow-folder"));
+
+        let text = render(&mut app, 120, 30);
+        assert!(text.contains("Loading"), "loading caption missing");
+        assert!(text.contains("slow-folder"));
     }
 
     #[test]

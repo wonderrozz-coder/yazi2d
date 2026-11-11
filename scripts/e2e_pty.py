@@ -118,12 +118,12 @@ try:
     assert b".hidden.txt" in screen, "Ctrl+H did not show hidden files"
     send(b"\x08")
 
-    # Ctrl+Right turns the right panel into a quick viewer of hello.txt.
-    send(b"\x1b[1;5C")
+    # Ctrl+P turns the right panel into a quick viewer of hello.txt.
+    send(b"\x10")
     screen = drain(0.6)
-    assert b"preview" in screen, "Ctrl+Right did not switch the panel to preview"
+    assert b"preview" in screen, "Ctrl+P did not switch the panel to preview"
     assert b"hello from yazi2d" in screen, "text preview content was not rendered"
-    send(b"\x1b[1;5C")  # close preview again
+    send(b"\x10")  # close preview again
 
     # Ctrl+T toggles the thumbnail grid.
     send(b"\x14")
@@ -139,11 +139,11 @@ try:
     with open(favorites) as f:
         assert left in f.read(), "current directory was not saved to favorites"
 
-    # Ctrl+D must give the favorites sidebar keyboard focus.
-    send(b"\x04")
+    # Shift+Tab must give the favorites sidebar keyboard focus.
+    send(b"\x1b[Z")
     screen = drain(0.4)
     assert b"Favorites" in screen, "favorites sidebar disappeared"
-    send(b"\x1b")  # Esc: back to panels
+    send(b"\x1b[Z")  # back to panels
 
     # Help overlay and prompt smoke test.
     send(b"?")
@@ -167,14 +167,14 @@ try:
     assert not os.path.isdir(os.path.join(left, "testdir")), "delete failed"
     drain(0.5)
 
-    # Alt+Right opens the cursor folder in the right panel.
+    # Ctrl+O opens the cursor folder in the right panel.
     send(b"n")
     send(b"sub")
     send(b"\r")
     time.sleep(0.4)
-    send(b"\x1b[1;3C")
+    send(b"\x0f")
     screen = drain(0.5)
-    assert b"left/sub" in screen, "Alt+Right did not open the folder in the other panel"
+    assert b"left/sub" in screen, "Ctrl+O did not open the folder in the other panel"
 
     send(b"\t")  # focus the right panel (inside sub)
     send(b"\x7f")  # Backspace: go up to the parent

@@ -20,19 +20,21 @@ filesystems, a GUI, sixel/Kitty image protocols.
 
 ## Current status (2026-11-11)
 
-Version `0.2.0` — MVP + quick view and thumbnails.
+Version `0.3.0` — MVP + quick view, thumbnails, background loading and logging.
 
 - [x] Two panels, independent cwd/cursor/selection, active-panel highlighting.
 - [x] Path bar at the top of both panels (left-truncated, tail always visible).
-- [x] Favorites sidebar: toggle, focus (`Ctrl+D`), add current dir, navigate, remove, TOML persistence.
+- [x] Favorites sidebar: toggle, focus (`Shift+Tab`/`Ctrl+D`), add current dir, navigate, remove, TOML persistence.
 - [x] Copy/move selection (or cursor item) to the other panel, recursive, symlink-aware.
 - [x] Background operations with progress; UI remains navigable.
 - [x] Mkdir, rename, delete confirmed by `Enter` (or `y`), multi-select, hidden files (`Ctrl+H`/`.`).
-- [x] Quick preview: text, images (half-block truecolor), directories; follows the other panel's cursor.
-- [x] Thumbnail grid mode with cached image tiles.
-- [x] Cross-panel keys: `Ctrl+←/→` preview the neighbour, `Alt+←/→` open the cursor folder there.
+- [x] Quick preview: text, images (half-block truecolor), directories; follows the other panel's cursor; `Ctrl+Q`/`Ctrl+P` always target the opposite panel.
+- [x] Thumbnail grid mode with cached image tiles, adaptive size and Lanczos3 resampling.
+- [x] Cross-panel keys: `Ctrl+O` (and `Alt+←/→`) open the cursor folder in the neighbour; `Ctrl+←/→` preview there.
+- [x] Background directory loading with `Loading <path>…`, `Esc` cancel, generation checks.
+- [x] File log with load timings and `WARN` for slow paths (`YAZI2D_LOG=off` disables).
 - [x] Safe conflict policy: unique suffix instead of overwrite.
-- [x] 30 unit tests + a real-PTY end-to-end test, all green.
+- [x] 38 unit tests + a real-PTY end-to-end test, all green.
 - [x] `cargo fmt`, `cargo clippy -D warnings`, release build (≈2 MB binary).
 
 Known limitations and the next steps are in `docs/STATUS.md` and
@@ -71,8 +73,9 @@ Cargo.toml                 dependencies + release profile
 rust-toolchain.toml        stable toolchain
 src/main.rs                CLI, terminal setup/restore, event loop, --help
 src/app.rs                 App state, key dispatch, prompts, jobs, favorites actions
-src/panel.rs               Panel state, modes (list/thumbnails/preview), navigation
-src/preview.rs             text/image/directory preview caches, half-block thumbnails
+src/panel.rs               Panel state, modes, navigation, background directory loads
+src/preview.rs             text/image/directory preview caches, image resampling
+src/logging.rs             append-only file log (timings, slow loads, panics)
 src/transfer.rs            background copy/move/delete engine + progress channel
 src/favorites.rs           favorites model and TOML persistence
 src/ui.rs                  ratatui rendering, layout, overlays, preview/thumbnails, UI tests
@@ -93,20 +96,31 @@ inspiration: https://github.com/sxyazi/yazi.
 - Single-threaded UI loop: `main::run` polls crossterm events every 80 ms,
   calls `App::tick`, and redraws only when `App::dirty` is set.
 - `App` owns `[Panel; 2]`, `active`, `focus`, favorites, prompt/help state,
-  `PreviewCache`, `ImageCache`, and at most one `Job`.
+  `PreviewCache`, `ImageCache`, at most one `Job`, and at most one pending
+  directory load per panel.
 - `Panel` owns cwd, `Vec<Entry>` (with a synthetic `..` row), cursor, scroll
   offset, selected path set, visible page size, and a `PanelMode`
-  (`List`, `Thumbnails`, `Preview`) with grid/preview scroll state.
+  (`List`, `Thumbnails`, `Preview`) with grid/preview scroll state, plus
+  `loading`/`loading_path`/`generation` for background listing.
+- Directory navigation calls `Panel::spawn_load`, which runs `list_dir` on a
+  `std::thread` and returns an `mpsc::Receiver<LoadResult>`; `App::tick` polls
+  it and applies only the newest `generation`. The previous list stays visible
+  and the header shows `Loading <path>…`; `Esc` cancels. Initial startup
+  listing is synchronous.
 - A panel in `Preview` shows the **other panel's** cursor entry. `App::sync_preview_scroll`
   keeps the subject path in sync and resets scroll when it changes; only one
   preview panel exists at a time. Preview is read-only: file operations are
   rejected while the active panel is a preview.
 - `preview.rs` caches text/directory previews keyed by path+mtime+size and
-  decodes images into cached half-block-sized RGB buffers (two pixel rows per
-  terminal cell). No external viewer or sixel/Kitty protocol is used.
+  decodes images once, pre-scales to ≤1600 px, then resizes with Lanczos3 into
+  cached half-block-sized RGB buffers (two pixel rows per terminal cell). No
+  external viewer or sixel/Kitty protocol is used.
 - File operations never run on the UI thread. `transfer::spawn` returns a
   `Job` with an `mpsc::Receiver<JobMsg>`; `App::tick` drains it and refreshes
   panels on completion.
+- `logging.rs` queues lines for a background writer to `yazi2d.log`; includes
+  load timings, slow-path `WARN`s, image decodes and panics. The bounded queue
+  may drop messages; `YAZI2D_LOG=off` disables logging.
 - Favorites are stored as a flat path list in TOML at
   `$YAZI2D_CONFIG_DIR/favorites.toml` or the platform config dir.
 - The UI is composed with ratatui: body (favorites + two panels), status line,
@@ -125,36 +139,45 @@ Detailed invariants and data flow: `docs/ARCHITECTURE.md`.
 - When a selection exists, only selected entries are transferred; otherwise the
   cursor entry is used.
 - The path bar must remain the first inner row of each panel.
-- The UI thread must never perform bulk filesystem work.
+- The UI thread must never perform bulk filesystem work; directory listings run
+  on a worker thread.
 - Idle redraws should not happen (`dirty` flag).
 - Terminal state must be restored on normal exit and on panic.
 - Only one panel may be in `Preview` mode; it always shows the other panel's
   cursor entry and never performs file operations.
 - Preview/thumbnail decoding stays on the UI thread only for the visible items
   and must go through `PreviewCache`/`ImageCache` (never re-read per frame).
-- `Ctrl+←/→` targets the **neighbour** of the active panel; `Alt+←/→` opens the
+- `Ctrl+Q`/`Ctrl+P` target the **opposite** panel; `Ctrl+O`/`Alt+←/→` open the
   active cursor folder in that neighbour. Do not reuse these for history.
+- Only the newest directory load generation may change a panel; cancelled or
+  superseded loads are ignored.
+- Logging must never panic and must never block the UI on I/O.
 
 ## Key handling summary
 
-Panel mode: `Tab` switches panel; arrows/`hjkl` navigate; `Enter`/`l` opens a
-directory; `Backspace`/`h` goes up; `Space` selects and advances; `F5`/`c`
-copies; `F6`/`m` moves; `F7`/`n` mkdir; `F2`/`r` renames; `F8`/`d`/`Del`
-deletes (confirm with `Enter` or `y`); `Ctrl+B`/`a` favorites; `Ctrl+D` focus
-favorites; `Ctrl+F`/`f` toggle favorites; `Ctrl+R` refresh; `Ctrl+H`/`.`
-hidden files; `?` help; `q` quit.
+Panel mode: `Tab` switches panel; `Shift+Tab` focuses favorites; arrows/`hjkl`
+navigate; `Enter`/`l` opens a directory; `Backspace`/`h` goes up; `Space`
+selects and advances; `F5`/`c` copies; `F6`/`m` moves; `F7`/`n` mkdir;
+`F2`/`r` renames; `F8`/`d`/`Del` deletes (confirm with `Enter` or `y`);
+`Ctrl+B`/`a` favorites; `Ctrl+D` focus favorites; `Ctrl+F`/`f` toggle
+favorites; `Ctrl+R` refresh; `Ctrl+H`/`.` hidden files; `?` help; `q` quit.
+`Esc` cancels a pending directory load.
 
-View: `Ctrl+Q` previews the active panel; `Ctrl+T` toggles thumbnails;
-`Ctrl+←/→` previews the neighbour; `Alt+←/→` opens the cursor folder in the
-neighbour. Preview: arrows/`hjkl` scroll, `Esc`/`Ctrl+Q` closes. Thumbnails:
-arrows/`hjkl` move, `Enter` opens, `Ctrl+T` returns to the list.
+View: `Ctrl+Q`/`Ctrl+P` previews the **other** panel; `Ctrl+T` toggles
+thumbnails; `Ctrl+O` opens the cursor folder in the other panel;
+`Ctrl+←/→` previews the indicated panel; `Alt+←/→` opens the cursor folder
+there. Preview: arrows/`hjkl` scroll, `Esc`/`Ctrl+Q`/`Ctrl+P` closes.
+Thumbnails: arrows/`hjkl` move, `Enter` opens, `Ctrl+T` returns to the list.
 
-Favorites focus: arrows/`jk`, `Enter` navigate, `Del`/`d` remove, `Esc` close.
+Favorites focus: arrows/`jk`, `Enter` navigate, `Del`/`d` remove,
+`Esc`/`Shift+Tab` close.
 
 Global: `Ctrl+C` quits, `q` quits outside prompts/help, `?`/`F1` help.
 
 macOS F-keys may require `Fn`; letter alternatives are intentional and must be
-kept.
+kept. `Ctrl+←/→` and `Alt+←/→` may be intercepted by macOS/terminals — every
+cross-panel action must have a `Ctrl+letter` alternative (`Ctrl+P`, `Ctrl+O`,
+`Shift+Tab`).
 
 ## Testing strategy
 

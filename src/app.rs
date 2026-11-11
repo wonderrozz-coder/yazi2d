@@ -1,10 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, TryRecvError};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::favorites::Favorites;
-use crate::panel::{Panel, PanelMode};
+use crate::logging;
+use crate::panel::{LoadKind, LoadResult, Panel, PanelMode};
 use crate::preview::{ImageCache, PreviewCache};
 use crate::transfer::{self, Job, JobKind, JobMsg};
 
@@ -31,6 +33,8 @@ pub struct App {
     pub prompt: Option<Prompt>,
     pub help: bool,
     pub job: Option<Job>,
+    /// At most one pending background directory load per panel.
+    pub loads: [Option<Receiver<LoadResult>>; 2],
     pub preview_cache: PreviewCache,
     pub image_cache: ImageCache,
     pub status: String,
@@ -76,6 +80,12 @@ impl App {
             errors.join(" | ")
         };
 
+        logging::info(format!(
+            "panels ready: left={} right={}",
+            panels[0].cwd.display(),
+            panels[1].cwd.display()
+        ));
+
         Self {
             panels,
             active: 0,
@@ -87,6 +97,7 @@ impl App {
             prompt: None,
             help: false,
             job: None,
+            loads: [None, None],
             preview_cache: PreviewCache::new(),
             image_cache: ImageCache::new(),
             status,
@@ -107,12 +118,9 @@ impl App {
         &self.panels[1 - self.active]
     }
 
-    pub fn other_mut(&mut self) -> &mut Panel {
-        &mut self.panels[1 - self.active]
-    }
-
     /// Drain worker-thread progress and finish completed jobs.
     pub fn tick(&mut self) {
+        self.poll_loads();
         self.sync_preview_scroll();
         let mut finished = false;
         let mut changed = false;
@@ -142,7 +150,11 @@ impl App {
 
         if finished {
             let job = self.job.take().expect("job disappeared");
-            self.refresh_all();
+            for index in 0..2 {
+                if !self.panels[index].loading {
+                    self.reload_panel_async(index);
+                }
+            }
             self.sync_preview_scroll();
             changed = true;
 
@@ -161,6 +173,72 @@ impl App {
         if changed {
             self.dirty = true;
         }
+    }
+
+    /// Apply finished background directory loads.
+    fn poll_loads(&mut self) {
+        for index in 0..self.panels.len() {
+            let received = match self.loads[index].as_ref() {
+                Some(receiver) => match receiver.try_recv() {
+                    Ok(load) => Some(Ok(load)),
+                    Err(TryRecvError::Empty) => None,
+                    Err(TryRecvError::Disconnected) => Some(Err(())),
+                },
+                None => None,
+            };
+
+            match received {
+                Some(Ok(load)) => {
+                    self.loads[index] = None;
+                    let path = load.path.clone();
+                    let applied = self.panels[index].apply_load(load);
+                    if applied {
+                        let label = if index == 0 { "Left" } else { "Right" };
+                        self.status = format!("{label}: {}", self.panels[index].cwd.display());
+                    } else if let Some(error) = self.panels[index].error.clone() {
+                        self.status = format!("Cannot open {}: {error}", path.display());
+                    }
+                    self.dirty = true;
+                }
+                Some(Err(())) => {
+                    self.loads[index] = None;
+                    self.panels[index].loading = false;
+                    self.panels[index].loading_path = None;
+                    self.status = "Directory load stopped unexpectedly".to_string();
+                    self.dirty = true;
+                }
+                None => {}
+            }
+        }
+    }
+
+    /// Start a background listing for one panel.
+    fn start_load(&mut self, index: usize, path: PathBuf, select: Option<String>, kind: LoadKind) {
+        let hidden = self.hidden;
+        let receiver = self.panels[index].spawn_load(path, select, hidden, kind);
+        self.loads[index] = Some(receiver);
+        let subject = self.panels[index]
+            .loading_label()
+            .unwrap_or_else(|| "…".to_string());
+        self.status = format!("Loading {subject}… (Esc cancels)");
+        self.dirty = true;
+    }
+
+    /// Re-list one panel in the background, keeping the cursor when possible.
+    fn reload_panel_async(&mut self, index: usize) {
+        let path = self.panels[index].cwd.clone();
+        let select = self.panels[index]
+            .current_entry()
+            .map(|entry| entry.name.clone());
+        self.start_load(index, path, select, LoadKind::Refresh);
+    }
+
+    /// Cancel the active panel's pending load.
+    fn cancel_active_load(&mut self) {
+        let index = self.active;
+        self.loads[index] = None;
+        self.panels[index].cancel_load();
+        self.status = "Load cancelled".to_string();
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
@@ -193,6 +271,14 @@ impl App {
 
         if matches!(key.code, KeyCode::Char('?') | KeyCode::F(1)) {
             self.help = true;
+            return;
+        }
+
+        // Shift+Tab (BackTab) is the primary way into and out of favorites.
+        if matches!(key.code, KeyCode::BackTab)
+            || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT))
+        {
+            self.toggle_favorites_focus();
             return;
         }
 
@@ -232,8 +318,12 @@ impl App {
                     self.toggle_hidden();
                     return;
                 }
-                KeyCode::Char('q') => {
+                KeyCode::Char('q') | KeyCode::Char('p') => {
                     self.toggle_preview();
+                    return;
+                }
+                KeyCode::Char('o') => {
+                    self.open_entry_in_panel(1 - self.active);
                     return;
                 }
                 KeyCode::Char('t') => {
@@ -241,9 +331,9 @@ impl App {
                     return;
                 }
                 KeyCode::Char('r') => {
-                    self.refresh_all();
-                    self.sync_preview_scroll();
-                    self.status = "Refreshed".to_string();
+                    self.reload_panel_async(0);
+                    self.reload_panel_async(1);
+                    self.status = "Refreshing…".to_string();
                     return;
                 }
                 _ => {}
@@ -271,6 +361,11 @@ impl App {
     }
 
     fn handle_panel_key(&mut self, key: KeyEvent) {
+        if self.active().loading && key.code == KeyCode::Esc {
+            self.cancel_active_load();
+            return;
+        }
+
         match self.active().mode {
             PanelMode::Preview => {
                 self.handle_preview_key(key);
@@ -309,6 +404,11 @@ impl App {
     }
 
     fn handle_thumbnail_key(&mut self, key: KeyEvent) {
+        if self.active().loading && key.code == KeyCode::Esc {
+            self.cancel_active_load();
+            return;
+        }
+
         if self.handle_common_action(key.code) {
             return;
         }
@@ -489,16 +589,8 @@ impl App {
         } else {
             None
         };
-        let hidden = self.hidden;
-        let path = entry.path.clone();
-
-        match self
-            .active_mut()
-            .change_dir(path, select.as_deref(), hidden)
-        {
-            Ok(()) => self.status = self.active().cwd.display().to_string(),
-            Err(e) => self.status = format!("Cannot open {}: {}", entry.path.display(), e),
-        }
+        let index = self.active;
+        self.start_load(index, entry.path, select, LoadKind::Navigate);
     }
 
     fn go_parent(&mut self) {
@@ -511,19 +603,12 @@ impl App {
             self.status = "Already at the filesystem root".to_string();
             return;
         };
-        let hidden = self.hidden;
-
-        match self
-            .active_mut()
-            .change_dir(parent, current_name.as_deref(), hidden)
-        {
-            Ok(()) => self.status = self.active().cwd.display().to_string(),
-            Err(e) => self.status = format!("Cannot go up: {e}"),
-        }
+        let index = self.active;
+        self.start_load(index, parent, current_name, LoadKind::Navigate);
     }
 
     fn start_transfer(&mut self, kind: JobKind) {
-        if self.blocked_by_preview() {
+        if self.blocked_by_preview() || self.blocked_by_loading() {
             return;
         }
         if self.job.is_some() {
@@ -563,7 +648,7 @@ impl App {
     }
 
     fn begin_mkdir(&mut self) {
-        if self.blocked_by_preview() {
+        if self.blocked_by_preview() || self.blocked_by_loading() {
             return;
         }
         if self.job.is_some() {
@@ -576,7 +661,7 @@ impl App {
     }
 
     fn begin_rename(&mut self) {
-        if self.blocked_by_preview() {
+        if self.blocked_by_preview() || self.blocked_by_loading() {
             return;
         }
         if self.job.is_some() {
@@ -597,7 +682,7 @@ impl App {
     }
 
     fn begin_delete(&mut self) {
-        if self.blocked_by_preview() {
+        if self.blocked_by_preview() || self.blocked_by_loading() {
             return;
         }
         if self.job.is_some() {
@@ -631,8 +716,13 @@ impl App {
 
         match fs::create_dir(&path) {
             Ok(()) => {
-                self.refresh_all();
-                self.active_mut().select_name(name);
+                let index = self.active;
+                self.start_load(
+                    index,
+                    self.panels[index].cwd.clone(),
+                    Some(name.to_string()),
+                    LoadKind::Refresh,
+                );
                 self.status = format!("Created {}", path.display());
             }
             Err(e) => self.status = format!("Cannot create {}: {}", path.display(), e),
@@ -662,16 +752,27 @@ impl App {
 
         match fs::rename(target, &dest) {
             Ok(()) => {
-                self.refresh_all();
-                self.active_mut().select_name(new_name);
+                let index = self.active;
+                self.start_load(
+                    index,
+                    self.panels[index].cwd.clone(),
+                    Some(new_name.to_string()),
+                    LoadKind::Refresh,
+                );
                 self.status = format!("Renamed to {}", new_name);
             }
             Err(e) => self.status = format!("Cannot rename: {e}"),
         }
     }
 
-    /// Ctrl+D: reveal the sidebar (if needed) and move keyboard focus into it.
+    /// Ctrl+D / Shift+Tab: reveal the sidebar and move keyboard focus into it.
+    /// Pressing the same chord while focused returns to the panels.
     fn focus_favorites(&mut self) {
+        if self.focus == Focus::Favorites {
+            self.focus = Focus::Panels;
+            self.status = "Back to panels".to_string();
+            return;
+        }
         self.show_favorites = true;
         self.focus = Focus::Favorites;
         if let Some(index) = self
@@ -703,7 +804,8 @@ impl App {
 
     fn toggle_hidden(&mut self) {
         self.hidden = !self.hidden;
-        self.refresh_all();
+        self.reload_panel_async(0);
+        self.reload_panel_async(1);
         self.sync_preview_scroll();
         self.status = if self.hidden {
             "Hidden files: shown".to_string()
@@ -712,24 +814,30 @@ impl App {
         };
     }
 
-    /// Ctrl+Q: turn the active panel into a quick-view pane (TC style F3 preview).
+    /// Ctrl+Q / Ctrl+P: quick-view the **other** panel (Total Commander style).
+    ///
+    /// The active panel keeps its list and cursor, so moving the cursor drives
+    /// the preview. Pressing the chord again closes the preview.
     fn toggle_preview(&mut self) {
-        if self.active().mode == PanelMode::Preview {
-            self.active_mut().leave_preview();
+        let target = 1 - self.active;
+
+        if self.panels[target].mode == PanelMode::Preview {
+            self.panels[target].leave_preview();
+            self.sync_preview_scroll();
             self.status = "Quick preview closed".to_string();
             return;
         }
 
-        // Only one preview at a time: the other panel becomes its subject.
-        if self.other().mode == PanelMode::Preview {
-            self.other_mut().leave_preview();
+        // Only one preview at a time.
+        if self.panels[self.active].mode == PanelMode::Preview {
+            self.panels[self.active].leave_preview();
         }
 
-        self.active_mut().set_mode(PanelMode::Preview);
+        self.panels[target].set_mode(PanelMode::Preview);
         self.focus = Focus::Panels;
         self.sync_preview_scroll();
         self.status =
-            "Quick preview: ↑↓ scroll, ←→ pan, Ctrl+Q/Esc close, Ctrl+T thumbnails".to_string();
+            "Quick preview of the other panel: ↑↓ scroll, Ctrl+Q/Ctrl+P/Esc close".to_string();
     }
 
     fn toggle_thumbnails(&mut self) {
@@ -770,10 +878,10 @@ impl App {
         self.status = "Quick preview: ↑↓ scroll, ←→ pan, Ctrl+arrow or Ctrl+Q closes".to_string();
     }
 
-    /// Alt+←/→: open the folder under the active cursor in the neighbouring panel.
+    /// Ctrl+O / Alt+←/→: open the folder under the active cursor in `target`.
     fn open_entry_in_panel(&mut self, target: usize) {
         if target == self.active {
-            self.status = "Alt+arrow points at the other panel".to_string();
+            self.status = "Ctrl+O opens the cursor folder in the other panel".to_string();
             return;
         }
 
@@ -793,16 +901,8 @@ impl App {
         } else {
             None
         };
-        let hidden = self.hidden;
 
-        match self.panels[target].change_dir(entry.path.clone(), select.as_deref(), hidden) {
-            Ok(()) => {
-                self.sync_preview_scroll();
-                let label = if target == 0 { "Left" } else { "Right" };
-                self.status = format!("{label}: {}", self.panels[target].cwd.display());
-            }
-            Err(e) => self.status = format!("Cannot open {}: {}", entry.path.display(), e),
-        }
+        self.start_load(target, entry.path, select, LoadKind::Navigate);
     }
 
     /// Keep the preview subject in sync with the opposite panel's cursor.
@@ -811,9 +911,12 @@ impl App {
             if self.panels[index].mode != PanelMode::Preview {
                 continue;
             }
-            let target = self.panels[1 - index]
-                .current_entry()
-                .map(|entry| entry.path.clone());
+            let other = &self.panels[1 - index];
+            let target = if other.loading {
+                None
+            } else {
+                other.current_entry().map(|entry| entry.path.clone())
+            };
 
             if self.panels[index].preview_path != target {
                 let panel = &mut self.panels[index];
@@ -837,8 +940,17 @@ impl App {
         false
     }
 
+    /// Reject operations while the active panel is still listing.
+    fn blocked_by_loading(&mut self) -> bool {
+        if self.active().loading {
+            self.status = "Folder is still loading — wait or press Esc".to_string();
+            return true;
+        }
+        false
+    }
+
     fn add_favorite(&mut self) {
-        if self.blocked_by_preview() {
+        if self.blocked_by_preview() || self.blocked_by_loading() {
             return;
         }
         let cwd = self.active().cwd.clone();
@@ -860,18 +972,9 @@ impl App {
         let Some(path) = self.favorites.paths.get(self.fav_cursor).cloned() else {
             return;
         };
-        if !path.is_dir() {
-            self.status = format!("Favorite does not exist: {}", path.display());
-            return;
-        }
-        let hidden = self.hidden;
-        match self.active_mut().change_dir(path, None, hidden) {
-            Ok(()) => {
-                self.focus = Focus::Panels;
-                self.status = self.active().cwd.display().to_string();
-            }
-            Err(e) => self.status = format!("Cannot open favorite: {e}"),
-        }
+        let index = self.active;
+        self.start_load(index, path, None, LoadKind::Navigate);
+        self.focus = Focus::Panels;
     }
 
     fn remove_favorite(&mut self) {
@@ -886,19 +989,6 @@ impl App {
             Err(e) => {
                 self.status = format!("Removed, but could not save favorites: {e}");
             }
-        }
-    }
-
-    fn refresh_all(&mut self) {
-        let hidden = self.hidden;
-        let mut error = None;
-        for panel in &mut self.panels {
-            if let Err(e) = panel.reload(hidden) {
-                error = Some(format!("{}: {}", panel.cwd.display(), e));
-            }
-        }
-        if let Some(error) = error {
-            self.status = error;
         }
     }
 }
@@ -927,6 +1017,22 @@ mod tests {
 
     fn press(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         app.on_key(KeyEvent::new(code, modifiers));
+    }
+
+    /// Drive `App::tick` until every pending directory load has been applied.
+    fn wait_for_loads(app: &mut App) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            app.tick();
+            if app.loads.iter().all(Option::is_none) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "background directory loads did not finish in time"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[test]
@@ -964,6 +1070,7 @@ mod tests {
         let mut app = app_for(&left, &right);
         app.panels[0].select_name("child");
         press(&mut app, KeyCode::Right, KeyModifiers::ALT);
+        wait_for_loads(&mut app);
 
         assert_eq!(app.panels[1].cwd, child);
     }
@@ -990,15 +1097,53 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut app = app_for(tmp.path(), tmp.path());
 
+        // Ctrl+Q previews the *other* panel; the active panel keeps its list.
         press(&mut app, KeyCode::Char('q'), KeyModifiers::CONTROL);
-        assert_eq!(app.panels[0].mode, PanelMode::Preview);
-        press(&mut app, KeyCode::Char('q'), KeyModifiers::CONTROL);
+        assert_eq!(app.panels[1].mode, PanelMode::Preview);
         assert_eq!(app.panels[0].mode, PanelMode::List);
+        press(&mut app, KeyCode::Char('q'), KeyModifiers::CONTROL);
+        assert_eq!(app.panels[1].mode, PanelMode::List);
+
+        // Ctrl+P is the reliable alias.
+        press(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
+        assert_eq!(app.panels[1].mode, PanelMode::Preview);
+        press(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
+        assert_eq!(app.panels[1].mode, PanelMode::List);
 
         press(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL);
         assert_eq!(app.panels[0].mode, PanelMode::Thumbnails);
         press(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL);
         assert_eq!(app.panels[0].mode, PanelMode::List);
+    }
+
+    #[test]
+    fn ctrl_o_opens_the_cursor_folder_in_the_other_panel() {
+        let tmp = tempfile::tempdir().unwrap();
+        let left = tmp.path().join("left");
+        let right = tmp.path().join("right");
+        let child = left.join("child");
+        fs::create_dir_all(&child).unwrap();
+        fs::create_dir_all(&right).unwrap();
+
+        let mut app = app_for(&left, &right);
+        app.panels[0].select_name("child");
+        press(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
+        wait_for_loads(&mut app);
+
+        assert_eq!(app.panels[1].cwd, child);
+    }
+
+    #[test]
+    fn shift_tab_toggles_favorites_focus() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+
+        press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert_eq!(app.focus, Focus::Favorites);
+        assert!(app.show_favorites);
+
+        press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert_eq!(app.focus, Focus::Panels);
     }
 
     #[test]

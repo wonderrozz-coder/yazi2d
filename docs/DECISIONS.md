@@ -164,7 +164,8 @@ same `ImageCache` API.
 
 ## ADR-013 — Cross-panel keys: `Ctrl+←/→` previews, `Alt+←/→` opens
 
-**Status:** accepted (2026-11-11)
+**Status:** accepted (2026-11-11), superseded in practice by ADR-017
+(macOS does not deliver these chords reliably; they remain as aliases)
 
 **Context:** The user wanted panel-to-panel navigation without leaving the
 active panel, and accepted that this conflicts with the earlier idea of
@@ -204,3 +205,89 @@ previous mode.
 
 **Consequences:** The preview subject can never be mutated by accident, and the
 cursor/selection model stays tied to the list or grid.
+
+## ADR-016 — Directory listing runs on a worker thread; optional file log
+
+**Status:** accepted (2026-11-11, `0.3.0`)
+
+**Context:** `Panel::reload`/`change_dir` called `fs::read_dir` plus one
+`metadata()` per entry on the UI thread. On large directories, network shares and
+cloud placeholders (iCloud/Nextcloud) a single `metadata()` can block for
+seconds; the whole TUI freezes and there was no way to find out which path was
+responsible.
+
+**Decision:**
+
+1. Navigation (`Enter`, `Backspace`, favorites, `Ctrl+O`, `Alt+←/→`, refresh)
+   starts a background load: `Panel::spawn_load` runs `list_dir` on a thread and
+   returns an `mpsc::Receiver<LoadResult>`. `App::tick` polls it and applies the
+   result only if its generation matches the panel's latest request.
+2. While a load is in flight the panel keeps its previous list, shows
+   `Loading <path>…` in the sub-header, and rejects file operations. `Esc`
+   cancels the pending load. Stale results are dropped.
+3. A lightweight append-only log records startup, every directory load with its
+   duration, slow loads (> 250 ms) as `WARN`, image decodes, jobs, panics and
+   slow key handling. It is written to `$YAZI2D_CONFIG_DIR/yazi2d.log` (or the
+   platform config dir) and is disabled with `YAZI2D_LOG=off`; a custom path can
+   be set with `YAZI2D_LOG=/path/to/file`. The file is rotated to `yazi2d.log.1`
+   above 4 MB at startup. A bounded queue feeds a background writer; messages
+   can be dropped when it is full or the process exits abruptly.
+4. Startup (`App::new`) still lists the two initial directories synchronously so
+   the first frame is complete; it is logged like any other load.
+
+**Consequences:** The UI stays responsive and a hang becomes a visible
+`Loading…` state plus a log line naming the slow path. Loads can be superseded
+cheaply by starting a new one; only the newest generation is applied. Tests
+drive `App::tick` until loads settle (`wait_for_loads`). Preview mode shows
+"Loading…" while the subject panel is still listing.
+
+## ADR-017 — macOS-safe keys: `Ctrl+Q` previews the other panel, `Ctrl+P`/`Ctrl+O` aliases, `Shift+Tab` favorites
+
+**Status:** accepted (2026-11-11, `0.3.0`)
+
+**Context:** On macOS `Ctrl+←/→` is often grabbed by Mission Control and
+`Alt+←/→` is not delivered by several terminals, so the cross-panel workflow was
+unusable. The user also asked for a `Tab`-based way into favorites and for
+`Ctrl+Q` to always preview the *opposite* panel (Total Commander semantics).
+
+**Decision:**
+
+- `Ctrl+Q` (alias `Ctrl+P`, because some terminals consume `Ctrl+Q` for XOFF)
+  toggles a quick preview of the **other** panel; the active panel keeps its
+  list/grid and its cursor, so moving it drives the preview.
+- `Ctrl+O` opens the folder under the active cursor in the other panel
+  (alias of the old `Alt+←/→`; `Alt+←/→` and `Ctrl+←/→` remain as aliases for
+  terminals that do deliver them).
+- `Shift+Tab` (`BackTab`) toggles favorites focus; `Ctrl+D` does the same, and
+  pressing either key again returns to the panels. `Tab` still switches panels.
+- The arrow chords are documented as "may be intercepted by the OS/terminal";
+  every cross-panel action has a letter/Ctrl alternative.
+
+**Consequences:** The whole two-panel workflow works with plain `Ctrl+letter`
+chords, which terminals deliver reliably. `Ctrl+Q` no longer changes the active
+panel, so the preview always mirrors the cursor the user is moving. Tests and
+the PTY script use `Ctrl+P`/`Ctrl+O`/`Shift+Tab` as the primary bindings.
+
+## ADR-018 — Image quality: Lanczos3, bounded pre-scale, adaptive tiles
+
+**Status:** accepted (2026-11-11, `0.3.0`)
+
+**Context:** Thumbnails and previews looked blocky. Half-block rendering gives
+only one pixel per cell column and two per row, and the old code used a cheap
+`Triangle` filter into a fixed 20×11 tile.
+
+**Decision:**
+
+1. Decode once, then immediately shrink the source so its longest side is at
+   most 1600 px (`Triangle`, cheap) — this bounds the cost of later filtering.
+2. Resize that bounded image to the exact target with `Lanczos3`, which keeps
+   edges and text legible at small sizes. Resized buffers stay cached per
+   `(path, width, height)`.
+3. Thumbnail tiles are adaptive: 3 columns on wide panels, 2 on narrow ones,
+   with a tile width of 22–32 cells and a height chosen so the image area is
+   roughly square in pixels (`(width-2)/2 + 3` cells).
+4. Keep the half-block renderer as the fallback; sixel/Kitty remain roadmap.
+
+**Consequences:** Noticeably crisper thumbnails and previews at the same
+terminal resolution; decoding cost is bounded (pre-scale is linear, Lanczos3
+runs on a ≤1600 px image). The binary and memory limits are unchanged.

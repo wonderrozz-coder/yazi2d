@@ -10,25 +10,40 @@ main::run
   ├─ event::poll(80ms)
   │    ├─ KeyEvent  ──► App::on_key ──► state changes, App::dirty = true
   │    └─ Resize    ──► App::dirty = true
-  ├─ App::tick      ──► sync preview, drain Job::rx, finish jobs, refresh panels
+  ├─ App::tick      ──► poll directory loads, sync preview, drain Job::rx,
+  │                     finish jobs, refresh panels
   └─ if App::dirty  ──► ui::draw(frame, &mut App)
 ```
 
-There is exactly one UI thread and at most one background `Job`. There is no
-async runtime and no `unsafe` code. `App::dirty` prevents idle repaints: a
-static screen produces no terminal output and negligible CPU.
+There is exactly one UI thread, at most one background `Job`, and at most one
+pending directory load per panel. There is no async runtime and no `unsafe`
+code. `App::dirty` prevents idle repaints: a static screen produces no terminal
+output and negligible CPU.
 
 Terminal setup/teardown lives in `main.rs`. A panic hook disables raw mode and
-leaves the alternate screen so a crash never leaves the shell unusable.
+leaves the alternate screen so a crash never leaves the shell unusable; it also
+writes the panic to the log.
 
 ## 2. Module map
 
 ### `main.rs`
 
 - Parses `--help`, `--version`, and up to two positional directories.
-- Initializes raw mode + alternate screen, installs the panic hook.
+- Initializes logging (`logging::init`), raw mode + alternate screen, panic hook.
 - Owns the event loop and the dirty-render check.
 - Restores the terminal on all normal exits.
+
+### `logging.rs`
+
+Tiny append-only file logger, no dependencies:
+
+- `init()` resolves the sink once: `YAZI2D_LOG=off` disables it,
+  `YAZI2D_LOG=/path` selects a file, anything else (or unset) uses
+  `config_dir()/yazi2d.log`. Rotates to `.1` above 4 MB.
+- `info` / `warn` / `error` queue `timestamp LEVEL message` for a background
+  writer. The bounded queue can drop messages when full; I/O errors are ignored.
+- Used for startup, directory loads (with duration; slow loads are `WARN`),
+  image decodes, jobs, preview loads, key events slower than 100 ms and panics.
 
 ### `app.rs`
 
@@ -46,6 +61,7 @@ pub struct App {
     pub prompt: Option<Prompt>, // Mkdir | Rename | Delete
     pub help: bool,
     pub job: Option<Job>,
+    pub loads: [Option<Receiver<LoadResult>>; 2],
     pub preview_cache: PreviewCache,
     pub image_cache: ImageCache,
     pub status: String,
@@ -58,11 +74,14 @@ Responsibilities:
 
 - key routing by precedence: global quit → help → prompt → global shortcuts →
   focus-specific handler;
-- panel navigation (`enter_current`, `go_parent`);
+- panel navigation (`enter_current`, `go_parent`, `open_favorite`,
+  `open_entry_in_panel`) starts a background directory load;
+- polling loads in `tick`, applying the newest generation only;
 - file operation orchestration (`start_transfer`, `begin_*`, `do_*`);
 - favorites actions (add/remove/open/focus/toggle/save);
-- view modes: `toggle_preview` (`Ctrl+Q`), `preview_panel` (`Ctrl+←/→`),
-  `toggle_thumbnails` (`Ctrl+T`), `open_entry_in_panel` (`Alt+←/→`);
+- view modes: `toggle_preview` (`Ctrl+Q`/`Ctrl+P`, always the *other* panel),
+  `preview_panel` (`Ctrl+←/→`), `toggle_thumbnails` (`Ctrl+T`),
+  `open_entry_in_panel` (`Ctrl+O`, `Alt+←/→`);
 - draining job progress in `tick` and refreshing panels on completion.
 
 `Prompt` is a modal enum. Delete confirms on `Enter` or `y`, cancels on
@@ -72,11 +91,14 @@ Responsibilities:
 `sync_preview_scroll()` runs at the start of every `tick` (and after directory
 changes). For each panel in `Preview` mode it stores the opposite panel's
 cursor path in `panel.preview_path`; when the subject changes it resets
-vertical/horizontal scroll and marks the app dirty. This is the only place
-that decides what a preview shows.
+vertical/horizontal scroll and marks the app dirty. If the subject panel is
+still loading, the preview shows `Loading…` until the load is applied. This is
+the only place that decides what a preview shows.
 
 `blocked_by_preview()` rejects file operations (`copy`, `move`, `mkdir`,
-`rename`, `delete`, add-favorite) while the active panel is a preview.
+`rename`, `delete`, add-favorite) while the active panel is a preview;
+`blocked_by_loading()` does the same while the active panel is loading a
+directory.
 
 ### `panel.rs`
 
@@ -100,18 +122,32 @@ pub struct Panel {
     pub preview_max_scroll_x: u16,
     pub grid_cols: usize,
     pub grid_rows: usize,
+    /// True while a background directory load is in flight.
+    pub loading: bool,
+    /// Path of the in-flight load, shown in the sub-header.
+    pub loading_path: Option<PathBuf>,
+    /// Monotonic id of the latest load request; stale results are ignored.
+    pub generation: u64,
 }
 ```
 
 `Entry` stores name, path, `is_dir`, `is_symlink`, `is_parent`, size, mtime.
 
-Listing (`list_dir`):
+Listing (`list_dir`, runs on a worker thread for navigation):
 
 - inserts `..` when a parent exists;
 - skips dotfiles unless `show_hidden`;
 - follows symlinks only to decide `is_dir`/size/mtime, while retaining
   `is_symlink` for display and transfer;
 - sorts by `(parent?, dir?, lowercase name)`.
+
+`Panel::spawn_load(path, select, show_hidden)` bumps `generation`, sets
+`loading`, and returns an `mpsc::Receiver<LoadResult>` from a `std::thread`
+that runs `list_dir`. `Panel::apply_load(result)` accepts only a result whose
+generation matches, then replaces `cwd`/`entries`, clears selection, restores
+the cursor (by name when possible), and clears `loading`. `Panel::reload` and
+`Panel::change_dir` remain synchronous and are used for the initial listing
+and by tests.
 
 Cursor semantics:
 
@@ -146,10 +182,13 @@ Two caches, both keyed by path and validated by mtime + size:
   - `Error(String)`.
 - `ImageCache::render(path, max_width, max_height)` → `Option<Arc<RgbImage>>`:
   - rejects files larger than 64 MiB;
-  - decodes with `image` (PNG/JPEG/GIF/WebP/BMP/TIFF), fits into the requested
-    cell box, keeps `2 * height` pixel rows, and caches resized buffers per
-    `(width, height)`;
-  - composites alpha over the dark UI background so half blocks look right.
+  - decodes with `image` (PNG/JPEG/GIF/WebP/BMP/TIFF) once and caches the
+    decoded source;
+  - pre-scales the source so its longest side is at most 1600 px (`Triangle`),
+    then resizes to the exact target with `Lanczos3`, keeping `2 * height`
+    pixel rows; resized buffers are cached per `(width, height)`;
+  - composites alpha over the dark UI background so half blocks look right;
+  - logs decode time and the source/target sizes.
 
 Both caches are bounded: when they grow past 64 entries they are cleared
 wholesale (simple, predictable, avoids an LRU dependency).
@@ -231,11 +270,15 @@ Panel layout:
 
 `draw_panel` dispatches on `PanelMode`:
 
-- `List` — column header + `List` widget with `ListState`;
-- `Thumbnails` — tile grid. Tile size is 20×11 cells; the renderer sets
-  `grid_cols`/`grid_rows`, then draws visible tiles only. Image tiles call
-  `ImageCache::render` and `render_halfblocks`; directories show `▸`, other
-  files show their extension. The focused tile gets a background highlight.
+- `List` — column header + `List` widget with `ListState`; while a directory
+  load is in flight the header says `Loading <path>…` and the previous list is
+  kept visible;
+- `Thumbnails` — tile grid. Tiles are adaptive: 3 columns on wide panels, 2 on
+  narrow ones, tile width 22–32 cells and height `(width-2)/2 + 3` so the image
+  area is roughly square in pixels. The renderer sets `grid_cols`/`grid_rows`,
+  then draws visible tiles only. Image tiles call `ImageCache::render` and
+  `render_halfblocks`; directories show `▸`, other files show their extension.
+  The focused tile gets a background highlight.
 - `Preview` — subject is the other panel's cursor path (passed in from `draw`).
   Directories and text render as a scrollable `Paragraph`; images render with
   `render_halfblocks`; binary/error content renders as a centered message.
@@ -268,12 +311,30 @@ Key F5
   → refresh_all(), status = "Copied N item(s)."
 ```
 
+### Navigate into a directory (background load)
+
+```
+Enter (active = left)
+  → App::enter_current
+      entry = left.current_entry(); must be a directory
+      rx = left.spawn_load(path, select, hidden)   // generation++, loading = true
+      loads[0] = Some(rx); status = "Loading <path>…"
+  → App::tick (80 ms poll)
+      loads[0].try_recv() → LoadResult
+      left.apply_load(result) if result.generation == left.generation
+          cwd/entries replaced, selection cleared, cursor restored, loading = false
+      sync_preview_scroll(); dirty = true
+Esc while loading
+  → loads[0] = None; left.loading = false; stale result dropped
+```
+
 ### Quick preview
 
 ```
-Ctrl+Right (active = left)
-  → App::preview_panel(1)
-      left not in Preview? right.set_mode(Preview)
+Ctrl+Q / Ctrl+P (active = left)
+  → App::toggle_preview
+      target = other panel (right)
+      right not in Preview? right.set_mode(Preview)
       sync_preview_scroll()
           right.preview_path = left.current_entry().path
   → ui::draw
@@ -287,11 +348,11 @@ Left cursor moves (↓)
 ### Cross-panel open
 
 ```
-Alt+Right (active = left)
+Ctrl+O / Alt+Right (active = left)
   → App::open_entry_in_panel(1)
       entry = left.current_entry()
       entry.is_dir? else status message
-      right.change_dir(entry.path, select, hidden)
+      rx = right.spawn_load(entry.path, select, hidden)
 ```
 
 ### Favorites add
@@ -309,11 +370,13 @@ Ctrl+B
 | What | Where |
 |---|---|
 | Favorites | `$YAZI2D_CONFIG_DIR/favorites.toml` |
+| Log | `$YAZI2D_CONFIG_DIR/yazi2d.log` (or `$YAZI2D_LOG`) |
 | Default config dir | `dirs::config_dir()/yazi2d` |
 | Start directories | CLI args; fallbacks: cwd / home / Downloads |
 | Build artifacts | `target/` (override with `CARGO_TARGET_DIR`) |
 
-No other files are written. Logs go to the status line only.
+No other files are written. User-facing messages go to the status line; the
+diagnostic log is separate and never required for correctness.
 
 ## 5. Testing
 
@@ -321,13 +384,17 @@ No other files are written. Logs go to the status line only.
 - Transfer tests consume `Job::rx` until `Done` with a 10-second timeout.
 - Preview tests build tiny text/binary/image fixtures and assert cache output.
 - App tests drive `App::on_key` with `KeyEvent`s: mode transitions,
-  `Ctrl+←/→`, `Alt+←/→`, preview-follows-cursor, Enter-confirmed delete.
+  `Ctrl+Q`/`Ctrl+P` targeting the other panel, `Ctrl+O`, `Alt+←/→`,
+  `Shift+Tab`, preview-follows-cursor, Enter-confirmed delete. Navigation
+  tests call `wait_for_loads()` (repeated `App::tick` with a timeout).
+- `logging` tests check line formatting and that disabled logging is a no-op.
 - UI tests render into `TestBackend` and assert text fragments (paths, names,
-  overlays, preview content, thumbnail titles).
+  overlays, preview content, thumbnail titles, `Loading…` state).
 - `scripts/e2e_pty.py` runs the real binary in a PTY with a 120×30 window,
   continuously drains output in a thread, and verifies copy, move, favorites,
-  hidden files, quick preview, thumbnails, cross-panel open, help, mkdir,
-  delete with `Enter`, and clean exit.
+  hidden files, quick preview (`Ctrl+P`), thumbnails, cross-panel open
+  (`Ctrl+O`), favorites focus (`Shift+Tab`), help, mkdir, delete with `Enter`,
+  and clean exit.
 
 ## 6. Extension points
 
@@ -348,7 +415,8 @@ No other files are written. Logs go to the status line only.
 
 ## 7. Invariants
 
-1. The UI thread never performs recursive/bulk I/O.
+1. The UI thread never performs recursive/bulk I/O; directory listings run on a
+   worker thread.
 2. `..` is navigation only.
 3. Destination names are never silently overwritten.
 4. The path bar is always the first inner row of a panel.
@@ -359,5 +427,8 @@ No other files are written. Logs go to the status line only.
 9. Only one panel is in `Preview`; it mirrors the other panel's cursor and is
    read-only.
 10. Preview/thumbnail decoding goes through the caches, only for visible items.
-11. `Ctrl+←/→` addresses the neighbour panel, `Alt+←/→` opens the active
-    cursor folder there. These bindings are not navigation history.
+11. `Ctrl+Q`/`Ctrl+P` target the *other* panel; `Ctrl+O`/`Alt+←/→` open the
+    active cursor folder there. These bindings are not navigation history.
+12. Only the newest directory load generation is applied; a superseded or
+    cancelled load never changes a panel.
+13. Logging must never panic and must never block the UI on I/O.

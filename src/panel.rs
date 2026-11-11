@@ -2,7 +2,14 @@ use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
+use std::time::{Instant, SystemTime};
+
+use crate::logging;
+
+/// Directory loads slower than this are logged as `WARN`.
+const SLOW_LOAD_MS: u128 = 250;
 
 /// One visible row in a panel. The synthetic `..` entry is also an `Entry`.
 #[derive(Clone, Debug)]
@@ -37,6 +44,23 @@ pub enum PanelMode {
     Preview,
 }
 
+/// Whether applying a load should behave like navigation or like a refresh.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LoadKind {
+    Navigate,
+    Refresh,
+}
+
+/// Result of a background directory listing.
+pub struct LoadResult {
+    pub generation: u64,
+    pub kind: LoadKind,
+    pub path: PathBuf,
+    pub select: Option<String>,
+    pub entries: io::Result<Vec<Entry>>,
+    pub elapsed: std::time::Duration,
+}
+
 pub struct Panel {
     pub cwd: PathBuf,
     pub entries: Vec<Entry>,
@@ -57,6 +81,12 @@ pub struct Panel {
     /// Grid geometry, updated by the thumbnail renderer.
     pub grid_cols: usize,
     pub grid_rows: usize,
+    /// True while a background directory load is in flight.
+    pub loading: bool,
+    /// Path of the in-flight load, shown in the sub-header.
+    pub loading_path: Option<PathBuf>,
+    /// Monotonic id of the newest load request; stale results are ignored.
+    pub generation: u64,
 }
 
 impl Panel {
@@ -78,6 +108,9 @@ impl Panel {
             preview_max_scroll_x: 0,
             grid_cols: 1,
             grid_rows: 1,
+            loading: false,
+            loading_path: None,
+            generation: 0,
         }
     }
 
@@ -148,7 +181,12 @@ impl Panel {
         Ok(())
     }
 
-    /// Change directory. `select` is a child name to put the cursor on (used when going up).
+    /// Change directory synchronously (initial listing and tests).
+    ///
+    /// Navigation in the app goes through `spawn_load`/`apply_load` so the UI
+    /// never blocks; this helper remains for callers that already have the
+    /// listing result on hand.
+    #[allow(dead_code)]
     pub fn change_dir(
         &mut self,
         path: PathBuf,
@@ -172,6 +210,119 @@ impl Panel {
 
     pub fn current_entry(&self) -> Option<&Entry> {
         self.entries.get(self.cursor)
+    }
+
+    /// Start listing `path` on a worker thread.
+    ///
+    /// The panel keeps its previous list until `apply_load` is called with the
+    /// matching generation, so the UI stays navigable and never freezes on a
+    /// slow filesystem.
+    pub fn spawn_load(
+        &mut self,
+        path: PathBuf,
+        select: Option<String>,
+        show_hidden: bool,
+        kind: LoadKind,
+    ) -> Receiver<LoadResult> {
+        self.generation += 1;
+        let generation = self.generation;
+        self.loading = true;
+        self.loading_path = Some(path.clone());
+        self.error = None;
+
+        let (sender, receiver) = mpsc::channel();
+        let thread_path = path.clone();
+        let thread_select = select.clone();
+        thread::spawn(move || {
+            logging::info(format!("load start: {}", thread_path.display()));
+            let started = Instant::now();
+            let entries = list_dir(&thread_path, show_hidden);
+            let elapsed = started.elapsed();
+            let _ = sender.send(LoadResult {
+                generation,
+                kind,
+                path: thread_path,
+                select: thread_select,
+                entries,
+                elapsed,
+            });
+        });
+
+        receiver
+    }
+
+    /// Apply a background load. Returns `true` when the directory was replaced.
+    ///
+    /// Results from superseded or cancelled loads are ignored.
+    pub fn apply_load(&mut self, load: LoadResult) -> bool {
+        if load.generation != self.generation {
+            logging::info(format!(
+                "load ignored (stale generation {}): {}",
+                load.generation,
+                load.path.display()
+            ));
+            return false;
+        }
+
+        self.loading = false;
+        self.loading_path = None;
+
+        match load.entries {
+            Ok(entries) => {
+                let valid: HashSet<PathBuf> = entries
+                    .iter()
+                    .filter(|entry| !entry.is_parent)
+                    .map(|entry| entry.path.clone())
+                    .collect();
+
+                self.cwd = load.path;
+                self.entries = entries;
+
+                match load.kind {
+                    LoadKind::Navigate => {
+                        self.selected.clear();
+                        self.offset = 0;
+                    }
+                    LoadKind::Refresh => {
+                        self.selected.retain(|path| valid.contains(path));
+                    }
+                }
+
+                self.cursor = load
+                    .select
+                    .and_then(|name| self.entries.iter().position(|entry| entry.name == name))
+                    .unwrap_or(if self.entries.len() > 1 { 1 } else { 0 })
+                    .min(self.entries.len().saturating_sub(1));
+                self.error = None;
+                self.ensure_mode_visible();
+                true
+            }
+            Err(error) => {
+                logging::warn(format!(
+                    "load failed in {} ms: {}: {error}",
+                    load.elapsed.as_millis(),
+                    load.path.display()
+                ));
+                self.error = Some(error.to_string());
+                false
+            }
+        }
+    }
+
+    /// Drop the pending load without applying it.
+    pub fn cancel_load(&mut self) {
+        self.generation += 1;
+        self.loading = false;
+        self.loading_path = None;
+    }
+
+    /// Human-readable subject of the pending load.
+    pub fn loading_label(&self) -> Option<String> {
+        self.loading_path.as_ref().map(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.display().to_string())
+        })
     }
 
     pub fn move_cursor(&mut self, delta: i32) {
@@ -203,6 +354,8 @@ impl Panel {
         self.ensure_mode_visible();
     }
 
+    /// Move the cursor to a visible entry by name (tests and sync callers).
+    #[allow(dead_code)]
     pub fn select_name(&mut self, name: &str) {
         if let Some(index) = self.entries.iter().position(|e| e.name == name) {
             self.cursor = index;
@@ -283,6 +436,35 @@ impl Panel {
 }
 
 fn list_dir(path: &Path, show_hidden: bool) -> io::Result<Vec<Entry>> {
+    let started = Instant::now();
+    let result = list_dir_inner(path, show_hidden);
+    let elapsed = started.elapsed();
+
+    match &result {
+        Ok(entries) => {
+            let message = format!(
+                "load done: {} entries in {} ms: {}",
+                entries.len().saturating_sub(1),
+                elapsed.as_millis(),
+                path.display()
+            );
+            if elapsed.as_millis() > SLOW_LOAD_MS {
+                logging::warn(format!("slow directory load — {message}"));
+            } else {
+                logging::info(message);
+            }
+        }
+        Err(error) => logging::warn(format!(
+            "load failed in {} ms: {}: {error}",
+            elapsed.as_millis(),
+            path.display()
+        )),
+    }
+
+    result
+}
+
+fn list_dir_inner(path: &Path, show_hidden: bool) -> io::Result<Vec<Entry>> {
     let mut entries = Vec::new();
 
     if let Some(parent) = path.parent() {
@@ -446,5 +628,47 @@ mod tests {
         assert_eq!(panel.mode, PanelMode::Thumbnails);
         assert!(panel.preview_path.is_none());
         assert_eq!(panel.preview_scroll, 0);
+    }
+
+    #[test]
+    fn background_load_applies_only_the_newest_generation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = tmp.path().join("first");
+        let second = tmp.path().join("second");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        fs::write(second.join("inside.txt"), "x").unwrap();
+
+        let mut panel = Panel::new(tmp.path().to_path_buf());
+        let stale = panel.spawn_load(first.clone(), None, false, LoadKind::Navigate);
+        let newest = panel.spawn_load(second.clone(), None, false, LoadKind::Navigate);
+        assert!(panel.loading);
+        assert_eq!(panel.loading_path.as_deref(), Some(second.as_path()));
+
+        // Drain both workers; the first result is stale and must be ignored.
+        let stale_result = stale.recv().unwrap();
+        let newest_result = newest.recv().unwrap();
+        assert!(!panel.apply_load(stale_result));
+        assert!(panel.apply_load(newest_result));
+
+        assert_eq!(panel.cwd, second);
+        assert!(!panel.loading);
+        assert!(panel.loading_path.is_none());
+        assert!(panel.entries.iter().any(|entry| entry.name == "inside.txt"));
+    }
+
+    #[test]
+    fn cancel_load_drops_the_pending_result() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("a.txt"), "a").unwrap();
+
+        let mut panel = Panel::new(tmp.path().to_path_buf());
+        let receiver = panel.spawn_load(tmp.path().to_path_buf(), None, false, LoadKind::Refresh);
+        panel.cancel_load();
+
+        assert!(!panel.loading);
+        assert!(panel.loading_path.is_none());
+        assert!(!panel.apply_load(receiver.recv().unwrap()));
+        assert_eq!(panel.cwd, tmp.path());
     }
 }

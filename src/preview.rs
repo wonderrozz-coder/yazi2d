@@ -3,9 +3,11 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use image::{DynamicImage, RgbImage};
+
+use crate::logging;
 
 /// How much of a text file we are willing to read for a preview.
 pub const TEXT_LIMIT: usize = 512 * 1024;
@@ -15,6 +17,8 @@ pub const MAX_TEXT_LINES: usize = 5_000;
 pub const MAX_DIR_CHILDREN: usize = 64;
 /// Do not try to decode absurdly large images on the UI thread.
 pub const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+/// Pre-scale large sources before the final (expensive) Lanczos3 pass.
+pub const MAX_SOURCE_EDGE: u32 = 1600;
 
 #[derive(Clone, Debug)]
 pub struct DirChild {
@@ -82,11 +86,23 @@ impl PreviewCache {
         };
 
         if stale {
+            let started = Instant::now();
+            logging::info(format!(
+                "preview load start: {} ({}, {})",
+                path.display(),
+                if path.is_dir() { "directory" } else { "file" },
+                len
+            ));
             let content = if path.is_dir() {
                 load_directory(path, show_hidden)
             } else {
                 load_file(path)
             };
+            logging::info(format!(
+                "preview load done in {} ms: {}",
+                started.elapsed().as_millis(),
+                path.display()
+            ));
             if self.entries.len() > 64 {
                 self.entries.clear();
             }
@@ -259,10 +275,31 @@ impl ImageCache {
         };
 
         if stale {
-            let source = image::ImageReader::open(path)
+            let started = Instant::now();
+            logging::info(format!(
+                "image decode start: {} ({} bytes)",
+                path.display(),
+                len
+            ));
+            let decoded = image::ImageReader::open(path)
                 .ok()
                 .and_then(|reader| reader.with_guessed_format().ok())
                 .and_then(|reader| reader.decode().ok());
+            let source = decoded.map(shrink_source);
+            match &source {
+                Some(image) => logging::info(format!(
+                    "image decode done in {} ms: {} ({}×{})",
+                    started.elapsed().as_millis(),
+                    path.display(),
+                    image.width(),
+                    image.height()
+                )),
+                None => logging::warn(format!(
+                    "image decode failed in {} ms: {}",
+                    started.elapsed().as_millis(),
+                    path.display()
+                )),
+            }
 
             if self.entries.len() > 64 {
                 self.entries.clear();
@@ -294,13 +331,31 @@ impl ImageCache {
                 &rgba,
                 width,
                 height,
-                image::imageops::FilterType::Triangle,
+                image::imageops::FilterType::Lanczos3,
             );
             Arc::new(composite_on_dark(&resized))
         });
 
         entry.resized.get(&key).cloned()
     }
+}
+
+/// Bound the decoded source so the final Lanczos3 pass stays cheap.
+fn shrink_source(image: DynamicImage) -> DynamicImage {
+    let (width, height) = (image.width(), image.height());
+    let longest = width.max(height);
+    if longest <= MAX_SOURCE_EDGE {
+        return image;
+    }
+
+    let scale = MAX_SOURCE_EDGE as f64 / longest as f64;
+    let target_width = ((width as f64 * scale).round() as u32).max(1);
+    let target_height = ((height as f64 * scale).round() as u32).max(1);
+    image.resize_exact(
+        target_width,
+        target_height,
+        image::imageops::FilterType::Triangle,
+    )
 }
 
 fn fit_dimensions(width: u32, height: u32, max_width: u32, max_height: u32) -> (u32, u32) {

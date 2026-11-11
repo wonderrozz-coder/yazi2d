@@ -90,14 +90,17 @@ impl Favorites {
     }
 }
 
-pub fn config_file() -> PathBuf {
+pub fn config_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("YAZI2D_CONFIG_DIR") {
-        return PathBuf::from(dir).join("favorites.toml");
+        return PathBuf::from(dir);
     }
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("yazi2d")
-        .join("favorites.toml")
+}
+
+pub fn config_file() -> PathBuf {
+    config_dir().join("favorites.toml")
 }
 
 fn default_paths() -> Vec<PathBuf> {
