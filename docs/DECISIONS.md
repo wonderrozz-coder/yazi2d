@@ -446,3 +446,31 @@ same actions on an arrow plus a function key, mirroring the panel layout.
 **Consequences:** Every cross-panel action now has a plain-keyboard path that no
 window manager intercepts. `F9` was unused; macOS may require `Fn` for it, and
 the `Ctrl+O`/`Ctrl+T` bindings remain the primary ones.
+
+## ADR-025 — Key repeat and debounced horizontal swipes
+
+**Status:** accepted (2026-11-11, `0.3.5`)
+
+**Context:** Two regressions appeared after the gesture work. Holding an arrow
+stopped scrolling: enabling `REPORT_EVENT_TYPES` makes a held key arrive as
+`KeyEventKind::Repeat`, and the event loop only matched `Press`. Separately,
+macOS emits `ScrollLeft`/`ScrollRight` inside largely vertical two-finger
+gestures, so the panels dove into folders the user never meant to open.
+
+**Decision:**
+
+1. `main::run` handles `Press | Repeat` identically; `Release` only clears held
+   modifiers.
+2. `App::on_horizontal_scroll` accumulates signed distance and acts only after
+   `SWIPE_THRESHOLD` (4) events, then blocks further horizontal events for
+   `SWIPE_COOLDOWN` (450 ms) so one long swipe performs one action.
+3. `App::on_scroll` records `last_scroll`; a horizontal event within
+   `SWIPE_VERTICAL_SUPPRESS` (220 ms) of vertical scrolling resets the
+   accumulator and does nothing. Stale accumulations expire after
+   `SWIPE_RESET_AFTER` (350 ms).
+4. The action itself moved to `act_on_swipe`, keeping the detector independent
+   of what the swipe means in each panel mode.
+
+**Consequences:** Key repeat works again, and a swipe needs a deliberate
+horizontal movement. A very slow, long swipe may need a second attempt, which is
+preferable to accidental navigation.

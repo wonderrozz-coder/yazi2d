@@ -20,7 +20,7 @@ filesystems, a GUI, sixel/Kitty image protocols.
 
 ## Current status (2026-11-11)
 
-Version `0.3.4` — MVP + quick view, thumbnails, background loading, logging,
+Version `0.3.5` — MVP + quick view, thumbnails, background loading, logging,
 sorting, type colours, bulk rename, trackpad gestures, a live footer, and a
 polished thumbnail grid with a separate extension column.
 
@@ -41,7 +41,8 @@ polished thumbnail grid with a separate extension column.
 - [x] Double-Tab favorites, trackpad scrolling/swipes, modifier-aware footer.
 - [x] Folder/file thumbnail glyphs, `Ext` column in the list.
 - [x] `F9` chord: `F9` + arrows for cross-panel open / thumbnails.
-- [x] 57 unit tests + a real-PTY end-to-end test, all green.
+- [x] Key repeat and debounced trackpad swipes.
+- [x] 58 unit tests + a real-PTY end-to-end test, all green.
 - [x] `cargo fmt`, `cargo clippy -D warnings`, release build (≈2 MB binary).
 
 Known limitations and the next steps are in `docs/STATUS.md` and
@@ -172,6 +173,9 @@ Detailed invariants and data flow: `docs/ARCHITECTURE.md`.
   draw function: on cloud mounts those block for hundreds of milliseconds.
 - Previews and image decoding must stay asynchronous; the UI thread only reads
   caches.
+- `KeyEventKind::Repeat` must be handled exactly like `Press`: with keyboard
+  enhancement enabled, held keys arrive as `Repeat` and dropping them breaks
+  key repeat.
 
 ## Key handling summary
 
@@ -202,7 +206,9 @@ Selection & tools: `Ctrl+A` selects all, `Ctrl+G` bulk rename (`{name}`,
 `{ext}`, `{n}`, `%e=ext`), `s`/`Ctrl+S` sort menu, `Ctrl+K` colour menu.
 
 Gestures: two-finger scroll moves the cursor (vertical, inverted), swipes
-mirror the left/right arrows. The footer shows Ctrl/Alt/Shift chords while the
+mirror the left/right arrows after accumulating `SWIPE_THRESHOLD` events. A
+swipe fires at most once per gesture and is dropped right after vertical
+scrolling, so a stray horizontal delta never enters a folder. The footer shows Ctrl/Alt/Shift chords while the
 modifier is held when the terminal supports key-release events.
 
 Global: `Ctrl+C` quits, `q` quits outside prompts/help, `?`/`F1` help.

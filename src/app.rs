@@ -21,6 +21,16 @@ const DOUBLE_TAB_WINDOW: Duration = Duration::from_millis(280);
 /// How long `F9` waits for an arrow before the chord is abandoned.
 const LEADER_WINDOW: Duration = Duration::from_millis(2000);
 
+/// Horizontal swipes must accumulate this much before they act, so a stray
+/// `ScrollLeft`/`ScrollRight` from a mostly vertical gesture does nothing.
+const SWIPE_THRESHOLD: i32 = 4;
+/// One swipe produces one action; further events are ignored for this long.
+const SWIPE_COOLDOWN: Duration = Duration::from_millis(450);
+/// A swipe is abandoned when vertical scrolling happened this recently.
+const SWIPE_VERTICAL_SUPPRESS: Duration = Duration::from_millis(220);
+/// Horizontal deltas older than this are not accumulated across gestures.
+const SWIPE_RESET_AFTER: Duration = Duration::from_millis(350);
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Focus {
     Panels,
@@ -83,6 +93,13 @@ pub struct App {
     pub held_keys: Vec<ModifierKeyCode>,
     /// Set when `F9` was pressed and an arrow is expected next.
     pub leader: Option<Instant>,
+    /// Accumulated horizontal swipe distance and the time of the last event.
+    pub swipe: i32,
+    pub swipe_seen: Option<Instant>,
+    /// Swallow horizontal events until this moment (one action per gesture).
+    pub swipe_blocked_until: Option<Instant>,
+    /// Time of the last vertical scroll, to suppress accidental swipes.
+    pub last_scroll: Option<Instant>,
 }
 
 impl App {
@@ -158,6 +175,10 @@ impl App {
             held_modifiers: KeyModifiers::NONE,
             held_keys: Vec::new(),
             leader: None,
+            swipe: 0,
+            swipe_seen: None,
+            swipe_blocked_until: None,
+            last_scroll: None,
         }
     }
 
@@ -709,6 +730,12 @@ impl App {
             return;
         }
 
+        // Remember that vertical movement happened, so a stray horizontal
+        // event from the same gesture does not open a folder.
+        self.last_scroll = Some(Instant::now());
+        self.swipe = 0;
+        self.swipe_seen = None;
+
         let delta = -delta;
 
         if self.focus == Focus::Favorites {
@@ -735,21 +762,55 @@ impl App {
         }
     }
 
-    /// Handle a two-finger horizontal swipe.
+    /// Feed a raw horizontal scroll event into the swipe detector.
     ///
-    /// macOS sends these as `ScrollLeft`/`ScrollRight` when a trackpad is used
-    /// inside a terminal. They mirror the horizontal arrows in the current
-    /// mode: in a list they open the cursor folder or go to the parent, in the
-    /// preview they pan, in a grid they move the cursor.
-    pub fn on_horizontal_gesture(&mut self, left: bool) {
+    /// macOS reports `ScrollLeft`/`ScrollRight` even during mostly vertical
+    /// gestures, so acting on every event made the panels jump into folders
+    /// unpredictably. A swipe now needs accumulated distance, is suppressed
+    /// right after vertical scrolling, and fires at most once per gesture.
+    pub fn on_horizontal_scroll(&mut self, left: bool) {
+        let now = Instant::now();
         self.dirty = true;
+
         if self.help || self.prompt.is_some() || self.sort_menu || self.theme_menu {
             return;
         }
-        if self.focus != Focus::Panels {
+        if self.swipe_blocked_until.is_some_and(|until| now < until) {
             return;
         }
-        if self.active().loading {
+        if self
+            .last_scroll
+            .is_some_and(|at| now.saturating_duration_since(at) < SWIPE_VERTICAL_SUPPRESS)
+        {
+            // The user is scrolling vertically; drop the partial swipe.
+            self.swipe = 0;
+            self.swipe_seen = None;
+            return;
+        }
+
+        // Start over when the previous horizontal event is stale.
+        if self.swipe_seen.map_or(true, |at| {
+            now.saturating_duration_since(at) > SWIPE_RESET_AFTER
+        }) {
+            self.swipe = 0;
+        }
+        self.swipe_seen = Some(now);
+        self.swipe += if left { -1 } else { 1 };
+
+        if self.swipe.unsigned_abs() < SWIPE_THRESHOLD as u32 {
+            return;
+        }
+
+        let left_swipe = self.swipe < 0;
+        self.swipe = 0;
+        self.swipe_seen = None;
+        self.swipe_blocked_until = Some(now + SWIPE_COOLDOWN);
+        self.act_on_swipe(left_swipe);
+    }
+
+    /// Perform the action of a confirmed horizontal swipe.
+    fn act_on_swipe(&mut self, left: bool) {
+        if self.focus != Focus::Panels || self.active().loading {
             return;
         }
 
@@ -771,6 +832,7 @@ impl App {
         }
     }
 
+    /// Handle a two-finger horizontal swipe.
     fn handle_preview_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => self.active_mut().scroll_preview(-1, 0),
@@ -1802,14 +1864,61 @@ mod tests {
         app.panels[0].select_name("child");
 
         // Swipe right -> enter the folder, exactly like the Right arrow.
-        app.on_horizontal_gesture(false);
+        // A single event is below the threshold and must do nothing.
+        app.on_horizontal_scroll(false);
+        wait_for_loads(&mut app);
+        assert_eq!(app.panels[0].cwd, left, "one event must not act");
+
+        for _ in 0..SWIPE_THRESHOLD {
+            app.on_horizontal_scroll(false);
+        }
         wait_for_loads(&mut app);
         assert_eq!(app.panels[0].cwd, child);
 
         // Swipe left -> go back to the parent.
-        app.on_horizontal_gesture(true);
+        app.swipe_blocked_until = None;
+        for _ in 0..SWIPE_THRESHOLD {
+            app.on_horizontal_scroll(true);
+        }
         wait_for_loads(&mut app);
         assert_eq!(app.panels[0].cwd, left);
+    }
+
+    #[test]
+    fn a_swipe_does_not_fire_twice_and_yields_to_vertical_scrolling() {
+        let tmp = tempfile::tempdir().unwrap();
+        let left = tmp.path().join("left");
+        let child = left.join("child");
+        let right = tmp.path().join("right");
+        fs::create_dir_all(&child).unwrap();
+        fs::create_dir_all(&right).unwrap();
+
+        let mut app = app_for(&left, &right);
+        app.panels[0].select_name("child");
+
+        for _ in 0..SWIPE_THRESHOLD {
+            app.on_horizontal_scroll(false);
+        }
+        wait_for_loads(&mut app);
+        assert_eq!(app.panels[0].cwd, child);
+
+        // A second burst inside the cooldown must be ignored, otherwise a long
+        // gesture would dive several folders deep.
+        app.panels[0].select_name("..");
+        for _ in 0..SWIPE_THRESHOLD * 2 {
+            app.on_horizontal_scroll(false);
+        }
+        wait_for_loads(&mut app);
+        assert_eq!(app.panels[0].cwd, child, "cooldown did not stop the burst");
+
+        // A vertical scroll just before the horizontal noise wins.
+        app.swipe_blocked_until = None;
+        app.on_scroll(1);
+        for _ in 0..SWIPE_THRESHOLD * 2 {
+            app.on_horizontal_scroll(false);
+        }
+        wait_for_loads(&mut app);
+        assert_eq!(app.panels[0].cwd, child, "vertical scroll did not suppress");
     }
 
     #[test]

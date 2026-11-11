@@ -129,7 +129,9 @@ fn run(
         if event::poll(Duration::from_millis(80))? {
             match event::read()? {
                 Event::Key(key) => match key.kind {
-                    KeyEventKind::Press => {
+                    // `Repeat` is what a held key sends once keyboard
+                    // enhancement is on; ignoring it would break key repeat.
+                    KeyEventKind::Press | KeyEventKind::Repeat => {
                         let started = Instant::now();
                         app.on_key(key);
                         let elapsed = started.elapsed();
@@ -155,8 +157,8 @@ fn run(
                 Event::Mouse(mouse) => match mouse.kind {
                     MouseEventKind::ScrollUp => app.on_scroll(-1),
                     MouseEventKind::ScrollDown => app.on_scroll(1),
-                    MouseEventKind::ScrollLeft => app.on_horizontal_gesture(true),
-                    MouseEventKind::ScrollRight => app.on_horizontal_gesture(false),
+                    MouseEventKind::ScrollLeft => app.on_horizontal_scroll(true),
+                    MouseEventKind::ScrollRight => app.on_horizontal_scroll(false),
                     _ => {}
                 },
                 _ => {}
