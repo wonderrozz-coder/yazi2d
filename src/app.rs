@@ -388,6 +388,16 @@ impl App {
     pub fn on_key(&mut self, key: KeyEvent) {
         self.dirty = true;
 
+        // Prompts type text, so they keep the raw character. Everything else is
+        // a shortcut and must not depend on the keyboard layout: with the
+        // Russian layout `Ctrl+и` has to behave like `Ctrl+b`.
+        let shortcut = if self.prompt.is_some() {
+            key
+        } else {
+            crate::keys::normalize(key)
+        };
+        let key = shortcut;
+
         // Track bare modifier presses so the footer reacts while the key is held.
         if let KeyCode::Modifier(modifier) = key.code {
             if !self.held_keys.contains(&modifier) {
@@ -729,7 +739,7 @@ impl App {
         if self.help || self.prompt.is_some() || self.sort_menu || self.theme_menu {
             return;
         }
-        if self.focus != Focus::Panels || self.active().loading {
+        if self.focus == Focus::Panels && self.active().loading {
             return;
         }
 
@@ -743,7 +753,10 @@ impl App {
             return;
         }
 
-        self.open_current_entry();
+        match self.focus {
+            Focus::Favorites => self.open_favorite(),
+            Focus::Panels => self.open_current_entry(),
+        }
     }
 
     /// Enter a folder, or hand a file to the desktop's default application.
@@ -1016,29 +1029,13 @@ impl App {
         }
     }
 
+    /// Enter: open a folder in place, or a file with its associated app.
     fn enter_current(&mut self) {
-        let Some(entry) = self.active().current_entry().cloned() else {
-            return;
-        };
-
-        if !entry.is_dir {
-            self.status = format!(
-                "{} is a file (opening files is not part of the MVP)",
-                entry.name
-            );
+        if self.active().mode == PanelMode::Preview {
+            self.status = "Preview is read-only: Esc returns to the list".to_string();
             return;
         }
-
-        let select = if entry.is_parent {
-            self.active()
-                .cwd
-                .file_name()
-                .map(|name| name.to_string_lossy().to_string())
-        } else {
-            None
-        };
-        let index = self.active;
-        self.start_load(index, entry.path, select, LoadKind::Navigate);
+        self.open_current_entry();
     }
 
     fn go_parent(&mut self) {
@@ -1815,6 +1812,94 @@ mod tests {
         assert_eq!(app.panels[0].current_entry().unwrap().name, "b.txt");
         app.on_scroll(1);
         assert_eq!(app.panels[0].current_entry().unwrap().name, "a.txt");
+    }
+
+    #[test]
+    fn russian_layout_keys_still_trigger_shortcuts() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join("beta")).unwrap();
+        fs::write(tmp.path().join("alpha.txt"), "x").unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+
+        // `и` is the Russian key that sits where `b` is: Ctrl+и adds a favorite.
+        press(&mut app, KeyCode::Char('и'), KeyModifiers::CONTROL);
+        // Compare canonical paths: macOS reports /var and /private/var for the
+        // same temporary directory.
+        let expected = fs::canonicalize(tmp.path()).unwrap();
+        assert!(
+            app.favorites
+                .paths
+                .iter()
+                .any(|path| fs::canonicalize(path).ok() == Some(expected.clone())),
+            "Ctrl+и did not add the directory: {:?}",
+            app.favorites.paths
+        );
+
+        // `ы` is `s`: opens the sort menu.
+        press(&mut app, KeyCode::Char('ы'), KeyModifiers::NONE);
+        assert!(app.sort_menu);
+    }
+
+    #[test]
+    fn russian_layout_does_not_break_prompt_typing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+
+        press(&mut app, KeyCode::Char('n'), KeyModifiers::NONE);
+        for ch in "папка".chars() {
+            press(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        wait_for_loads(&mut app);
+
+        assert!(
+            tmp.path().join("папка").is_dir(),
+            "prompt must keep Cyrillic"
+        );
+    }
+
+    #[test]
+    fn enter_opens_a_file_with_the_system_handler() {
+        let tmp = tempfile::tempdir().unwrap();
+        let left = tmp.path().join("left");
+        fs::create_dir_all(&left).unwrap();
+        fs::write(left.join("note.txt"), "x").unwrap();
+        let mut app = app_for(&left, &left);
+        app.panels[0].select_name("note.txt");
+
+        // The spawn itself may fail in a sandbox, but it must never navigate
+        // and must never report the old "not part of the MVP" message.
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.panels[0].cwd, left);
+        assert!(
+            app.status.contains("Opening") || app.status.contains("Cannot open"),
+            "unexpected status: {}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn double_tap_in_the_favorites_sidebar_opens_the_bookmark() {
+        let tmp = tempfile::tempdir().unwrap();
+        let left = tmp.path().join("left");
+        let bookmarked = tmp.path().join("bookmarked");
+        fs::create_dir_all(&left).unwrap();
+        fs::create_dir_all(&bookmarked).unwrap();
+
+        let mut app = app_for(&left, &left);
+        app.favorites.paths.clear();
+        app.favorites.paths.push(bookmarked.clone());
+        app.fav_cursor = 0;
+        app.focus = Focus::Favorites;
+
+        app.on_pointer_tap();
+        assert_eq!(app.focus, Focus::Favorites);
+
+        app.on_pointer_tap();
+        wait_for_loads(&mut app);
+
+        assert_eq!(app.panels[0].cwd, bookmarked);
+        assert_eq!(app.focus, Focus::Panels);
     }
 
     #[test]

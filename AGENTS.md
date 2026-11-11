@@ -20,7 +20,7 @@ filesystems, a GUI, sixel/Kitty image protocols.
 
 ## Current status (2026-11-11)
 
-Version `0.3.7` — MVP + quick view, thumbnails, background loading, logging,
+Version `0.3.8` — MVP + quick view, thumbnails, background loading, logging,
 sorting, type colours, bulk rename, trackpad gestures, a live footer, and a
 polished thumbnail grid with a separate extension column.
 
@@ -42,7 +42,8 @@ polished thumbnail grid with a separate extension column.
 - [x] Folder/file thumbnail glyphs, `Ext` column in the list.
 - [x] `F9` chord: `F9` + arrows for cross-panel open / thumbnails.
 - [x] Key repeat and debounced trackpad swipes.
-- [x] 59 unit tests + a real-PTY end-to-end test, all green.
+- [x] Layout-independent shortcuts (`src/keys.rs`), `Enter` opens files.
+- [x] 67 unit tests + a real-PTY end-to-end test, all green.
 - [x] `cargo fmt`, `cargo clippy -D warnings`, release build (≈2 MB binary).
 
 Known limitations and the next steps are in `docs/STATUS.md` and
@@ -84,6 +85,7 @@ src/app.rs                 App state, key dispatch, prompts, jobs, favorites act
 src/panel.rs               Panel state, modes, navigation, background directory loads
 src/preview.rs             async preview/image caches, image resampling
 src/colors.rs              file-type groups, colour presets, persisted theme
+src/keys.rs                Cyrillic→Latin key mapping so shortcuts ignore layout
 src/logging.rs             append-only file log (timings, slow loads, panics)
 src/transfer.rs            background copy/move/delete engine + progress channel
 src/favorites.rs           favorites model and TOML persistence
@@ -176,6 +178,9 @@ Detailed invariants and data flow: `docs/ARCHITECTURE.md`.
 - `KeyEventKind::Repeat` must be handled exactly like `Press`: with keyboard
   enhancement enabled, held keys arrive as `Repeat` and dropping them breaks
   key repeat.
+- Shortcuts must be layout-independent: `App::on_key` normalizes Cyrillic
+  characters through `keys::normalize` **before** dispatch, but never while a
+  prompt is open (prompts need the raw character).
 
 ## Key handling summary
 
@@ -207,7 +212,8 @@ Selection & tools: `Ctrl+A` selects all, `Ctrl+G` bulk rename (`{name}`,
 
 Gestures: two-finger scroll moves the cursor (vertical, inverted). A double tap
 with two fingers opens the entry under the cursor (folder → enter, file → system
-default app). Single taps and horizontal scroll are deliberately inert: macOS
+default app) and also works in the favorites sidebar. Any mouse button counts,
+because macOS reports a two-finger tap as a right click. Single taps and horizontal scroll are deliberately inert: macOS
 emits `ScrollLeft`/`ScrollRight` inside vertical gestures, and acting on them
 caused random navigation. The footer shows Ctrl/Alt/Shift chords while the
 modifier is held when the terminal supports key-release events.

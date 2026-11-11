@@ -1,6 +1,7 @@
 mod app;
 mod colors;
 mod favorites;
+mod keys;
 mod logging;
 mod panel;
 mod preview;
@@ -14,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, KeyboardEnhancementFlags,
-    MouseButton, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -159,7 +160,10 @@ fn run(
                 Event::Mouse(mouse) => match mouse.kind {
                     MouseEventKind::ScrollUp => app.on_scroll(-1),
                     MouseEventKind::ScrollDown => app.on_scroll(1),
-                    MouseEventKind::Down(MouseButton::Left) => app.on_pointer_tap(),
+                    // macOS turns a two-finger tap into a right click, and a
+                    // physical tap can be left or right: treat any press the
+                    // same so the gesture works on every device.
+                    MouseEventKind::Down(_) => app.on_pointer_tap(),
                     MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => {}
                     _ => {}
                 },
@@ -182,7 +186,7 @@ fn print_help() {
          \x20 Tab             switch active panel\n\
          \x20 § / Shift+Tab   focus favorites / back to panels\n\
          \x20 Arrows / hjkl   navigate\n\
-         \x20 Enter / l       open directory\n\
+         \x20 Enter / l       open folder, or file in its associated app\n\
          \x20 Backspace / h   go to parent directory\n\
          \x20 Space / Insert  select entry (and move down)\n\
          \x20 F5 / c          copy selection to the other panel\n\

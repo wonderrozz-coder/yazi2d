@@ -517,3 +517,30 @@ fingers the entry gesture.
 mouse reporting from the terminal, which `EnableMouseCapture` already provides.
 Opening files is new behaviour: it is user-initiated only and never touches the
 UI thread.
+
+## ADR-028 — Layout-independent shortcuts, Enter opens files, taps in favorites
+
+**Status:** accepted (2026-11-11, `0.3.8`)
+
+**Context:** Three problems shared one root: keyboard and pointer events arrive in
+a form the app did not expect. With the Russian layout macOS reports `Ctrl+и`
+instead of `Ctrl+B`, so every letter binding died. `Enter` on a file only printed
+"not part of the MVP". And a two-finger tap produced no reaction at all, because
+macOS maps it to a **right** button click while only left presses were handled.
+
+**Decision:**
+
+1. `src/keys.rs` maps Cyrillic characters to the Latin character on the same
+   physical key (`и`→`b`, `ы`→`s`, `ё`→`` ` ``), preserving case. `App::on_key`
+   normalizes before dispatch unless a prompt is open; prompts keep the raw
+   character so Russian file names still work.
+2. `enter_current` delegates to `open_current_entry`: folders load in place,
+   files spawn the platform opener. Preview mode still rejects the action.
+3. `on_pointer_tap` handles both focuses: in the sidebar a double tap opens the
+   bookmark under the cursor, in the panels it opens the entry. `main::run`
+   routes `MouseEventKind::Down(_)` — any button — to that handler.
+
+**Consequences:** One set of bindings works in both layouts, files open from the
+keyboard, and the trackpad gesture works on machines where a two-finger tap is a
+right click. macOS does not expose "double tap with two fingers" as a distinct
+event, so the gesture remains "two taps", not a single two-finger touch.

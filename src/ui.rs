@@ -1088,7 +1088,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         help_line("  ↑↓ / jk", "move cursor / scroll preview", key),
         help_line("  PgUp / PgDn", "page up / down", key),
         help_line("  Home/End · g/G", "top / bottom", key),
-        help_line("  Enter / l", "open directory", key),
+        help_line("  Enter / l", "open folder, or file in its app", key),
         help_line("  Backspace / h", "parent directory", key),
         help_line("  Space / Insert", "select and move down", key),
         help_line("  Esc", "clear selection / close preview", key),
