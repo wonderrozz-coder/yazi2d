@@ -15,15 +15,8 @@ use crate::transfer::{self, Job, JobKind, JobMsg};
 /// How long `F9` waits for an arrow before the chord is abandoned.
 const LEADER_WINDOW: Duration = Duration::from_millis(2000);
 
-/// Horizontal swipes must accumulate this much before they act, so a stray
-/// `ScrollLeft`/`ScrollRight` from a mostly vertical gesture does nothing.
-const SWIPE_THRESHOLD: i32 = 4;
-/// One swipe produces one action; further events are ignored for this long.
-const SWIPE_COOLDOWN: Duration = Duration::from_millis(450);
-/// A swipe is abandoned when vertical scrolling happened this recently.
-const SWIPE_VERTICAL_SUPPRESS: Duration = Duration::from_millis(220);
-/// Horizontal deltas older than this are not accumulated across gestures.
-const SWIPE_RESET_AFTER: Duration = Duration::from_millis(350);
+/// Two pointer taps within this window open the entry under the cursor.
+const DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(400);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Focus {
@@ -85,13 +78,8 @@ pub struct App {
     pub held_keys: Vec<ModifierKeyCode>,
     /// Set when `F9` was pressed and an arrow is expected next.
     pub leader: Option<Instant>,
-    /// Accumulated horizontal swipe distance and the time of the last event.
-    pub swipe: i32,
-    pub swipe_seen: Option<Instant>,
-    /// Swallow horizontal events until this moment (one action per gesture).
-    pub swipe_blocked_until: Option<Instant>,
-    /// Time of the last vertical scroll, to suppress accidental swipes.
-    pub last_scroll: Option<Instant>,
+    /// Timestamp of the last pointer tap, for double-tap detection.
+    pub last_tap: Option<Instant>,
 }
 
 impl App {
@@ -166,10 +154,7 @@ impl App {
             held_modifiers: KeyModifiers::NONE,
             held_keys: Vec::new(),
             leader: None,
-            swipe: 0,
-            swipe_seen: None,
-            swipe_blocked_until: None,
-            last_scroll: None,
+            last_tap: None,
         }
     }
 
@@ -708,12 +693,6 @@ impl App {
             return;
         }
 
-        // Remember that vertical movement happened, so a stray horizontal
-        // event from the same gesture does not open a folder.
-        self.last_scroll = Some(Instant::now());
-        self.swipe = 0;
-        self.swipe_seen = None;
-
         let delta = -delta;
 
         if self.focus == Focus::Favorites {
@@ -740,77 +719,87 @@ impl App {
         }
     }
 
-    /// Feed a raw horizontal scroll event into the swipe detector.
+    /// Handle a pointer tap (keyboard-reporting terminals send taps as clicks).
     ///
-    /// macOS reports `ScrollLeft`/`ScrollRight` even during mostly vertical
-    /// gestures, so acting on every event made the panels jump into folders
-    /// unpredictably. A swipe now needs accumulated distance, is suppressed
-    /// right after vertical scrolling, and fires at most once per gesture.
-    pub fn on_horizontal_scroll(&mut self, left: bool) {
-        let now = Instant::now();
+    /// A double tap with two fingers is the gesture for "open the entry under
+    /// the cursor": folders are entered, files are opened in the system app.
+    /// Single taps do nothing, so a stray click never navigates.
+    pub fn on_pointer_tap(&mut self) {
         self.dirty = true;
-
         if self.help || self.prompt.is_some() || self.sort_menu || self.theme_menu {
             return;
         }
-        if self.swipe_blocked_until.is_some_and(|until| now < until) {
-            return;
-        }
-        if self
-            .last_scroll
-            .is_some_and(|at| now.saturating_duration_since(at) < SWIPE_VERTICAL_SUPPRESS)
-        {
-            // The user is scrolling vertically; drop the partial swipe.
-            self.swipe = 0;
-            self.swipe_seen = None;
-            return;
-        }
-
-        // Start over when the previous horizontal event is stale.
-        if self.swipe_seen.map_or(true, |at| {
-            now.saturating_duration_since(at) > SWIPE_RESET_AFTER
-        }) {
-            self.swipe = 0;
-        }
-        self.swipe_seen = Some(now);
-        self.swipe += if left { -1 } else { 1 };
-
-        if self.swipe.unsigned_abs() < SWIPE_THRESHOLD as u32 {
-            return;
-        }
-
-        let left_swipe = self.swipe < 0;
-        self.swipe = 0;
-        self.swipe_seen = None;
-        self.swipe_blocked_until = Some(now + SWIPE_COOLDOWN);
-        self.act_on_swipe(left_swipe);
-    }
-
-    /// Perform the action of a confirmed horizontal swipe.
-    fn act_on_swipe(&mut self, left: bool) {
         if self.focus != Focus::Panels || self.active().loading {
             return;
         }
 
-        match self.active().mode {
-            PanelMode::Preview => {
-                self.active_mut()
-                    .scroll_preview(0, if left { -1 } else { 1 });
+        let now = Instant::now();
+        let doubled = self
+            .last_tap
+            .take()
+            .is_some_and(|last| now.saturating_duration_since(last) <= DOUBLE_TAP_WINDOW);
+        if !doubled {
+            self.last_tap = Some(now);
+            return;
+        }
+
+        self.open_current_entry();
+    }
+
+    /// Enter a folder, or hand a file to the desktop's default application.
+    fn open_current_entry(&mut self) {
+        let Some(entry) = self.active().current_entry().cloned() else {
+            return;
+        };
+
+        if entry.is_dir {
+            let select = if entry.is_parent {
+                self.active()
+                    .cwd
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+            } else {
+                None
+            };
+            let index = self.active;
+            self.start_load(index, entry.path, select, LoadKind::Navigate);
+            return;
+        }
+
+        if self.active().mode == PanelMode::Preview {
+            self.status = "Preview is read-only: Esc returns to the list".to_string();
+            return;
+        }
+
+        self.open_with_system(&entry.path);
+    }
+
+    /// Open a file with the platform's default handler.
+    fn open_with_system(&mut self, path: &Path) {
+        #[cfg(target_os = "macos")]
+        let program = "open";
+        #[cfg(target_os = "windows")]
+        let program = "explorer";
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let program = "xdg-open";
+
+        match std::process::Command::new(program)
+            .arg(path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(_) => {
+                self.status = format!("Opening {}", path.display());
+                logging::info(format!("open with {program}: {}", path.display()));
             }
-            PanelMode::Thumbnails => {
-                self.active_mut().move_grid(if left { -1 } else { 1 });
-            }
-            PanelMode::List => {
-                if left {
-                    self.go_parent();
-                } else {
-                    self.enter_current();
-                }
+            Err(error) => {
+                self.status = format!("Cannot open {}: {error}", path.display());
             }
         }
     }
 
-    /// Handle a two-finger horizontal swipe.
     fn handle_preview_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => self.active_mut().scroll_preview(-1, 0),
@@ -1829,7 +1818,7 @@ mod tests {
     }
 
     #[test]
-    fn horizontal_swipe_mirrors_the_arrow_keys() {
+    fn a_single_tap_does_nothing_and_a_double_tap_opens_the_folder() {
         let tmp = tempfile::tempdir().unwrap();
         let left = tmp.path().join("left");
         let child = left.join("child");
@@ -1840,29 +1829,21 @@ mod tests {
         let mut app = app_for(&left, &right);
         app.panels[0].select_name("child");
 
-        // Swipe right -> enter the folder, exactly like the Right arrow.
-        // A single event is below the threshold and must do nothing.
-        app.on_horizontal_scroll(false);
+        // One tap only arms the gesture.
+        app.on_pointer_tap();
         wait_for_loads(&mut app);
-        assert_eq!(app.panels[0].cwd, left, "one event must not act");
+        assert_eq!(app.panels[0].cwd, left, "a single tap must not navigate");
+        assert!(app.last_tap.is_some());
 
-        for _ in 0..SWIPE_THRESHOLD {
-            app.on_horizontal_scroll(false);
-        }
+        // The second tap enters the folder.
+        app.on_pointer_tap();
         wait_for_loads(&mut app);
         assert_eq!(app.panels[0].cwd, child);
-
-        // Swipe left -> go back to the parent.
-        app.swipe_blocked_until = None;
-        for _ in 0..SWIPE_THRESHOLD {
-            app.on_horizontal_scroll(true);
-        }
-        wait_for_loads(&mut app);
-        assert_eq!(app.panels[0].cwd, left);
+        assert!(app.last_tap.is_none());
     }
 
     #[test]
-    fn a_swipe_does_not_fire_twice_and_yields_to_vertical_scrolling() {
+    fn a_slow_second_tap_does_not_open_anything() {
         let tmp = tempfile::tempdir().unwrap();
         let left = tmp.path().join("left");
         let child = left.join("child");
@@ -1873,29 +1854,32 @@ mod tests {
         let mut app = app_for(&left, &right);
         app.panels[0].select_name("child");
 
-        for _ in 0..SWIPE_THRESHOLD {
-            app.on_horizontal_scroll(false);
-        }
+        app.on_pointer_tap();
+        // Expire the double-tap window.
+        app.last_tap = Some(Instant::now() - DOUBLE_TAP_WINDOW * 2);
+        app.on_pointer_tap();
         wait_for_loads(&mut app);
-        assert_eq!(app.panels[0].cwd, child);
 
-        // A second burst inside the cooldown must be ignored, otherwise a long
-        // gesture would dive several folders deep.
-        app.panels[0].select_name("..");
-        for _ in 0..SWIPE_THRESHOLD * 2 {
-            app.on_horizontal_scroll(false);
-        }
-        wait_for_loads(&mut app);
-        assert_eq!(app.panels[0].cwd, child, "cooldown did not stop the burst");
+        assert_eq!(app.panels[0].cwd, left, "slow taps must not navigate");
+    }
 
-        // A vertical scroll just before the horizontal noise wins.
-        app.swipe_blocked_until = None;
+    #[test]
+    fn horizontal_scroll_events_are_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let left = tmp.path().join("left");
+        let child = left.join("child");
+        let right = tmp.path().join("right");
+        fs::create_dir_all(&child).unwrap();
+        fs::create_dir_all(&right).unwrap();
+
+        let mut app = app_for(&left, &right);
+        app.panels[0].select_name("child");
+
+        // The event loop drops horizontal scroll events entirely; a vertical
+        // scroll still only moves the cursor, never the directory.
         app.on_scroll(1);
-        for _ in 0..SWIPE_THRESHOLD * 2 {
-            app.on_horizontal_scroll(false);
-        }
         wait_for_loads(&mut app);
-        assert_eq!(app.panels[0].cwd, child, "vertical scroll did not suppress");
+        assert_eq!(app.panels[0].cwd, left);
     }
 
     #[test]

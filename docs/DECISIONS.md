@@ -491,3 +491,29 @@ press. `Shift+Tab` and `Ctrl+D` remain as aliases, and `Tab` is once again only
 
 **Consequences:** No timing heuristics and no hidden mode. `§` may require a
 layout-specific key, so the two existing aliases stay documented everywhere.
+
+## ADR-027 — Horizontal gestures removed; double tap opens entries
+
+**Status:** accepted (2026-11-11, `0.3.7`)
+
+**Context:** After the debounce work the horizontal swipe still felt wrong: even
+a deliberate swipe to "enter" a folder is less natural on a trackpad than a tap,
+and macOS keeps injecting `ScrollLeft`/`ScrollRight` into vertical gestures. The
+user asked to remove horizontal movement entirely and make a double tap with two
+fingers the entry gesture.
+
+**Decision:**
+
+1. `MouseEventKind::ScrollLeft | ScrollRight` are ignored in `main::run`; the
+   swipe detector, its thresholds and `act_on_swipe` were deleted.
+2. `MouseEventKind::Down(MouseButton::Left)` calls `App::on_pointer_tap`. The
+   first tap only records `last_tap`; a second one within `DOUBLE_TAP_WINDOW`
+   (400 ms) calls `open_current_entry`.
+3. `open_current_entry` navigates into folders and, for files, spawns the
+   platform opener (`open` on macOS, `xdg-open` elsewhere, `explorer` on
+   Windows) with null stdio. Failures land in the status line.
+
+**Consequences:** No gesture can change directory accidentally. Double tap needs
+mouse reporting from the terminal, which `EnableMouseCapture` already provides.
+Opening files is new behaviour: it is user-initiated only and never touches the
+UI thread.

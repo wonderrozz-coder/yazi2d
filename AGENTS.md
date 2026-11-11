@@ -20,7 +20,7 @@ filesystems, a GUI, sixel/Kitty image protocols.
 
 ## Current status (2026-11-11)
 
-Version `0.3.6` — MVP + quick view, thumbnails, background loading, logging,
+Version `0.3.7` — MVP + quick view, thumbnails, background loading, logging,
 sorting, type colours, bulk rename, trackpad gestures, a live footer, and a
 polished thumbnail grid with a separate extension column.
 
@@ -38,11 +38,11 @@ polished thumbnail grid with a separate extension column.
 - [x] Safe conflict policy: unique suffix instead of overwrite.
 - [x] Multi-select, select-all (`Ctrl+A`), bulk rename (`Ctrl+G`), sorting (`s`),
   file-type colours with a menu (`Ctrl+K`).
-- [x] `§` opens favorites; trackpad scrolling/swipes; modifier-aware footer.
+- [x] `§` opens favorites; trackpad scroll + double-tap open; live footer.
 - [x] Folder/file thumbnail glyphs, `Ext` column in the list.
 - [x] `F9` chord: `F9` + arrows for cross-panel open / thumbnails.
 - [x] Key repeat and debounced trackpad swipes.
-- [x] 58 unit tests + a real-PTY end-to-end test, all green.
+- [x] 59 unit tests + a real-PTY end-to-end test, all green.
 - [x] `cargo fmt`, `cargo clippy -D warnings`, release build (≈2 MB binary).
 
 Known limitations and the next steps are in `docs/STATUS.md` and
@@ -205,10 +205,11 @@ cancels it. This is the fallback for terminals that swallow Ctrl/Alt+arrow.
 Selection & tools: `Ctrl+A` selects all, `Ctrl+G` bulk rename (`{name}`,
 `{ext}`, `{n}`, `%e=ext`), `s`/`Ctrl+S` sort menu, `Ctrl+K` colour menu.
 
-Gestures: two-finger scroll moves the cursor (vertical, inverted), swipes
-mirror the left/right arrows after accumulating `SWIPE_THRESHOLD` events. A
-swipe fires at most once per gesture and is dropped right after vertical
-scrolling, so a stray horizontal delta never enters a folder. The footer shows Ctrl/Alt/Shift chords while the
+Gestures: two-finger scroll moves the cursor (vertical, inverted). A double tap
+with two fingers opens the entry under the cursor (folder → enter, file → system
+default app). Single taps and horizontal scroll are deliberately inert: macOS
+emits `ScrollLeft`/`ScrollRight` inside vertical gestures, and acting on them
+caused random navigation. The footer shows Ctrl/Alt/Shift chords while the
 modifier is held when the terminal supports key-release events.
 
 Global: `Ctrl+C` quits, `q` quits outside prompts/help, `?`/`F1` help.

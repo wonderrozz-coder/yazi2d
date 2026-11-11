@@ -239,16 +239,30 @@ try:
         drain(0.1)
     assert not os.path.isdir(os.path.join(left, "sub")), "second delete failed"
 
-    # Trackpad gestures are checked last: a horizontal swipe changes directory,
-    # so it would disturb the file operations above.
+    # Trackpad gestures are checked last because they can change directory.
     send(b"\x1b[<64;20;10M")  # scroll up
     send(b"\x1b[<65;20;10M")  # scroll down
     screen = drain(0.3)
     assert b"Left" in screen and b"Right" in screen, "panels broke after vertical scrolling"
 
-    send(b"\x1b[<67;20;10M")  # scroll right
+    # Horizontal scroll must be inert: it used to dive into folders.
+    send(b"\x1b[<67;20;10M" * 8)  # scroll right
+    send(b"\x1b[<66;20;10M" * 8)  # scroll left
     screen = drain(0.4)
-    assert b"Left" in screen and b"Right" in screen, "panels broke after a horizontal swipe"
+    assert b"Left" in screen and b"Right" in screen, "panels broke after horizontal scroll"
+
+    # A double tap opens the cursor entry; a single tap must not.
+    send(b"n")  # mkdir prompt -> create a folder to enter
+    send(b"taps")
+    send(b"\r")
+    time.sleep(0.5)
+    click = b"\x1b[<0;30;8M\x1b[<0;30;8m"
+    send(click)
+    screen = drain(0.4)
+    assert b"taps" in screen, "single tap changed the view"
+    send(click)
+    time.sleep(0.6)
+    assert os.path.isdir(os.path.join(left, "taps")), "folder vanished"
 
     send(b"q")
     deadline = time.time() + 5

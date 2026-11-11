@@ -9,11 +9,21 @@ document explains how the pieces fit and where to extend them.
 main::run
   ├─ event::poll(80ms)
   │    ├─ KeyEvent  ──► App::on_key ──► state changes, App::dirty = true
+  │    ├─ Mouse     ──► scroll moves the cursor; double tap opens an entry
   │    └─ Resize    ──► App::dirty = true
   ├─ App::tick      ──► poll directory loads, sync preview, drain Job::rx,
   │                     finish jobs, refresh panels
   └─ if App::dirty  ──► ui::draw(frame, &mut App)
 ```
+
+Mouse capture is enabled and keyboard enhancement is pushed (see ADR-022), so
+the terminal reports key releases. `KeyEventKind::Press | Repeat` both drive
+`App::on_key`; `Release` only clears held modifiers. `ScrollUp`/`ScrollDown`
+call `App::on_scroll` (delta inverted, so the list follows the fingers).
+`ScrollLeft`/`ScrollRight` are dropped: macOS emits them inside vertical
+gestures. Left clicks call `App::on_pointer_tap`, and a second tap within
+`DOUBLE_TAP_WINDOW` opens the entry under the cursor through
+`open_current_entry`.
 
 There is exactly one UI thread, at most one background `Job`, and at most one
 pending directory load per panel. There is no async runtime and no `unsafe`

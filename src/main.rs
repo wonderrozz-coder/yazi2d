@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, KeyboardEnhancementFlags,
-    MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    MouseButton, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -151,14 +151,16 @@ fn run(
                     _ => {}
                 },
                 Event::Resize(_, _) => app.dirty = true,
-                // Trackpad two-finger gestures arrive as scroll events. Vertical
-                // scrolling moves the list (inverted, see `on_scroll`); horizontal
-                // swipes mirror the left/right arrows.
+                // Trackpad two-finger scrolling moves the list. Horizontal
+                // scroll events are dropped: macOS emits them inside mostly
+                // vertical gestures, and they used to cause random navigation.
+                // A pointer tap arrives as a click; two quick taps open the
+                // entry under the cursor.
                 Event::Mouse(mouse) => match mouse.kind {
                     MouseEventKind::ScrollUp => app.on_scroll(-1),
                     MouseEventKind::ScrollDown => app.on_scroll(1),
-                    MouseEventKind::ScrollLeft => app.on_horizontal_scroll(true),
-                    MouseEventKind::ScrollRight => app.on_horizontal_scroll(false),
+                    MouseEventKind::Down(MouseButton::Left) => app.on_pointer_tap(),
+                    MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => {}
                     _ => {}
                 },
                 _ => {}
