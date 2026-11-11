@@ -45,6 +45,13 @@
 
 ## Установка и запуск
 
+```sh
+git clone https://github.com/wonderrozz-coder/yazi2d.git
+cd yazi2d
+cargo build --release
+./target/release/yazi2d ~/Projects ~/Downloads
+```
+
 Нужен Rust (stable). Если Rust ещё не установлен:
 
 ```sh
