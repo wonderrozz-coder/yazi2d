@@ -1,6 +1,6 @@
 [package]
 name = "yazi2d"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.80"
 description = "Yazi2D — a fast dual-pane terminal file manager inspired by Yazi and Total Commander"
@@ -11,6 +11,7 @@ repository = "https://example.invalid/yazi2d"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 crossterm = "0.28"
 dirs = "5"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 ratatui = "0.29"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

@@ -15,22 +15,25 @@ non-negotiable and define the project:
 2. A current-path bar at the top of **each** panel.
 3. A persistent favorites sidebar for folders the user bookmarked.
 
-Non-goals for now: full Yazi feature parity, plugin system, image previews,
-tabs, remote filesystems, a GUI.
+Non-goals for now: full Yazi feature parity, plugin system, tabs, remote
+filesystems, a GUI, sixel/Kitty image protocols.
 
 ## Current status (2026-11-11)
 
-Version `0.1.0` — working MVP.
+Version `0.2.0` — MVP + quick view and thumbnails.
 
 - [x] Two panels, independent cwd/cursor/selection, active-panel highlighting.
 - [x] Path bar at the top of both panels (left-truncated, tail always visible).
-- [x] Favorites sidebar: toggle, add current dir, navigate, remove, TOML persistence.
+- [x] Favorites sidebar: toggle, focus (`Ctrl+D`), add current dir, navigate, remove, TOML persistence.
 - [x] Copy/move selection (or cursor item) to the other panel, recursive, symlink-aware.
 - [x] Background operations with progress; UI remains navigable.
-- [x] Mkdir, rename, delete with confirmation, multi-select, hidden files.
+- [x] Mkdir, rename, delete confirmed by `Enter` (or `y`), multi-select, hidden files (`Ctrl+H`/`.`).
+- [x] Quick preview: text, images (half-block truecolor), directories; follows the other panel's cursor.
+- [x] Thumbnail grid mode with cached image tiles.
+- [x] Cross-panel keys: `Ctrl+←/→` preview the neighbour, `Alt+←/→` open the cursor folder there.
 - [x] Safe conflict policy: unique suffix instead of overwrite.
-- [x] 14 unit tests + a real-PTY end-to-end test, all green.
-- [x] `cargo fmt`, `cargo clippy -D warnings`, release build (≈1 MB binary).
+- [x] 30 unit tests + a real-PTY end-to-end test, all green.
+- [x] `cargo fmt`, `cargo clippy -D warnings`, release build (≈2 MB binary).
 
 Known limitations and the next steps are in `docs/STATUS.md` and
 `docs/ROADMAP.md`. Keep both updated when behavior changes.
@@ -68,10 +71,11 @@ Cargo.toml                 dependencies + release profile
 rust-toolchain.toml        stable toolchain
 src/main.rs                CLI, terminal setup/restore, event loop, --help
 src/app.rs                 App state, key dispatch, prompts, jobs, favorites actions
-src/panel.rs               Panel state, directory listing, cursor, selection
+src/panel.rs               Panel state, modes (list/thumbnails/preview), navigation
+src/preview.rs             text/image/directory preview caches, half-block thumbnails
 src/transfer.rs            background copy/move/delete engine + progress channel
 src/favorites.rs           favorites model and TOML persistence
-src/ui.rs                  ratatui rendering, layout, overlays, UI tests
+src/ui.rs                  ratatui rendering, layout, overlays, preview/thumbnails, UI tests
 scripts/e2e_pty.py         end-to-end test in a real pseudo-terminal
 docs/CONCEPT.md            product concept and UX spec (Russian)
 docs/ARCHITECTURE.md       module/data-flow/design details (English)
@@ -89,16 +93,25 @@ inspiration: https://github.com/sxyazi/yazi.
 - Single-threaded UI loop: `main::run` polls crossterm events every 80 ms,
   calls `App::tick`, and redraws only when `App::dirty` is set.
 - `App` owns `[Panel; 2]`, `active`, `focus`, favorites, prompt/help state,
-  and at most one `Job`.
+  `PreviewCache`, `ImageCache`, and at most one `Job`.
 - `Panel` owns cwd, `Vec<Entry>` (with a synthetic `..` row), cursor, scroll
-  offset, selected path set, and visible page size (set by the renderer).
+  offset, selected path set, visible page size, and a `PanelMode`
+  (`List`, `Thumbnails`, `Preview`) with grid/preview scroll state.
+- A panel in `Preview` shows the **other panel's** cursor entry. `App::sync_preview_scroll`
+  keeps the subject path in sync and resets scroll when it changes; only one
+  preview panel exists at a time. Preview is read-only: file operations are
+  rejected while the active panel is a preview.
+- `preview.rs` caches text/directory previews keyed by path+mtime+size and
+  decodes images into cached half-block-sized RGB buffers (two pixel rows per
+  terminal cell). No external viewer or sixel/Kitty protocol is used.
 - File operations never run on the UI thread. `transfer::spawn` returns a
   `Job` with an `mpsc::Receiver<JobMsg>`; `App::tick` drains it and refreshes
   panels on completion.
 - Favorites are stored as a flat path list in TOML at
   `$YAZI2D_CONFIG_DIR/favorites.toml` or the platform config dir.
 - The UI is composed with ratatui: body (favorites + two panels), status line,
-  footer line; prompt/help are centered overlays.
+  footer line; prompt/help are centered overlays. Panel rendering dispatches on
+  `PanelMode`; thumbnails and previews draw with `frame.buffer_mut()`.
 
 Detailed invariants and data flow: `docs/ARCHITECTURE.md`.
 
@@ -115,14 +128,26 @@ Detailed invariants and data flow: `docs/ARCHITECTURE.md`.
 - The UI thread must never perform bulk filesystem work.
 - Idle redraws should not happen (`dirty` flag).
 - Terminal state must be restored on normal exit and on panic.
+- Only one panel may be in `Preview` mode; it always shows the other panel's
+  cursor entry and never performs file operations.
+- Preview/thumbnail decoding stays on the UI thread only for the visible items
+  and must go through `PreviewCache`/`ImageCache` (never re-read per frame).
+- `Ctrl+←/→` targets the **neighbour** of the active panel; `Alt+←/→` opens the
+  active cursor folder in that neighbour. Do not reuse these for history.
 
 ## Key handling summary
 
 Panel mode: `Tab` switches panel; arrows/`hjkl` navigate; `Enter`/`l` opens a
 directory; `Backspace`/`h` goes up; `Space` selects and advances; `F5`/`c`
 copies; `F6`/`m` moves; `F7`/`n` mkdir; `F2`/`r` renames; `F8`/`d`/`Del`
-deletes; `Ctrl+B`/`a` favorites; `Ctrl+F`/`f` sidebar; `Ctrl+R` refresh;
-`.` hidden files; `?` help; `q` quit.
+deletes (confirm with `Enter` or `y`); `Ctrl+B`/`a` favorites; `Ctrl+D` focus
+favorites; `Ctrl+F`/`f` toggle favorites; `Ctrl+R` refresh; `Ctrl+H`/`.`
+hidden files; `?` help; `q` quit.
+
+View: `Ctrl+Q` previews the active panel; `Ctrl+T` toggles thumbnails;
+`Ctrl+←/→` previews the neighbour; `Alt+←/→` opens the cursor folder in the
+neighbour. Preview: arrows/`hjkl` scroll, `Esc`/`Ctrl+Q` closes. Thumbnails:
+arrows/`hjkl` move, `Enter` opens, `Ctrl+T` returns to the list.
 
 Favorites focus: arrows/`jk`, `Enter` navigate, `Del`/`d` remove, `Esc` close.
 
@@ -136,10 +161,15 @@ kept.
 - Unit tests live next to modules (`#[cfg(test)]`). Use `tempfile` for filesystem
   tests; never touch the user's real home/config.
 - `transfer` tests wait on `Job::rx` with a timeout.
-- `ui` tests render with `ratatui::backend::TestBackend` and assert buffer text.
+- `preview` tests build tiny text/binary/image fixtures in tempdirs.
+- `ui` tests render with `ratatui::backend::TestBackend` and assert buffer text,
+  including preview and thumbnail modes.
+- `app` tests drive `App::on_key` with real `KeyEvent`s (modes, `Ctrl+←/→`,
+  `Alt+←/→`, Enter-confirmed delete).
 - `scripts/e2e_pty.py` drives the real binary in a PTY: checks both panels,
-  favorites, copy, help, mkdir, and clean `q` exit. It drains the PTY in a
-  background thread — keep that, or the app can block on a full PTY buffer.
+  favorites, copy, move, hidden files, quick preview, thumbnails, cross-panel
+  open, help, mkdir, delete with `Enter`, and clean `q` exit. It drains the PTY
+  in a background thread — keep that, or the app can block on a full PTY buffer.
 
 ## Conventions
 

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """End-to-end smoke test for Yazi2D inside a real pseudo-terminal.
 
-Drives the binary with real key presses and checks copy-between-panels,
-favorites persistence, help, mkdir and clean shutdown.
+Drives the binary with real key presses and checks copy/move between panels,
+favorites persistence, hidden files, quick preview, thumbnails, cross-panel
+open, help, mkdir, delete and clean shutdown.
 """
 import fcntl
 import os
@@ -30,6 +31,8 @@ with open(os.path.join(left, "hello.txt"), "w") as f:
     f.write("hello from yazi2d")
 with open(os.path.join(left, "move-me.txt"), "w") as f:
     f.write("move me")
+with open(os.path.join(left, ".hidden.txt"), "w") as f:
+    f.write("secret")
 
 env = os.environ.copy()
 env["TERM"] = "xterm-256color"
@@ -109,6 +112,25 @@ try:
         assert f.read() == "move me"
     drain(0.5)  # let the UI consume JobMsg::Done
 
+    # Ctrl+H reveals hidden files; the same key hides them again.
+    send(b"\x08")
+    screen = drain(0.4)
+    assert b".hidden.txt" in screen, "Ctrl+H did not show hidden files"
+    send(b"\x08")
+
+    # Ctrl+Right turns the right panel into a quick viewer of hello.txt.
+    send(b"\x1b[1;5C")
+    screen = drain(0.6)
+    assert b"preview" in screen, "Ctrl+Right did not switch the panel to preview"
+    assert b"hello from yazi2d" in screen, "text preview content was not rendered"
+    send(b"\x1b[1;5C")  # close preview again
+
+    # Ctrl+T toggles the thumbnail grid.
+    send(b"\x14")
+    screen = drain(0.5)
+    assert b"thumbnails" in screen, "Ctrl+T did not switch to thumbnails"
+    send(b"\x14")
+
     # Add the active directory to favorites.
     send(b"\x02")  # Ctrl+B
     time.sleep(0.3)
@@ -116,6 +138,12 @@ try:
     assert os.path.exists(favorites), "favorites file was not written"
     with open(favorites) as f:
         assert left in f.read(), "current directory was not saved to favorites"
+
+    # Ctrl+D must give the favorites sidebar keyboard focus.
+    send(b"\x04")
+    screen = drain(0.4)
+    assert b"Favorites" in screen, "favorites sidebar disappeared"
+    send(b"\x1b")  # Esc: back to panels
 
     # Help overlay and prompt smoke test.
     send(b"?")
@@ -130,14 +158,34 @@ try:
     time.sleep(0.5)
     assert os.path.isdir(os.path.join(left, "testdir")), "mkdir failed"
 
-    # Delete the freshly created directory (cursor is on it).
+    # Delete the freshly created directory (cursor is on it); Enter confirms.
     send(b"d")
-    send(b"y")
+    send(b"\r")
     deadline = time.time() + 5
     while time.time() < deadline and os.path.isdir(os.path.join(left, "testdir")):
         drain(0.1)
     assert not os.path.isdir(os.path.join(left, "testdir")), "delete failed"
     drain(0.5)
+
+    # Alt+Right opens the cursor folder in the right panel.
+    send(b"n")
+    send(b"sub")
+    send(b"\r")
+    time.sleep(0.4)
+    send(b"\x1b[1;3C")
+    screen = drain(0.5)
+    assert b"left/sub" in screen, "Alt+Right did not open the folder in the other panel"
+
+    send(b"\t")  # focus the right panel (inside sub)
+    send(b"\x7f")  # Backspace: go up to the parent
+    send(b"\t")  # back to the left panel
+    time.sleep(0.3)
+    send(b"d")
+    send(b"\r")
+    deadline = time.time() + 5
+    while time.time() < deadline and os.path.isdir(os.path.join(left, "sub")):
+        drain(0.1)
+    assert not os.path.isdir(os.path.join(left, "sub")), "second delete failed"
 
     send(b"q")
     deadline = time.time() + 5

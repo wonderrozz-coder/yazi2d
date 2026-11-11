@@ -30,8 +30,9 @@ The right panel is a first-class pane, never a preview. Navigation history and
 tabs are out of scope for the MVP.
 
 **Consequences:** Copy/move destination is always the other panel's cwd, which
-matches Total Commander muscle memory. A preview pane can later be added as an
-optional third column, but must not change the two-pane operation model.
+matches Total Commander muscle memory. A preview pane was later added as a
+per-panel mode (`0.2.0`, see ADR-011), not as a third column, so the two-pane
+operation model is unchanged.
 
 ## ADR-003 — Never overwrite on name conflict (MVP)
 
@@ -117,10 +118,89 @@ the future. Risk: new features must remember to filter `is_parent`; use
 
 ## ADR-010 — Files are not opened in the MVP
 
-**Status:** accepted
+**Status:** accepted, partially superseded by ADR-011
 
 **Decision:** `Enter` only enters directories. On a file it shows a status
 message.
 
 **Consequences:** No accidental external programs, no editor/viewer coupling.
-`F3` viewer and `F4` editor are roadmap items and should be explicit.
+`F4` editor remains a roadmap item. Quick *viewing* is provided by the built-in
+preview mode (`Ctrl+Q`), which never launches an external process.
+
+## ADR-011 — Panel modes (`List` / `Thumbnails` / `Preview`) instead of a third pane
+
+**Status:** accepted (2026-11-11, `0.2.0`)
+
+**Context:** Total Commander's quick view turns the *other* panel into a viewer
+that follows the cursor. Adding a third column would break the two-panel
+operation model and shrink both lists.
+
+**Decision:** A panel has a `PanelMode`. `Preview` shows the opposite panel's
+cursor entry and is read-only. Only one panel can be in `Preview`; enabling a
+second one disables the first. `mode_before_preview` restores the previous mode
+when the preview closes. `Thumbnails` is a grid over the same entries.
+
+**Consequences:** Preview follows the cursor naturally, copy/move destination is
+still the other panel's cwd, and no layout changes are needed. File operations
+must be explicitly blocked while the active panel is a preview. Two panels can
+never both be previews, which keeps the "other panel" subject unambiguous.
+
+## ADR-012 — Half-block truecolor rendering, no external image viewer
+
+**Status:** accepted (2026-11-11, `0.2.0`)
+
+**Context:** Yazi relies on terminal graphics protocols (sixel/Kitty/iTerm2) and
+external helpers. That requires feature detection, escape-sequence plumbing and
+terminal-specific fallbacks.
+
+**Decision:** Decode images with the `image` crate, fit them into the panel, and
+draw two pixels per cell using `▀` with foreground/background truecolor. Cache
+resized buffers per path and per `(width, height)`.
+
+**Consequences:** Works in any truecolor terminal with no external process and
+no protocol detection; the binary grows to ≈2 MB. Quality is limited by cell
+aspect ratio and the font. sixel/Kitty support can be added later behind the
+same `ImageCache` API.
+
+## ADR-013 — Cross-panel keys: `Ctrl+←/→` previews, `Alt+←/→` opens
+
+**Status:** accepted (2026-11-11)
+
+**Context:** The user wanted panel-to-panel navigation without leaving the
+active panel, and accepted that this conflicts with the earlier idea of
+back/forward history on the same keys.
+
+**Decision:** The arrow points at the target panel:
+
+- `Ctrl+←` / `Ctrl+→` — the left/right panel becomes the quick viewer of the
+  active panel's cursor (pressing again closes it);
+- `Alt+←` / `Alt+→` — the left/right panel opens the folder under the active
+  panel's cursor (`..` is allowed; files are rejected with a status message).
+
+**Consequences:** Fast "drill into the same folder on both sides" workflow.
+History back/forward must use different bindings if it is ever added. Unit and
+PTY tests cover both chords.
+
+## ADR-014 — `Ctrl+H` toggles hidden files, `Enter` confirms deletion
+
+**Status:** accepted (2026-11-11)
+
+**Decision:** `Ctrl+H` is the primary hidden-files toggle, with `.` kept as an
+alias for terminals that cannot report the chord. Delete confirmation accepts
+`Enter` or `y` and cancels on `n`/`Esc`; the prompt text says so.
+
+**Consequences:** Matches common file-manager muscle memory. crossterm maps the
+`0x08` byte to `Char('h') + CONTROL`, so `Ctrl+H` is distinguishable from
+`Backspace` (`0x7F`) in raw mode; `.` remains a fallback.
+
+## ADR-015 — Preview is strictly read-only
+
+**Status:** accepted (2026-11-11)
+
+**Decision:** While the active panel is in `Preview` mode, copy/move/mkdir/
+rename/delete/add-favorite are rejected with a status hint. Preview scrolling
+uses arrows/`hjkl`; `Esc`, `Ctrl+Q` or the same `Ctrl+←/→` chord returns to the
+previous mode.
+
+**Consequences:** The preview subject can never be mutated by accident, and the
+cursor/selection model stays tied to the list or grid.

@@ -1,6 +1,7 @@
 mod app;
 mod favorites;
 mod panel;
+mod preview;
 mod transfer;
 mod ui;
 
@@ -102,12 +103,17 @@ fn print_help() {
          \x20 F5 / c          copy selection to the other panel\n\
          \x20 F6 / m          move selection to the other panel\n\
          \x20 F7 / n          create directory\n\
-         \x20 F8 / d / Del    delete selection\n\
+         \x20 F8 / d / Del    delete selection (Enter or y confirms)\n\
          \x20 F2 / r          rename entry\n\
+         \x20 Ctrl+Q          quick preview in the active panel\n\
+         \x20 Ctrl+T          thumbnail grid in the active panel\n\
+         \x20 Ctrl+Left/Right neighbouring panel becomes a viewer\n\
+         \x20 Alt+Left/Right  open cursor folder in that panel\n\
          \x20 Ctrl+B / a      add current directory to favorites\n\
+         \x20 Ctrl+D          focus favorites sidebar\n\
          \x20 Ctrl+F / f      toggle favorites sidebar\n\
          \x20 Ctrl+R          refresh both panels\n\
-         \x20 .               toggle hidden files\n\
+         \x20 Ctrl+H / .      toggle hidden files\n\
          \x20 ? / F1          help\n\
          \x20 q / Ctrl+C      quit\n\
          \n\

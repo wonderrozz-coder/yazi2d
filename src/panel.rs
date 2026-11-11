@@ -30,6 +30,13 @@ impl Entry {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PanelMode {
+    List,
+    Thumbnails,
+    Preview,
+}
+
 pub struct Panel {
     pub cwd: PathBuf,
     pub entries: Vec<Entry>,
@@ -39,6 +46,17 @@ pub struct Panel {
     /// Visible list height, updated by the renderer and used for PgUp/PgDn.
     pub page_size: usize,
     pub error: Option<String>,
+    pub mode: PanelMode,
+    /// Mode to restore when leaving Preview.
+    pub mode_before_preview: PanelMode,
+    pub preview_path: Option<PathBuf>,
+    pub preview_scroll: u16,
+    pub preview_scroll_x: u16,
+    pub preview_max_scroll: u16,
+    pub preview_max_scroll_x: u16,
+    /// Grid geometry, updated by the thumbnail renderer.
+    pub grid_cols: usize,
+    pub grid_rows: usize,
 }
 
 impl Panel {
@@ -51,7 +69,61 @@ impl Panel {
             selected: HashSet::new(),
             page_size: 10,
             error: None,
+            mode: PanelMode::List,
+            mode_before_preview: PanelMode::List,
+            preview_path: None,
+            preview_scroll: 0,
+            preview_scroll_x: 0,
+            preview_max_scroll: 0,
+            preview_max_scroll_x: 0,
+            grid_cols: 1,
+            grid_rows: 1,
         }
+    }
+
+    pub fn set_mode(&mut self, mode: PanelMode) {
+        if mode == PanelMode::Preview {
+            if self.mode != PanelMode::Preview {
+                self.mode_before_preview = self.mode;
+            }
+            self.preview_path = None;
+            self.preview_scroll = 0;
+            self.preview_scroll_x = 0;
+            self.preview_max_scroll = 0;
+            self.preview_max_scroll_x = 0;
+        } else {
+            self.offset = 0;
+            self.mode = mode;
+            if mode == PanelMode::List {
+                self.ensure_visible();
+            } else {
+                self.ensure_grid_visible();
+            }
+        }
+        self.mode = mode;
+    }
+
+    pub fn leave_preview(&mut self) {
+        if self.mode != PanelMode::Preview {
+            return;
+        }
+        let mode = match self.mode_before_preview {
+            PanelMode::Preview => PanelMode::List,
+            mode => mode,
+        };
+        self.set_mode(mode);
+        self.preview_path = None;
+        self.preview_scroll = 0;
+        self.preview_scroll_x = 0;
+        self.preview_max_scroll = 0;
+        self.preview_max_scroll_x = 0;
+    }
+
+    pub fn scroll_preview(&mut self, delta_y: i32, delta_x: i32) {
+        self.preview_scroll =
+            (self.preview_scroll as i32 + delta_y).clamp(0, self.preview_max_scroll as i32) as u16;
+        self.preview_scroll_x = (self.preview_scroll_x as i32 + delta_x)
+            .clamp(0, self.preview_max_scroll_x as i32) as u16;
     }
 
     /// Re-read the current directory while keeping the cursor and selection when possible.
@@ -72,7 +144,7 @@ impl Panel {
             .unwrap_or(if self.entries.len() > 1 { 1 } else { 0 })
             .min(self.entries.len().saturating_sub(1));
         self.error = None;
-        self.ensure_visible();
+        self.ensure_mode_visible();
         Ok(())
     }
 
@@ -94,7 +166,7 @@ impl Panel {
             .unwrap_or(if self.entries.len() > 1 { 1 } else { 0 })
             .min(self.entries.len().saturating_sub(1));
         self.error = None;
-        self.ensure_visible();
+        self.ensure_mode_visible();
         Ok(())
     }
 
@@ -111,6 +183,16 @@ impl Panel {
         self.ensure_visible();
     }
 
+    /// Move in the thumbnail grid. `delta` is measured in tiles.
+    pub fn move_grid(&mut self, delta: i32) {
+        if self.entries.is_empty() {
+            return;
+        }
+        let last = self.entries.len() as i32 - 1;
+        self.cursor = (self.cursor as i32 + delta).clamp(0, last) as usize;
+        self.ensure_grid_visible();
+    }
+
     pub fn go_top(&mut self) {
         self.cursor = 0;
         self.offset = 0;
@@ -118,13 +200,13 @@ impl Panel {
 
     pub fn go_bottom(&mut self) {
         self.cursor = self.entries.len().saturating_sub(1);
-        self.ensure_visible();
+        self.ensure_mode_visible();
     }
 
     pub fn select_name(&mut self, name: &str) {
         if let Some(index) = self.entries.iter().position(|e| e.name == name) {
             self.cursor = index;
-            self.ensure_visible();
+            self.ensure_mode_visible();
         }
     }
 
@@ -139,7 +221,7 @@ impl Panel {
                 self.selected.insert(path);
             }
         }
-        self.move_cursor(1);
+        self.move_grid_or_cursor(1);
     }
 
     /// Selected entries in display order, or the cursor entry when nothing is selected.
@@ -167,6 +249,36 @@ impl Panel {
         }
         let max_offset = self.entries.len().saturating_sub(page);
         self.offset = self.offset.min(max_offset);
+    }
+
+    pub fn ensure_grid_visible(&mut self) {
+        let cols = self.grid_cols.max(1);
+        let rows = self.grid_rows.max(1);
+        let row = self.cursor / cols;
+
+        if row < self.offset {
+            self.offset = row;
+        } else if row >= self.offset + rows {
+            self.offset = row + 1 - rows;
+        }
+
+        let max_offset =
+            (self.entries.len().saturating_sub(1) / cols).saturating_sub(rows.saturating_sub(1));
+        self.offset = self.offset.min(max_offset);
+    }
+
+    fn ensure_mode_visible(&mut self) {
+        match self.mode {
+            PanelMode::Thumbnails => self.ensure_grid_visible(),
+            _ => self.ensure_visible(),
+        }
+    }
+
+    pub fn move_grid_or_cursor(&mut self, delta: i32) {
+        match self.mode {
+            PanelMode::Thumbnails => self.move_grid(delta),
+            _ => self.move_cursor(delta),
+        }
     }
 }
 
@@ -292,5 +404,47 @@ mod tests {
         panel.selected.insert(tmp.path().join("b.txt"));
         let selected = panel.selection_or_current();
         assert_eq!(selected, vec![tmp.path().join("b.txt")]);
+    }
+
+    #[test]
+    fn thumbnail_grid_navigation_scrolls_by_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in ["a", "b", "c", "d", "e", "f"] {
+            fs::create_dir(tmp.path().join(name)).unwrap();
+        }
+
+        let mut panel = Panel::new(tmp.path().to_path_buf());
+        panel.reload(false).unwrap();
+        panel.set_mode(PanelMode::Thumbnails);
+        panel.grid_cols = 2;
+        panel.grid_rows = 2;
+        panel.cursor = 1;
+        panel.ensure_grid_visible();
+        assert_eq!(panel.offset, 0);
+
+        panel.move_grid(2);
+        assert_eq!(panel.cursor, 3);
+        panel.move_grid(2);
+        assert_eq!(panel.cursor, 5);
+        assert_eq!(panel.offset, 1);
+
+        panel.move_grid(-4);
+        assert_eq!(panel.cursor, 1);
+        assert_eq!(panel.offset, 0);
+    }
+
+    #[test]
+    fn leaving_preview_restores_the_previous_mode_and_clears_the_subject() {
+        let mut panel = Panel::new(PathBuf::from("/tmp"));
+        panel.set_mode(PanelMode::Thumbnails);
+        panel.set_mode(PanelMode::Preview);
+        panel.preview_path = Some(PathBuf::from("/tmp/photo.png"));
+        panel.preview_scroll = 7;
+
+        panel.leave_preview();
+
+        assert_eq!(panel.mode, PanelMode::Thumbnails);
+        assert!(panel.preview_path.is_none());
+        assert_eq!(panel.preview_scroll, 0);
     }
 }
