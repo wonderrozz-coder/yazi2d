@@ -1,47 +1,253 @@
 # Yazi2D
 
-Быстрый двухпанельный файловый менеджер для терминала. Идейный форк [Yazi](https://github.com/sxyazi/yazi):
-скорость и лаконичный TUI от Yazi, модель работы — упрощённый Total Commander.
+**English** · [Русский](#yazi2d--русский)
 
-> **Статус:** рабочий MVP `0.3.1`. Две независимые панели, строка текущего пути,
-> избранное, копирование и перемещение между панелями, быстрый просмотр текста
-> и изображений, режим миниатюр, фоновая загрузка каталогов и файловый лог.
+A fast dual-pane terminal file manager. A spiritual fork of
+[Yazi](https://github.com/sxyazi/yazi): Yazi's speed and clean TUI, with a
+deliberately simplified Total Commander workflow.
+
+> **Status:** working MVP `0.5.2`. Two independent panels, a path bar on each,
+> persistent favorites, copy/move between panels, quick preview, thumbnail grid,
+> background directory loading, diagnostics log, sorting, per-type colours,
+> bulk rename, rebindable keys and trackpad support.
+
+```
+┌ Favorites ─────────────┐┌ Left ──────────────────────┐┌ Right · preview ───────────┐
+│ ● Home                 ││ /Users/me/Projects         ││ /Users/me/Projects         │
+│   Downloads            ││   Name       Ext     Size  ││  README.md · text · 8.1K   │
+│   Documents            ││ ▸ src/                     ││  # Yazi2D                  │
+│   Desktop              ││ ▸ assets/                  ││                            │
+│                        ││   README.md  .md     8.1K  ││  A fast dual-pane terminal │
+│                        ││   photo.jpg  .jpg    2.3M  ││  file manager…             │
+└ Ctrl+B add ────────────┘└────────────────────────────┘└────────────────────────────┘
+ Copied 3 item(s).                                  README.md  file  2026-11-11 09:41
+ Yazi2D · Tab switch · § favs · Ctrl+E settings · Ctrl+Q preview · Ctrl+T thumbs · s sort · F5/c copy · ? help
+```
+
+## Features
+
+- **Two panels** with independent working directories, cursor and selection.
+- **Path bar** at the top of each panel (left-truncated, the tail is always visible).
+- **Favorites sidebar** — bookmarks that survive restarts.
+- **Copy/move between panels** (`F5`/`F6` or `c`/`m`), recursive, symlink-aware, confirmed before running.
+- **Background operations** with progress; the UI stays navigable.
+- **Quick preview** (`Ctrl+Q`/`Ctrl+P`): the **opposite** panel shows text, an
+  image, or a folder grid and follows the cursor. Read-only.
+- **Thumbnail grid** (`Ctrl+T`) with cached image tiles and block-art icons per file type.
+- **Favorites, hidden files, mkdir, rename, delete, bulk rename, select-all.**
+- **Sorting** by name, size, type or date, with reverse.
+- **Per-type colours** with three presets and a preview menu.
+- **Rebindable keys** and trackpad inversion in an in-app settings menu.
+- **Layout-independent shortcuts**: they work with the Russian keyboard layout.
+- **Background directory loading** — no freezes on slow or cloud folders.
+- **Diagnostics log** with timings and `WARN` lines for slow paths.
+
+## Install
+
+```sh
+git clone https://github.com/wonderrozz-coder/yazi2d.git
+cd yazi2d
+cargo build --release
+./target/release/yazi2d ~/Projects ~/Downloads
+```
+
+Rust stable (1.80+) is required. If Rust is not installed:
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+source "$HOME/.cargo/env"
+```
+
+The binary lands in `target/release/yazi2d` (≈2 MB) and can be copied to
+`~/.local/bin` or `/usr/local/bin`.
+
+> If the repository lives in a synced folder (Nextcloud/Dropbox), keep build
+> artifacts out of it: `export CARGO_TARGET_DIR="$HOME/.cache/yazi2d-target"`.
+
+## Keys
+
+On macOS, function keys may require `Fn`; every essential action has a letter
+alternative.
+
+| Keys | Action |
+|---|---|
+| `Tab` | switch active panel |
+| `↑`/`k`, `↓`/`j` | move cursor (scroll in preview) |
+| `PgUp`/`PgDn`, `Home`/`g`, `End`/`G` | page, top, bottom |
+| `Enter` / `l` / `→` | open folder; for a file, open with its associated app |
+| `Backspace` / `h` / `←` | go to parent directory |
+| `Space` / `Insert` | select and move down |
+| `Esc` | clear selection / close preview / cancel |
+| `F5` / `c` | copy to the other panel (confirm with `Enter`/`y`) |
+| `F6` / `m` | move to the other panel (confirm with `Enter`/`y`) |
+| `F7` / `n` | create folder |
+| `F2` / `r` | rename |
+| `F8` / `d` / `Delete` | delete (confirm with `Enter`/`y`) |
+| `Ctrl+Q` / `Ctrl+P` | quick preview in the **other** panel |
+| `Ctrl+T` | thumbnail grid |
+| `F9`, then `↑`/`↓` | thumbnails on/off (fallback) |
+| `F9`, then `←`/`→` | open cursor folder in that panel (fallback) |
+| `Shift+←` / `Shift+→` | open cursor folder in that panel |
+| `Alt+←` / `Alt+→` | quick preview in that panel |
+| `Ctrl+O` | open cursor folder in the other panel |
+| `§` / `Shift+Tab` / `Ctrl+D` | focus favorites / back to panels |
+| `Ctrl+B` / `a` | add current folder to favorites |
+| `Ctrl+F` | show / hide the favorites sidebar |
+| `Ctrl+A` | select everything |
+| `Ctrl+G` | bulk rename by pattern |
+| `s` / `Ctrl+S` | sort menu (name/size/type/date, `r` reverses) |
+| `Ctrl+K` | colour menu for file types |
+| `Ctrl+E` | settings: key bindings and trackpad |
+| `Ctrl+R` | refresh both panels |
+| `Ctrl+H` / `.` | toggle hidden files |
+| `?` / `F1` | help |
+| `q` / `Ctrl+C` | quit |
+
+Favorites sidebar: `↑`/`↓` select, `Enter` open, `Delete`/`d` remove,
+`Esc`/`Shift+Tab` back to panels.
+
+Preview: `↑`/`↓` scroll, `←`/`→` horizontal scroll,
+`Ctrl+Q`/`Ctrl+P`/`Esc` close.
+
+Thumbnails: arrows/`hjkl` move, `Enter` opens, `Ctrl+T` back to the list.
+
+**Trackpad:** two-finger scroll moves the list (inverted, as if dragging).
+**Double tap with two fingers** opens the entry under the cursor: a folder is
+entered, a file is opened with the system default app (`open`, `xdg-open`,
+`explorer`). Single taps and horizontal scroll are deliberately inert — macOS
+emits horizontal scroll inside vertical gestures and it used to cause random
+navigation.
+
+**Settings (`Ctrl+E`):** `i` flips the trackpad direction, arrows + `Enter`
+rebind an action, `r` restores its defaults. Stored in
+`$YAZI2D_CONFIG_DIR/settings.toml`. `Ctrl+E` and `Esc` cannot be rebound.
+
+**Layout independence:** shortcuts work with the Russian layout — `Ctrl+и` is
+`Ctrl+B`, `ы` is `s`, `в` is `d`, matched by physical key. Prompts still type
+exactly the characters you press.
+
+**Modifier hints:** hold `Ctrl`, `Option` (`Alt`), `Shift` or `Command` and the
+footer shows only the chords for that modifier (requires the kitty keyboard
+protocol: Ghostty, kitty, WezTerm, foot, iTerm2).
+
+> **Modifiers are split on purpose.** `Shift+←/→` opens the folder in the other
+> panel, `Option+←/→` previews there. `Ctrl+←/→` switches macOS Spaces, and
+> Ghostty rewrites `Cmd+←/→` into `Ctrl+A`/`Ctrl+E` before the app sees them, so
+> neither is used. Ghostty encodes `Option+←/→` as `Esc b`/`Esc f`; Yazi2D accepts
+> `Option+b`/`Option+f` too, so it works without touching the terminal config.
+
+## Configuration
+
+Favorites: `~/.config/yazi2d/favorites.toml`
+(macOS: `~/Library/Application Support/yazi2d/favorites.toml`).
+Override the directory with `YAZI2D_CONFIG_DIR`.
+
+```toml
+favorites = [
+  "/Users/me",
+  "/Users/me/Projects",
+  "/Volumes/Backup",
+]
+```
+
+Settings: `$YAZI2D_CONFIG_DIR/settings.toml`.
+
+```toml
+invert_scroll = true
+key.copy = "ctrl+y"
+key.delete = "f9"
+```
+
+## Logging
+
+```sh
+YAZI2D_LOG=off yazi2d                    # disable
+YAZI2D_LOG=/tmp/yazi2d.log yazi2d        # custom path
+tail -f ~/Library/Application\ Support/yazi2d/yazi2d.log
+```
+
+Every directory load is logged with its duration; loads over 250 ms are marked
+`WARN slow directory load`. Look for the last `INFO load start` line to find the
+directory that stalled.
+
+## Development
+
+```sh
+source "$HOME/.cargo/env"
+
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test --all-targets
+cargo build --release
+
+python3 scripts/e2e_pty.py target/debug/yazi2d   # real-PTY end-to-end test
+```
+
+MIT licensed — see [`LICENSE`](LICENSE). Design notes live in
+[`docs/DECISIONS.md`](docs/DECISIONS.md), the module map in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), and the handoff guide in
+[`AGENTS.md`](AGENTS.md).
+
+## Limitations
+
+- No overwrite prompt: conflicting names get a ` (1)` suffix instead.
+- No cancelling a running background operation.
+- Images are drawn with half blocks in truecolor; no sixel/Kitty/iTerm2 protocol.
+- No file editor, search, archives or SSH/SFTP.
+- Deletion is permanent (no trash).
+
+## Origin
+
+Yazi2D is an independent Rust + [ratatui](https://ratatui.rs) codebase inspired
+by Yazi (architecture ideas, speed, TUI aesthetics) and Total Commander (the
+two-panel model). No Yazi source is included.
+
+---
+
+# Yazi2D — Русский
+
+[English](#yazi2d) · **Русский**
+
+Быстрый двухпанельный файловый менеджер для терминала. Идейный форк
+[Yazi](https://github.com/sxyazi/yazi): скорость и лаконичный TUI от Yazi,
+модель работы — упрощённый Total Commander.
+
+> **Статус:** рабочий MVP `0.5.2`. Две независимые панели, строка текущего пути,
+> избранное, копирование и перемещение между панелями, быстрый просмотр,
+> режим миниатюр, фоновая загрузка каталогов, файловый лог, сортировка, цвета
+> по типам, массовое переименование, переназначаемые клавиши и трекпад.
 
 ```
 ┌ Favorites ─────────────┐┌ Left ──────────────────────┐┌ Right · preview ───────────┐
 │ ● Дом                  ││ /Users/me/Projects         ││ /Users/me/Projects         │
-│   Загрузки             ││   Name              Size   ││  README.md · text · 8.1K   │
+│   Загрузки             ││   Name       Ext     Size  ││  README.md · text · 8.1K   │
 │   Документы            ││ ▸ src/                     ││  # Yazi2D                  │
 │   Рабочий стол         ││ ▸ assets/                  ││                            │
-│                        ││   README.md         8.1K   ││  Быстрый двухпанельный     │
-│                        ││   photo.jpg         2.3M   ││  файловый менеджер…        │
+│                        ││   README.md  .md     8.1K  ││  Быстрый двухпанельный     │
+│                        ││   photo.jpg  .jpg    2.3M  ││  файловый менеджер…        │
 └ Ctrl+B add ────────────┘└────────────────────────────┘└────────────────────────────┘
  Copied 3 item(s).                                  README.md  file  2026-11-11 09:41
- Yazi2D · Tab switch · Ctrl+Q preview · Ctrl+T thumbs · Ctrl+←/→ preview other · Alt+←/→ open there · F5/c copy · ? help · q quit
+ Yazi2D · Tab switch · § favs · Ctrl+E settings · Ctrl+Q preview · Ctrl+T thumbs · s sort · F5/c copy · ? help
 ```
 
 ## Возможности
 
-- **Две панели** с независимыми текущими каталогами и курсором.
+- **Две панели** с независимыми текущими каталогами, курсором и выделением.
 - **Строка пути** в верхней части каждой панели (обрезается слева, хвост всегда виден).
-- **Избранное** — боковая панель с закладками; добавляется текущий каталог, сохраняется между запусками.
-- **Копирование и перемещение между панелями** (F5/F6 или `c`/`m`), включая рекурсивные каталоги и симлинки.
-- **Фоновые операции** с прогрессом: интерфейс не блокируется, навигация остаётся доступной.
-- **Быстрый просмотр** (`Ctrl+Q` или `Ctrl+P`): **противоположная** панель
-  показывает текст, изображение или содержимое каталога под курсором и следует
-  за курсором.
-- **Изображения** рисуются прямо в терминале half-блоками в truecolor — внешний
-  просмотрщик не нужен. Поддерживаются PNG, JPEG, GIF, WebP, BMP, TIFF.
-- **Режим миниатюр** (`Ctrl+T`): сетка плиток с превью изображений и значками папок.
-- **Открыть папку под курсором в соседней панели** (`Ctrl+O`, алиасы `Alt+←/→`).
-- **Фоновая загрузка каталогов при навигации**: панель показывает
-  `Loading <path>…`; первоначальная загрузка всё ещё синхронная.
-- **Файловый лог** с таймингами загрузок помогает найти медленный каталог.
-- Создание каталога, переименование, удаление с подтверждением по `Enter`.
-- Множественный выбор (`Space`/`Insert`), скрытые файлы (`Ctrl+H` или `.`),
-  сортировка «каталоги сначала».
-- Безопасные конфликты имён: существующие файлы не перезаписываются, а получают суффикс ` (1)`, ` (2)`.
-- Экономичная отрисовка: кадр рисуется только при изменениях, простой TUI почти не грузит CPU.
+- **Избранное** — боковая панель с закладками; сохраняется между запусками.
+- **Копирование и перемещение между панелями** (`F5`/`F6` или `c`/`m`),
+  рекурсивно, с поддержкой симлинков и подтверждением перед запуском.
+- **Фоновые операции** с прогрессом: интерфейс не блокируется.
+- **Быстрый просмотр** (`Ctrl+Q`/`Ctrl+P`): **противоположная** панель показывает
+  текст, изображение или сетку каталога и следует за курсором. Только чтение.
+- **Сетка миниатюр** (`Ctrl+T`) с кэшем изображений и блочными иконками по типам.
+- **Избранное, скрытые файлы, создание, переименование, удаление, массовое переименование, выделить всё.**
+- **Сортировка** по имени, размеру, типу или дате, с реверсом.
+- **Цвета по типам файлов**: три темы и меню предпросмотра.
+- **Переназначаемые клавиши** и инверсия трекпада в меню настроек.
+- **Горячие клавиши не зависят от раскладки**: работают и в русской.
+- **Фоновая загрузка каталогов** — без зависаний на медленных и облачных папках.
+- **Диагностический лог** с таймингами и `WARN` для медленных путей.
 
 ## Установка и запуск
 
@@ -52,26 +258,18 @@ cargo build --release
 ./target/release/yazi2d ~/Projects ~/Downloads
 ```
 
-Нужен Rust (stable). Если Rust ещё не установлен:
+Нужен Rust stable (1.80+). Если Rust ещё не установлен:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 source "$HOME/.cargo/env"
 ```
 
-Сборка и запуск:
-
-```sh
-cargo run --release
-# или с явными стартовыми каталогами:
-cargo run --release -- ~/Projects /Volumes/Backup
-```
-
 Готовый бинарник: `target/release/yazi2d` (≈2 МБ). Можно скопировать его в
 `~/.local/bin` или `/usr/local/bin` и запускать как `yazi2d`.
 
 > Проект может лежать в синхронизируемой папке (Nextcloud/Dropbox). Чтобы не
-> синхронизировать гигабайты артефактов, удобно вынести каталог сборки:
+> синхронизировать гигабайты артефактов, вынесите каталог сборки:
 > `export CARGO_TARGET_DIR="$HOME/.cache/yazi2d-target"`.
 
 ## Управление
@@ -84,31 +282,28 @@ cargo run --release -- ~/Projects /Volumes/Backup
 | `Tab` | переключить активную панель |
 | `↑`/`k`, `↓`/`j` | движение курсора (в просмотре — прокрутка) |
 | `PgUp`/`PgDn`, `Home`/`g`, `End`/`G` | страница, начало, конец |
-| `Enter` / `l` / `→` | войти в каталог |
+| `Enter` / `l` / `→` | войти в каталог; для файла — открыть приложением по умолчанию |
 | `Backspace` / `h` / `←` | подняться на уровень выше |
 | `Space` / `Insert` | выделить и перейти ниже |
-| `Esc` | снять выделение / закрыть просмотр |
-| `F5` / `c` | копировать в другую панель |
-| `F6` / `m` | переместить в другую панель |
+| `Esc` | снять выделение / закрыть просмотр / отменить |
+| `F5` / `c` | копировать в другую панель (подтверждение `Enter`/`y`) |
+| `F6` / `m` | переместить в другую панель (подтверждение `Enter`/`y`) |
 | `F7` / `n` | создать каталог |
 | `F2` / `r` | переименовать |
 | `F8` / `d` / `Delete` | удалить (`Enter` или `y` подтверждает) |
 | `Ctrl+Q` / `Ctrl+P` | быстрый просмотр в **противоположной** панели |
 | `Ctrl+T` | режим миниатюр в активной панели |
-| `F9`, затем `↑` или `↓` | миниатюры вкл/выкл (надёжная альтернатива) |
+| `F9`, затем `↑` или `↓` | миниатюры вкл/выкл (резервный путь) |
 | `F9`, затем `←` или `→` | открыть папку под курсором в указанной панели |
-| `Ctrl+O` | открыть папку под курсором в соседней панели |
 | `Shift+←` / `Shift+→` | открыть папку под курсором в указанной панели |
 | `Alt+←` / `Alt+→` | быстрый просмотр в указанной панели |
-| `Ctrl+←` / `Ctrl+→` | быстрый просмотр (алиас) |
-| `Shift+Tab` | войти в избранное / вернуться к панелям (алиас) |
-| `§` | войти в избранное / вернуться к панелям |
+| `Ctrl+O` | открыть папку под курсором в соседней панели |
+| `§` / `Shift+Tab` / `Ctrl+D` | войти в избранное / вернуться к панелям |
 | `Ctrl+B` / `a` | добавить текущий каталог в избранное |
-| `Ctrl+D` | войти в избранное / вернуться к панелям (алиас) |
 | `Ctrl+F` | показать / скрыть панель избранного |
 | `Ctrl+A` | выделить всё |
 | `Ctrl+G` | массовое переименование по шаблону |
-| `s` / `Ctrl+S` | меню сортировки (имя/размер/тип/дата, реверс) |
+| `s` / `Ctrl+S` | меню сортировки (имя/размер/тип/дата, `r` — реверс) |
 | `Ctrl+K` | меню цветов для типов файлов |
 | `Ctrl+E` | настройки: горячие клавиши и трекпад |
 | `Ctrl+R` | обновить обе панели |
@@ -116,125 +311,71 @@ cargo run --release -- ~/Projects /Volumes/Backup
 | `?` / `F1` | справка |
 | `q` / `Ctrl+C` | выход |
 
-В боковой панели избранного: `↑`/`↓` — выбор, `Enter` — перейти в каталог,
+В боковой панели избранного: `↑`/`↓` — выбор, `Enter` — перейти,
 `Delete`/`d` — удалить закладку, `Esc`/`Shift+Tab` — вернуться к панелям.
 
 В режиме просмотра: `↑`/`↓` — прокрутка, `←`/`→` — горизонтальная прокрутка,
-`Ctrl+Q`/`Ctrl+P`, `Ctrl+←/→` или `Esc` — вернуться к списку. Просмотр только
-для чтения.
+`Ctrl+Q`/`Ctrl+P`/`Esc` — закрыть.
 
-В режиме миниатюр: стрелки/`hjkl` — движение по плиткам, `Enter` — войти в каталог,
+В режиме миниатюр: стрелки/`hjkl` — движение по плиткам, `Enter` — войти,
 `Ctrl+T` — вернуться к списку.
 
-**Трекпад:** два пальца вверх/вниз листают список (направление «тянем содержимое»:
-свайп вверх ведёт курсор вниз). **Двойной тап двумя пальцами** открывает элемент
-под курсором: папку — входит в неё, файл — открывает приложением по умолчанию
-(`open` на macOS, `xdg-open` на Linux).
+**Трекпад:** два пальца вверх/вниз листают список (направление «тянем
+содержимое»). **Двойной тап двумя пальцами** открывает элемент под курсором:
+папку — входит в неё, файл — открывает приложением по умолчанию (`open`,
+`xdg-open`, `explorer`). Одиночный тап и горизонтальные движения намеренно
+ничего не делают: macOS присылает горизонтальный скролл и внутри вертикальных
+жестов, из-за чего панель непредсказуемо проваливалась в папки.
 
-Горизонтальные движения двумя пальцами намеренно игнорируются: macOS присылает
-их и внутри вертикальных жестов, из-за чего панель непредсказуемо проваливалась
-в папки. Одиночный тап тоже ничего не делает — только двойной. Двойной тап
-работает и в избранном: открывает закладку под курсором.
+**Настройки (`Ctrl+E`):** `i` переключает направление трекпада, стрелки +
+`Enter` переназначают действие, `r` возвращает стандартные клавиши. Хранится в
+`$YAZI2D_CONFIG_DIR/settings.toml`. `Ctrl+E` и `Esc` переназначить нельзя.
 
-> **Двухпальцевый тап.** Терминал не сообщает, сколькими пальцами сделан тап, и
-> macOS по умолчанию превращает касание двумя пальцами в **правый клик**. Yazi2D
-> принимает нажатие любой кнопки, поэтому двухпальцевый тап срабатывает, если в
-> «Системные настройки → Трекпад → Вторичный щелчок» включено «Касание двумя
-> пальцами». Отдельного жеста «двойное касание двумя пальцами» macOS наружу не
-> отдаёт.
-
-**Настройки (`Ctrl+E`):**
-
-- **Трекпад** — `i` переключает направление прокрутки: «инвертированное» (список
-  тянется за пальцами, по умолчанию) или обычное.
-- **Горячие клавиши** — стрелками выберите действие, `Enter` и нажмите новую
-  комбинацию; `Esc` отменяет. `r` возвращает действие к стандартным клавишам.
-  Переопределённые комбинации подсвечены зелёным. Само меню настроек (`Ctrl+E`)
-  и `Esc` переназначить нельзя, чтобы не потерять доступ к настройкам.
-- Настройки хранятся в `$YAZI2D_CONFIG_DIR/settings.toml`, например:
-
-  ```toml
-  invert_scroll = true
-  key.copy = "ctrl+y"
-  key.delete = "f9"
-  ```
-
-**Раскладка клавиатуры:** горячие клавиши работают и в русской раскладке.
-`Ctrl+и` = `Ctrl+B`, `ы` = `s`, `в` = `d` и так далее — буква сопоставляется по
-физической клавише. В полях ввода (создание, переименование) вводится тот символ,
-который вы набрали.
+**Раскладка:** горячие клавиши работают и в русской раскладке — `Ctrl+и` это
+`Ctrl+B`, `ы` это `s`, `в` это `d`, сопоставление по физической клавише. В
+полях ввода вводится ровно тот символ, который вы набрали.
 
 **Подсказки в футере:** зажмите `Ctrl`, `Option` (`Alt`), `Shift` или `Command` —
-нижняя строка покажет только сочетания, назначенные на эту клавишу. Работает в
-терминалах с kitty keyboard protocol (Ghostty, kitty, WezTerm, foot, iTerm2);
-в остальных футер показывает общий набор.
+нижняя строка покажет только сочетания для этой клавиши (нужен kitty keyboard
+protocol: Ghostty, kitty, WezTerm, foot, iTerm2).
 
-**Избранное:** `Ctrl+F` только показывает и скрывает панель, не забирая фокус.
-Войти в неё — `§` (или `Shift+Tab`, `Ctrl+D`), выйти — `Esc`.
-
-> **Разделение модификаторов.** `Shift` и `Option` (`Alt`) разведены по разным
-> действиям: `Shift+←/→` открывает папку в соседней панели, `Option+←/→`
-> включает там быстрый просмотр. `Ctrl+←/→` на macOS заняты переключением
-> рабочих пространств, а `Cmd+←/→` Ghostty превращает в `Ctrl+A`/`Ctrl+E`,
-> поэтому они не используются.
->
-> Ghostty по умолчанию кодирует `Option+←/→` как `Esc b`/`Esc f` — Yazi2D
-> принимает и `Option+b`/`Option+f`, так что просмотр работает без правки
-> конфига терминала.
->
-> Универсальная замена на любой ОС — `F9`, затем `←`/`→` (открыть в панели)
-> или `↑`/`↓` (миниатюры). `Esc` отменяет.
+> **Модификаторы разведены намеренно.** `Shift+←/→` открывает папку в соседней
+> панели, `Option+←/→` включает там просмотр. `Ctrl+←/→` на macOS переключают
+> рабочие пространства, а `Cmd+←/→` Ghostty превращает в `Ctrl+A`/`Ctrl+E` ещё
+> до приложения, поэтому они не используются. Ghostty кодирует `Option+←/→` как
+> `Esc b`/`Esc f`; Yazi2D принимает и `Option+b`/`Option+f`, так что работает без
+> правки конфига терминала.
 
 ## Быстрый просмотр и миниатюры
 
-- `Ctrl+Q` (или `Ctrl+P`) переводит **противоположную** панель в режим
-  просмотра; активная панель остаётся списком, и её курсор управляет
-  просмотром. Повторное нажатие закрывает просмотр.
-- `Ctrl+←` / `Ctrl+→` переводят указанную панель в режим просмотра (алиас).
-- `Ctrl+O` открывает каталог под курсором активной панели в соседней панели;
-  `Alt+←` / `Alt+→` делают то же для явно указанной стороны.
-- Просмотр следует за курсором: двигаете курсор — содержимое меняется.
-- Текст читается до 512 КБ; двоичные файлы показываются как hex-дамп.
-- Изображения декодируются и масштабируются с кэшем; большие файлы (> 64 МБ)
-  не декодируются. Исходник ограничивается 1600 px, финальный ресайз — Lanczos3,
-  поэтому картинка заметно чётче.
-- `Ctrl+T` включает сетку миниатюр: изображения рисуются half-блоками, а всё
-  остальное — крупной блочной иконкой по типу файла: папка, картинка, видео,
-  музыка, текст, архив, временный, 3D-модель, код. Под иконкой идут имя и
-  отсортированное расширение.
-  Под картинкой идут имя и отдельной строкой расширение. Плитки адаптивные:
-  на широкой панели 3 колонки, на узкой — 2.
-- В списке расширение вынесено в отдельную колонку `Ext` перед размером, поэтому
-  оно не прилипает к имени. На узких панелях, где колонка не помещается,
-  расширение возвращается к имени, чтобы тип файла не терялся.
-- Пока каталог загружается в фоне, панель показывает `Loading <path>…`;
-  `Esc` отменяет загрузку.
-- **Просмотр папки — это сетка миниатюр**: изображения видны сразу, папки и
-  прочие файлы подписаны цветом своей группы. Файлы по-прежнему открываются
-  как текст, картинка или hex-дамп.
-- **Сортировка**: `s` открывает меню (имя, размер, тип, дата), `r` меняет
-  направление. `..` всегда сверху, папки идут перед файлами.
-- **Цвета по типам файлов** (`Ctrl+K`): папки, изображения, видео, аудио, текст,
-  архивы, временные, 3D-модели, код, прочее. Три темы: `default`, `vivid`,
-  `mono`; выбор сохраняется между запусками.
-- **Массовое переименование** (`Ctrl+G`): `{name}` — имя без расширения,
-  `{ext}` — расширение, `{n}` — счётчик с 1. Пример: `photo_{n}` даёт
-  `photo_1.jpg`, `photo_2.jpg`. `%e=txt` меняет только расширение.
-- **Размеры и даты** догружаются в фоне: список появляется мгновенно, а
-  колонки заполняются через доли секунды. Это убирает зависания на облачных
-  папках Nextcloud/iCloud.
+- `Ctrl+Q`/`Ctrl+P` переводит **противоположную** панель в режим просмотра;
+  активная панель остаётся списком, и её курсор управляет просмотром.
+  Повторное нажатие закрывает просмотр.
+- Просмотр папки — это **сетка миниатюр**: изображения видны сразу, папки и
+  прочие файлы показывают блочную иконку своего типа.
+- Текст читается до 512 КБ; двоичные файлы — hex-дамп.
+- Изображения декодируются в фоне, ограничены 1600 px по длинной стороне и
+  масштабируются Lanczos3; файлы больше 64 МБ не декодируются.
+- `Ctrl+T` — сетка миниатюр: изображения half-блоками, остальные файлы —
+  крупной иконкой по типу (папка, картинка, видео, музыка, текст, архив,
+  временный, 3D-модель, код, прочее). Под иконкой имя и расширение.
+- В списке расширение вынесено в колонку `Ext` перед размером. На узких панелях
+  оно возвращается к имени, чтобы тип файла не терялся.
+- Пока каталог загружается, панель показывает `Loading <path>…`; `Esc` отменяет.
+- **Сортировка** (`s`): имя, размер, тип, дата; `r` меняет направление.
+  `..` всегда сверху, папки перед файлами.
+- **Цвета** (`Ctrl+K`): папки, изображения, видео, аудио, текст, архивы,
+  временные, 3D-модели, код, прочее. Темы `default`, `vivid`, `mono`.
+- **Массовое переименование** (`Ctrl+G`): `{name}`, `{ext}`, `{n}` (счётчик с 1),
+  `%e=txt` (только расширение). Пример: `photo_{n}` → `photo_1.jpg`.
+- **Размеры и даты** догружаются в фоне: список появляется мгновенно, колонки
+  заполняются через доли секунды. Это убирает зависания на папках Nextcloud/iCloud.
 
 ## Избранное и конфигурация
 
-Файл: `~/.config/yazi2d/favorites.toml` (macOS: `~/Library/Application Support/yazi2d/favorites.toml`).
-
-Переопределить каталог конфигурации:
-
-```sh
-YAZI2D_CONFIG_DIR="$HOME/.config/yazi2d" yazi2d
-```
-
-Формат:
+Файл: `~/.config/yazi2d/favorites.toml`
+(macOS: `~/Library/Application Support/yazi2d/favorites.toml`).
+Каталог можно переопределить через `YAZI2D_CONFIG_DIR`.
 
 ```toml
 favorites = [
@@ -245,11 +386,17 @@ favorites = [
 ```
 
 При первом запуске в избранное попадают `~`, `Desktop`, `Documents`, `Downloads`,
-если они существуют. Запись происходит при добавлении/удалении закладки.
+если они существуют.
+
+Настройки: `$YAZI2D_CONFIG_DIR/settings.toml`.
+
+```toml
+invert_scroll = true
+key.copy = "ctrl+y"
+key.delete = "f9"
+```
 
 ## Логи и зависания
-
-Yazi2D пишет диагностический лог (по умолчанию включён):
 
 ```
 ~/.config/yazi2d/yazi2d.log                         # Linux
@@ -263,18 +410,9 @@ YAZI2D_LOG=/tmp/yazi2d.log yazi2d        # свой путь
 tail -f ~/Library/Application\ Support/yazi2d/yazi2d.log
 ```
 
-Что пишется: старт и аргументы, каждая загрузка каталога с временем и числом
-элементов, медленные загрузки (> 250 мс) как `WARN slow directory load`,
-декодирование изображений, паника. При запуске файл больше 4 МБ переименовывается
-в файл с расширением `.log.1`. Запись идёт в фоне; при переполнении очереди или
-внезапном завершении некоторые сообщения могут потеряться.
-
-Если приложение «зависло» при входе в каталог: каталоги теперь читаются в
-фоновом потоке, и панель показывает `Loading <path>…`. Первоначальное чтение
-каталогов и декодирование изображений всё ещё могут задерживать интерфейс.
-Откройте лог и найдите последнюю строку `INFO load start` — в ней будет путь;
-строка `WARN slow directory load` покажет, сколько времени занял проблемный
-каталог (обычно это сетевой диск или облачные плейсхолдеры).
+Каждая загрузка каталога пишется с временем и числом элементов; загрузки
+дольше 250 мс помечаются `WARN slow directory load`. Ищите последнюю строку
+`INFO load start` — в ней путь, на котором приложение застряло.
 
 ## Разработка
 
@@ -286,34 +424,24 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 cargo build --release
 
-# сквозной тест в настоящем PTY
-python3 scripts/e2e_pty.py target/debug/yazi2d
+python3 scripts/e2e_pty.py target/debug/yazi2d   # сквозной тест в настоящем PTY
 ```
 
-Проект распространяется по лицензии MIT — см. [`LICENSE`](LICENSE).
-
-Документация для продолжения работы:
-
-- [`AGENTS.md`](AGENTS.md) — точка входа для следующего агента/разработчика.
-- [`docs/CONCEPT.md`](docs/CONCEPT.md) — цель, концепция и UX.
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — устройство кода и поток данных.
-- [`docs/DECISIONS.md`](docs/DECISIONS.md) — принятые архитектурные решения.
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) — план развития.
-- [`docs/STATUS.md`](docs/STATUS.md) — текущее состояние и ближайшие задачи.
+Лицензия MIT — см. [`LICENSE`](LICENSE). Решения описаны в
+[`docs/DECISIONS.md`](docs/DECISIONS.md), карта модулей — в
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), руководство для продолжения — в
+[`AGENTS.md`](AGENTS.md).
 
 ## Ограничения
 
-- Нет диалога «перезаписать/пропустить»: конфликты решаются автоматическим суффиксом.
-- Нет отмены текущей фоновой операции.
-- Просмотр изображений — half-блоки в truecolor; sixel/Kitty/iTerm2-протоколы не
-  используются. Качество зависит от размера панели, терминала и шрифта; Lanczos3
-  и адаптивные плитки дают максимум возможного для half-блоков.
+- Нет диалога «перезаписать/пропустить»: конфликты получают суффикс ` (1)`.
+- Нельзя отменить уже запущенную фоновую операцию.
+- Изображения рисуются half-блоками в truecolor; sixel/Kitty/iTerm2 не используются.
 - Нет редактора файлов, поиска, архивов, SSH/SFTP.
-- Нет мыши и настраиваемых раскладок/тем.
-- Удаление безвозвратное (корзина — в планах).
+- Удаление безвозвратное (корзина в планах).
 
 ## Происхождение
 
 Yazi2D — самостоятельная кодовая база на Rust + [ratatui](https://ratatui.rs),
 вдохновлённая Yazi (архитектурные идеи, скорость, TUI-эстетика) и Total Commander
-(двухпанельная модель). Исходники Yazi в проект не входят. Лицензия MIT.
+(двухпанельная модель). Исходники Yazi в проект не входят.
