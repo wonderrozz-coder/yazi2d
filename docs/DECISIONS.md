@@ -425,3 +425,24 @@ the tiles looked broken. In the list the extension was glued to the name
 **Consequences:** The grid is legible without any image decoding, and the list
 can be scanned by name. `build_row` now takes six positional strings, which is
 the upper limit before a struct argument becomes worthwhile.
+
+## ADR-024 — `F9` chord as a fallback for swallowed arrow combinations
+
+**Status:** accepted (2026-11-11, `0.3.4`)
+
+**Context:** On macOS both `Ctrl+←/→` (Mission Control) and, in some terminals,
+`Alt+←/→` never arrive. `Ctrl+O` and `Ctrl+T` work, but the user asked for the
+same actions on an arrow plus a function key, mirroring the panel layout.
+
+**Decision:**
+
+1. `F9` arms a chord (`App::leader = Instant::now()`).
+2. The next key is then resolved as: `←`/`→` open the cursor folder in the left
+   or right panel, `↑`/`↓` toggle the thumbnail grid on the active panel.
+3. `Esc`, any other key, or a `LEADER_WINDOW` (2 s) timeout cancels the chord.
+4. The status line explains the pending chord, and the footer shows it while
+   armed, so the mode is never invisible.
+
+**Consequences:** Every cross-panel action now has a plain-keyboard path that no
+window manager intercepts. `F9` was unused; macOS may require `Fn` for it, and
+the `Ctrl+O`/`Ctrl+T` bindings remain the primary ones.

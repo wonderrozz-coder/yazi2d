@@ -1027,6 +1027,9 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         _ if app.held_modifiers.contains(KeyModifiers::ALT) => {
             " Alt · ← / → open the cursor folder in that panel"
         }
+        _ if app.leader.is_some() => {
+            " F9 + ←/→ open the cursor folder there · F9 + ↑/↓ thumbnails · Esc cancels"
+        }
         _ if app.held_modifiers.contains(KeyModifiers::SHIFT) => {
             " Shift · Tab focus favorites · Home/End jump · (arrows and letters work as usual)"
         }
@@ -1082,18 +1085,16 @@ fn draw_help(frame: &mut Frame, area: Rect) {
 
     let lines = vec![
         Line::from(Span::styled("NAVIGATION", header)),
-        help_line("  ↑/k, ↓/j", "move cursor / scroll preview", key),
+        help_line("  ↑↓ / jk", "move cursor / scroll preview", key),
         help_line("  PgUp / PgDn", "page up / down", key),
-        help_line("  Home/g, End/G", "top / bottom", key),
+        help_line("  Home/End · g/G", "top / bottom", key),
         help_line("  Enter / l", "open directory", key),
         help_line("  Backspace / h", "parent directory", key),
         help_line("  Space / Insert", "select and move down", key),
         help_line("  Esc", "clear selection / close preview", key),
         Line::from(Span::styled("FILE OPERATIONS", header)),
-        help_line("  F5 / c", "copy to the other panel", key),
-        help_line("  F6 / m", "move to the other panel", key),
-        help_line("  F7 / n", "create directory", key),
-        help_line("  F2 / r", "rename", key),
+        help_line("  F5/c · F6/m", "copy / move to the other panel", key),
+        help_line("  F7/n · F2/r", "create directory / rename", key),
         help_line("  F8 / d / Del", "delete (Enter or y confirms)", key),
         help_line("  Ctrl+A", "select everything", key),
         help_line("  Ctrl+G", "bulk rename with a pattern", key),
@@ -1104,6 +1105,8 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         help_line("  Ctrl+Q / Ctrl+P", "quick preview in the OTHER panel", key),
         help_line("  Ctrl+T", "thumbnail grid in the active panel", key),
         help_line("  Ctrl+O", "open cursor folder in the other panel", key),
+        help_line("  F9 + ← / F9 + →", "open cursor folder in that panel", key),
+        help_line("  F9 + ↑ / F9 + ↓", "thumbnail grid on / off", key),
         help_line(
             "  Ctrl+← / Ctrl+→",
             "preview in that panel (may be OS-bound)",

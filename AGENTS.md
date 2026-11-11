@@ -20,7 +20,7 @@ filesystems, a GUI, sixel/Kitty image protocols.
 
 ## Current status (2026-11-11)
 
-Version `0.3.3` — MVP + quick view, thumbnails, background loading, logging,
+Version `0.3.4` — MVP + quick view, thumbnails, background loading, logging,
 sorting, type colours, bulk rename, trackpad gestures, a live footer, and a
 polished thumbnail grid with a separate extension column.
 
@@ -40,7 +40,8 @@ polished thumbnail grid with a separate extension column.
   file-type colours with a menu (`Ctrl+K`).
 - [x] Double-Tab favorites, trackpad scrolling/swipes, modifier-aware footer.
 - [x] Folder/file thumbnail glyphs, `Ext` column in the list.
-- [x] 55 unit tests + a real-PTY end-to-end test, all green.
+- [x] `F9` chord: `F9` + arrows for cross-panel open / thumbnails.
+- [x] 57 unit tests + a real-PTY end-to-end test, all green.
 - [x] `cargo fmt`, `cargo clippy -D warnings`, release build (≈2 MB binary).
 
 Known limitations and the next steps are in `docs/STATUS.md` and
@@ -192,6 +193,10 @@ Thumbnails: arrows/`hjkl` move, `Enter` opens, `Ctrl+T` returns to the list.
 
 Favorites focus: arrows/`jk`, `Enter` navigate, `Del`/`d` remove,
 `Esc`/`Shift+Tab` close.
+
+Chord: `F9` arms a leader; the next arrow opens the cursor folder in that
+panel (`←`/`→`) or toggles thumbnails (`↑`/`↓`). `Esc` or an unrelated key
+cancels it. This is the fallback for terminals that swallow Ctrl/Alt+arrow.
 
 Selection & tools: `Ctrl+A` selects all, `Ctrl+G` bulk rename (`{name}`,
 `{ext}`, `{n}`, `%e=ext`), `s`/`Ctrl+S` sort menu, `Ctrl+K` colour menu.

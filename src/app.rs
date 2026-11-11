@@ -18,6 +18,9 @@ use crate::transfer::{self, Job, JobKind, JobMsg};
 /// and a long window would steal that gesture.
 const DOUBLE_TAB_WINDOW: Duration = Duration::from_millis(280);
 
+/// How long `F9` waits for an arrow before the chord is abandoned.
+const LEADER_WINDOW: Duration = Duration::from_millis(2000);
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Focus {
     Panels,
@@ -78,6 +81,8 @@ pub struct App {
     pub held_modifiers: KeyModifiers,
     /// Physical modifier keys currently held (left/right tracked separately).
     pub held_keys: Vec<ModifierKeyCode>,
+    /// Set when `F9` was pressed and an arrow is expected next.
+    pub leader: Option<Instant>,
 }
 
 impl App {
@@ -152,6 +157,7 @@ impl App {
             last_tab: None,
             held_modifiers: KeyModifiers::NONE,
             held_keys: Vec::new(),
+            leader: None,
         }
     }
 
@@ -458,6 +464,48 @@ impl App {
         {
             self.toggle_favorites_focus();
             return;
+        }
+
+        // F9 is a chord leader, so the cross-panel actions also work on
+        // keyboards where Ctrl/Alt + arrow never reaches the terminal:
+        //   F9 → (wait for one arrow)
+        //   ←/→  open the cursor folder in that panel
+        //   ↑/↓  toggle the thumbnail grid in the active panel
+        // The leader expires after LEADER_WINDOW or on any unrelated key.
+        if let Some(started) = self.leader {
+            if started.elapsed() > LEADER_WINDOW {
+                self.leader = None;
+            }
+        }
+
+        if key.code == KeyCode::F(9) {
+            self.leader = Some(Instant::now());
+            self.status = "F9 + ←/→ open there · F9 + ↑/↓ thumbnails · Esc cancels".to_string();
+            return;
+        }
+
+        if let Some(_started) = self.leader.take() {
+            match key.code {
+                KeyCode::Left => {
+                    self.open_entry_in_panel(0);
+                    return;
+                }
+                KeyCode::Right => {
+                    self.open_entry_in_panel(1);
+                    return;
+                }
+                KeyCode::Up | KeyCode::Down => {
+                    self.toggle_thumbnails();
+                    return;
+                }
+                KeyCode::Esc => {
+                    self.status = "F9 chord cancelled".to_string();
+                    return;
+                }
+                _ => {
+                    self.status = "F9 chord cancelled".to_string();
+                }
+            }
         }
 
         if key.code == KeyCode::Tab {
@@ -1622,6 +1670,50 @@ mod tests {
         assert_eq!(app.panels[0].mode, PanelMode::Thumbnails);
         press(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL);
         assert_eq!(app.panels[0].mode, PanelMode::List);
+    }
+
+    #[test]
+    fn f9_then_arrow_opens_the_cursor_folder_or_toggles_thumbnails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let left = tmp.path().join("left");
+        let right = tmp.path().join("right");
+        let child = left.join("child");
+        fs::create_dir_all(&child).unwrap();
+        fs::create_dir_all(&right).unwrap();
+
+        let mut app = app_for(&left, &right);
+        app.panels[0].select_name("child");
+
+        // F9 → Right opens the cursor folder in the right panel.
+        press(&mut app, KeyCode::F(9), KeyModifiers::NONE);
+        assert!(app.leader.is_some());
+        press(&mut app, KeyCode::Right, KeyModifiers::NONE);
+        assert!(app.leader.is_none());
+        wait_for_loads(&mut app);
+        assert_eq!(app.panels[1].cwd, child);
+
+        // F9 → Up toggles the thumbnail grid in the active panel.
+        press(&mut app, KeyCode::F(9), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(app.panels[0].mode, PanelMode::Thumbnails);
+        press(&mut app, KeyCode::F(9), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(app.panels[0].mode, PanelMode::List);
+    }
+
+    #[test]
+    fn f9_chord_is_cancelled_by_escape_or_an_unrelated_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+
+        press(&mut app, KeyCode::F(9), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.leader.is_none());
+        assert_eq!(app.panels[0].mode, PanelMode::List);
+
+        press(&mut app, KeyCode::F(9), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char('z'), KeyModifiers::NONE);
+        assert!(app.leader.is_none());
     }
 
     #[test]
