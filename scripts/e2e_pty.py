@@ -8,6 +8,7 @@ open, help, mkdir, delete and clean shutdown.
 import fcntl
 import os
 import pty
+import re
 import select
 import shutil
 import struct
@@ -19,6 +20,37 @@ import threading
 import time
 
 BIN = sys.argv[1] if len(sys.argv) > 1 else "target/debug/yazi2d"
+
+# Terminal escape sequences split words in the raw stream, so text assertions
+# run against a reconstructed screen instead.
+ANSI = re.compile(rb"\x1b\[[0-9;?]*[A-Za-z]")
+
+
+def plain(data):
+    """Strip escape sequences (kept for simple substring checks)."""
+    return ANSI.sub(b"", data)
+
+
+def compact(data):
+    """Letters/digits only, so ratatui's cell diffs cannot split a word."""
+    text = ANSI.sub(b"", data).decode("utf-8", "ignore")
+    return "".join(char for char in text if char.isalnum())
+
+
+def has_ordered(data, needle):
+    """True when `needle` appears in order, ignoring inserted redraw noise.
+
+    ratatui repaints individual cells, so a status line can be interleaved
+    with later writes. Subsequence matching keeps the check meaningful without
+    being brittle.
+    """
+    haystack = compact(data).lower()
+    needle = "".join(char for char in needle.lower() if char.isalnum())
+    position = 0
+    for char in haystack:
+        if position < len(needle) and char == needle[position]:
+            position += 1
+    return position == len(needle)
 
 root = tempfile.mkdtemp(prefix="yazi2d-e2e-")
 left = os.path.join(root, "left")
@@ -133,11 +165,31 @@ try:
 
     # Add the active directory to favorites.
     send(b"\x02")  # Ctrl+B
-    time.sleep(0.3)
+    time.sleep(0.4)
     favorites = os.path.join(config, "favorites.toml")
     assert os.path.exists(favorites), "favorites file was not written"
     with open(favorites) as f:
         assert left in f.read(), "current directory was not saved to favorites"
+
+    # Ctrl+A selects everything; Esc clears it again.
+    send(b"\x01")
+    screen = plain(drain(0.4))
+    assert has_ordered(screen, "item(s)"), "Ctrl+A did not select entries"
+    send(b"\x1b")
+
+    # Sort menu: choose size, then leave the menu.
+    send(b"s")
+    screen = plain(drain(0.3))
+    assert has_ordered(screen, "SORT ORDER"), "sort menu was not rendered"
+    send(b"s")
+    screen = plain(drain(0.3))
+    assert has_ordered(screen, "Sorted by size"), "size sort was not applied"
+
+    # Colour menu.
+    send(b"\x0b")  # Ctrl+K
+    screen = plain(drain(0.3))
+    assert has_ordered(screen, "Colours"), "colour menu was not rendered"
+    send(b"\x1b")
 
     # Shift+Tab must give the favorites sidebar keyboard focus.
     send(b"\x1b[Z")
@@ -165,7 +217,7 @@ try:
     while time.time() < deadline and os.path.isdir(os.path.join(left, "testdir")):
         drain(0.1)
     assert not os.path.isdir(os.path.join(left, "testdir")), "delete failed"
-    drain(0.5)
+    drain(0.6)
 
     # Ctrl+O opens the cursor folder in the right panel.
     send(b"n")

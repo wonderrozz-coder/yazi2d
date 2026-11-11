@@ -141,9 +141,13 @@ Listing (`list_dir`, runs on a worker thread for navigation):
   `is_symlink` for display and transfer;
 - sorts by `(parent?, dir?, lowercase name)`.
 
-`Panel::spawn_load(path, select, show_hidden)` bumps `generation`, sets
+`list_dir` reads only names and `DirEntry::file_type()` — it never stats an
+entry. `Panel::spawn_load(path, select, show_hidden)` bumps `generation`, sets
 `loading`, and returns an `mpsc::Receiver<LoadResult>` from a `std::thread`
-that runs `list_dir`. `Panel::apply_load(result)` accepts only a result whose
+that runs `list_dir`. Once the listing is applied, `App::start_stat_worker`
+runs `panel::stat_entries` to fill sizes/dates in batches of 16; the size column
+shows `…` until a row is enriched. Sorting by size/date re-applies when batches
+arrive. Startup enriches synchronously so the first frame is complete. `Panel::apply_load(result)` accepts only a result whose
 generation matches, then replaces `cwd`/`entries`, clears selection, restores
 the cursor (by name when possible), and clears `loading`. `Panel::reload` and
 `Panel::change_dir` remain synchronous and are used for the initial listing
@@ -169,19 +173,29 @@ Mode semantics:
 selected entries in display order, else the cursor entry; `..` is always
 excluded.
 
+### `colors.rs`
+
+`FileGroup::classify(path, is_dir)` maps an entry to one of ten groups
+(directory, image, video, audio, text, archive, temporary, model, code, other).
+`Colors::color(group)` resolves it through one of three presets (`default`,
+`vivid`, `mono`). The preset is persisted in `$YAZI2D_CONFIG_DIR/theme`; `Ctrl+K`
+renders a preview of every group.
+
 ### `preview.rs`
 
 Two caches, both keyed by path and validated by mtime + size:
 
-- `PreviewCache::get(path, show_hidden)` → `PreviewContent`:
+- `PreviewCache::get(path, show_hidden)` → `Option<&PreviewContent>`: returns
+  `None` and starts a worker on a miss, so a preview never blocks a draw.
   - `Text { lines, truncated, size }` — reads at most 512 KiB, at most 5000
     lines, expands tabs, detects NUL bytes as binary;
   - `Binary { size, sample }` — hex sample of the first bytes;
-  - `Directory { children, total }` — first 64 children, directories first,
-    flags image children;
+  - `Directory { children, total }` — first 64 children from `read_dir`,
+    directories first, flags image children, never stats them;
   - `Error(String)`.
 - `ImageCache::render(path, max_width, max_height)` → `Option<Arc<RgbImage>>`:
-  - rejects files larger than 64 MiB;
+  - returns `None` and decodes on a worker thread (at most four in flight);
+  - rejects files larger than 64 MiB and remembers failures;
   - decodes with `image` (PNG/JPEG/GIF/WebP/BMP/TIFF) once and caches the
     decoded source;
   - pre-scales the source so its longest side is at most 1600 px (`Triangle`),
@@ -280,8 +294,10 @@ Panel layout:
   `render_halfblocks`; directories show `▸`, other files show their extension.
   The focused tile gets a background highlight.
 - `Preview` — subject is the other panel's cursor path (passed in from `draw`).
-  Directories and text render as a scrollable `Paragraph`; images render with
-  `render_halfblocks`; binary/error content renders as a centered message.
+  Directories render as an adaptive thumbnail grid (`draw_folder_grid`); text
+  renders as a scrollable `Paragraph`; images render with `render_halfblocks`;
+  binary/error content renders as a centered message. While loading, the pane
+  shows `Loading…`.
   The second row is a caption with name/kind/size.
 
 `render_halfblocks` writes directly into `frame.buffer_mut()`: each cell uses

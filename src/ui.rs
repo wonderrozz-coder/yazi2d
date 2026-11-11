@@ -13,6 +13,7 @@ use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Focus, Prompt};
+use crate::colors::FileGroup;
 use crate::panel::{Entry, Panel, PanelMode};
 use crate::preview::{is_image_path, ImageCache, PreviewCache, PreviewContent};
 
@@ -47,6 +48,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let left_loading = app.panels[1].loading;
     let right_loading = app.panels[0].loading;
     let hidden = app.hidden;
+    let colors = &app.colors;
 
     if show_favorites {
         let cols = Layout::default()
@@ -69,6 +71,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             &mut app.preview_cache,
             &mut app.image_cache,
             hidden,
+            colors,
         );
         draw_panel(
             frame,
@@ -81,6 +84,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             &mut app.preview_cache,
             &mut app.image_cache,
             hidden,
+            colors,
         );
     } else {
         let cols = Layout::default()
@@ -98,6 +102,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             &mut app.preview_cache,
             &mut app.image_cache,
             hidden,
+            colors,
         );
         draw_panel(
             frame,
@@ -110,6 +115,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             &mut app.preview_cache,
             &mut app.image_cache,
             hidden,
+            colors,
         );
     }
 
@@ -118,6 +124,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     if app.help {
         draw_help(frame, area);
+    }
+    if app.sort_menu {
+        draw_sort_menu(frame, area, &app.panels[app.active]);
+    }
+    if app.theme_menu {
+        draw_theme_menu(frame, area, &app.colors);
     }
     if let Some(prompt) = &app.prompt {
         draw_prompt(frame, area, prompt);
@@ -136,6 +148,7 @@ fn draw_panel(
     preview_cache: &mut PreviewCache,
     image_cache: &mut ImageCache,
     show_hidden: bool,
+    colors: &crate::colors::Colors,
 ) {
     let mode = panel.mode;
     let border_color = if active {
@@ -204,7 +217,7 @@ fn draw_panel(
                     );
                 }
             }
-            draw_list(frame, panel, rows[2], active);
+            draw_list(frame, panel, rows[2], active, colors);
         }
         PanelMode::Thumbnails => {
             if rows[1].height > 0 {
@@ -212,13 +225,14 @@ fn draw_panel(
                     loading_caption(panel)
                 } else {
                     format!(
-                        " {} items · arrows move · Ctrl+T list ",
-                        panel.entries.len().saturating_sub(1)
+                        " {} items · {} · arrows move · Ctrl+T list ",
+                        panel.entries.len().saturating_sub(1),
+                        sort_label(panel)
                     )
                 };
                 draw_caption(frame, rows[1], &caption);
             }
-            draw_thumbnails(frame, panel, rows[2], active, image_cache);
+            draw_thumbnails(frame, panel, rows[2], active, image_cache, colors);
         }
         PanelMode::Preview => {
             draw_preview(
@@ -231,6 +245,7 @@ fn draw_panel(
                 preview_cache,
                 image_cache,
                 show_hidden,
+                colors,
             );
         }
     }
@@ -241,7 +256,21 @@ fn loading_caption(panel: &Panel) -> String {
     format!(" Loading {subject}… · Esc cancels ")
 }
 
-fn draw_list(frame: &mut Frame, panel: &mut Panel, list_area: Rect, active: bool) {
+fn sort_label(panel: &Panel) -> String {
+    format!(
+        "sort: {}{}",
+        panel.sort_key.label(),
+        if panel.sort_reverse { " ↓" } else { "" }
+    )
+}
+
+fn draw_list(
+    frame: &mut Frame,
+    panel: &mut Panel,
+    list_area: Rect,
+    active: bool,
+    colors: &crate::colors::Colors,
+) {
     if list_area.height == 0 {
         return;
     }
@@ -264,7 +293,7 @@ fn draw_list(frame: &mut Frame, panel: &mut Panel, list_area: Rect, active: bool
         .iter()
         .map(|entry| {
             let selected = !entry.is_parent && panel.selected.contains(&entry.path);
-            list_item(entry, selected, width)
+            list_item(entry, selected, width, colors)
         })
         .collect();
 
@@ -293,6 +322,7 @@ fn draw_preview(
     preview_cache: &mut PreviewCache,
     image_cache: &mut ImageCache,
     show_hidden: bool,
+    colors: &crate::colors::Colors,
 ) {
     panel.page_size = area.height.max(1) as usize;
 
@@ -311,65 +341,31 @@ fn draw_preview(
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| path.display().to_string());
-    let size = path.metadata().map(|meta| meta.len()).unwrap_or(0);
+    let size = fs_metadata_size(path);
 
     if path.is_dir() {
         draw_caption(frame, header, &format!(" {name}  ·  folder "));
-        match preview_cache.get(path, show_hidden) {
+        let Some(content) = preview_cache.get(path, show_hidden) else {
+            render_message(frame, area, "Loading folder…");
+            return;
+        };
+        match content {
             PreviewContent::Directory { children, total } => {
-                let max_scroll = children.len().saturating_sub(area.height as usize);
-                clamp_preview(panel, max_scroll, 0);
-
                 if children.is_empty() {
                     render_message(frame, area, "(empty folder)");
                     return;
                 }
 
-                let lines: Vec<Line> = children
-                    .iter()
-                    .map(|child| {
-                        let marker = if child.is_dir {
-                            Span::styled("▸ ", Style::default().fg(Color::LightBlue))
-                        } else if child.is_image {
-                            Span::styled("▣ ", Style::default().fg(Color::LightMagenta))
-                        } else {
-                            Span::styled("  ", Style::default())
-                        };
-                        let style = if child.is_dir {
-                            Style::default().fg(Color::LightBlue)
-                        } else {
-                            Style::default().fg(Color::Gray)
-                        };
-                        Line::from(vec![
-                            marker,
-                            Span::styled(pad_right(&child.name, 32), style),
-                            Span::styled(
-                                human_size(child.size),
-                                Style::default().fg(Color::DarkGray),
-                            ),
-                        ])
-                    })
-                    .collect();
-
-                let text =
-                    Paragraph::new(lines).scroll((panel.preview_scroll, panel.preview_scroll_x));
-                frame.render_widget(text, area);
-
-                if *total > children.len() {
-                    let more = format!(" … {} more item(s)", total.saturating_sub(children.len()));
-                    let y = area.y + area.height.saturating_sub(1);
-                    if area.height > 0 {
-                        frame.render_widget(
-                            Paragraph::new(more).style(Style::default().fg(Color::DarkGray)),
-                            Rect {
-                                x: area.x,
-                                y,
-                                width: area.width,
-                                height: 1,
-                            },
-                        );
-                    }
-                }
+                let caption = if *total > children.len() {
+                    format!(
+                        " {name}  ·  folder  ·  {} of {total} items ",
+                        children.len()
+                    )
+                } else {
+                    format!(" {name}  ·  folder  ·  {total} items ")
+                };
+                draw_caption(frame, header, &caption);
+                draw_folder_grid(frame, panel, children, area, image_cache, colors);
             }
             PreviewContent::Error(error) => render_message(frame, area, error),
             _ => render_message(frame, area, "Cannot preview this folder"),
@@ -392,13 +388,25 @@ fn draw_preview(
             }
             None => {
                 draw_caption(frame, header, &format!(" {name}  ·  image "));
-                render_message(frame, area, "Cannot decode this image");
+                let message = if image_cache.is_loading() {
+                    "Decoding image…"
+                } else if size > crate::preview::MAX_IMAGE_BYTES {
+                    "Image is too large to decode"
+                } else {
+                    "Cannot decode this image"
+                };
+                render_message(frame, area, message);
             }
         }
         return;
     }
 
-    match preview_cache.get(path, show_hidden) {
+    let Some(content) = preview_cache.get(path, show_hidden) else {
+        draw_caption(frame, header, &format!(" {name}  ·  loading "));
+        render_message(frame, area, "Loading…");
+        return;
+    };
+    match content {
         PreviewContent::Text {
             lines,
             truncated,
@@ -447,12 +455,96 @@ fn draw_preview(
     }
 }
 
+/// Draw a folder preview as a thumbnail grid.
+///
+/// The preview pane shows thumbnails when the subject is a folder; files keep
+/// the normal text/image/binary preview. Decoding is asynchronous, so a tile
+/// shows `…` for a frame or two before its image appears.
+fn draw_folder_grid(
+    frame: &mut Frame,
+    panel: &mut Panel,
+    children: &[crate::preview::DirChild],
+    area: Rect,
+    image_cache: &mut ImageCache,
+    colors: &crate::colors::Colors,
+) {
+    const TILE_MIN_WIDTH: u16 = 18;
+    const TILE_MAX_WIDTH: u16 = 28;
+
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+
+    let tile_width = (area.width / 3).clamp(TILE_MIN_WIDTH, TILE_MAX_WIDTH);
+    let tile_height = ((tile_width.saturating_sub(2)) / 2 + 3).clamp(8, 18);
+    let cols = (area.width / tile_width).max(1) as usize;
+    let rows = (area.height / tile_height).max(1) as usize;
+
+    let page = cols * rows;
+    let max_scroll = children.len().saturating_sub(page);
+    clamp_preview(panel, max_scroll, 0);
+
+    let start = (panel.preview_scroll as usize) * cols;
+    let end = (start + page).min(children.len());
+
+    for (relative, child) in children[start..end].iter().enumerate() {
+        let tile = Rect {
+            x: area.x + (relative % cols) as u16 * tile_width,
+            y: area.y + (relative / cols) as u16 * tile_height,
+            width: tile_width,
+            height: tile_height,
+        };
+        let color = colors.color(FileGroup::classify(&child.path, child.is_dir));
+
+        if child.is_image && tile.width > 2 && tile.height > 3 {
+            let image_area = Rect {
+                x: tile.x + 1,
+                y: tile.y,
+                width: tile.width.saturating_sub(2),
+                height: tile.height.saturating_sub(2),
+            };
+            match image_cache.render(&child.path, image_area.width, image_area.height) {
+                Some(image) => render_halfblocks(frame, &image, image_area),
+                None => render_message(frame, image_area, "…"),
+            }
+        } else {
+            let label = if child.is_dir { "▸" } else { "·" };
+            let icon_area = Rect {
+                x: tile.x,
+                y: tile.y,
+                width: tile.width,
+                height: tile.height.saturating_sub(2),
+            };
+            frame.render_widget(
+                Paragraph::new(label)
+                    .alignment(Alignment::Center)
+                    .style(Style::default().fg(color)),
+                center_vertically(icon_area, 1),
+            );
+        }
+
+        let name_area = Rect {
+            x: tile.x,
+            y: tile.y + tile.height.saturating_sub(1),
+            width: tile.width,
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(truncate_right(&child.name, name_area.width as usize))
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(color)),
+            name_area,
+        );
+    }
+}
+
 fn draw_thumbnails(
     frame: &mut Frame,
     panel: &mut Panel,
     area: Rect,
     active: bool,
     image_cache: &mut ImageCache,
+    colors: &crate::colors::Colors,
 ) {
     const TILE_MIN_WIDTH: u16 = 22;
     const TILE_MAX_WIDTH: u16 = 32;
@@ -504,10 +596,12 @@ fn draw_thumbnails(
             selected,
             active,
             image_cache,
+            colors,
         );
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_tile(
     frame: &mut Frame,
     entry: &Entry,
@@ -516,6 +610,7 @@ fn draw_tile(
     selected: bool,
     active: bool,
     image_cache: &mut ImageCache,
+    colors: &crate::colors::Colors,
 ) {
     let background = if focused {
         if active {
@@ -548,13 +643,22 @@ fn draw_tile(
         if !entry.is_dir && is_image_path(&entry.path) {
             match image_cache.render(&entry.path, image_area.width, image_area.height) {
                 Some(image) => render_halfblocks(frame, &image, image_area),
-                None => render_message(frame, image_area, "no preview"),
+                None => {
+                    let message = if image_cache.is_loading() {
+                        "loading…"
+                    } else {
+                        "no preview"
+                    };
+                    render_message(frame, image_area, message);
+                }
             }
         } else if entry.is_dir {
             frame.render_widget(
-                Paragraph::new("▸")
-                    .alignment(Alignment::Center)
-                    .style(Style::default().fg(Color::LightBlue).bg(background)),
+                Paragraph::new("▸").alignment(Alignment::Center).style(
+                    Style::default()
+                        .fg(colors.color(FileGroup::Directory))
+                        .bg(background),
+                ),
                 center_vertically(image_area, 1),
             );
         } else {
@@ -564,10 +668,11 @@ fn draw_tile(
                 .and_then(|ext| ext.to_str())
                 .map(|ext| format!(".{}", ext.to_lowercase()))
                 .unwrap_or_else(|| "file".to_string());
+            let group_color = colors.color(FileGroup::classify(&entry.path, false));
             frame.render_widget(
                 Paragraph::new(label)
                     .alignment(Alignment::Center)
-                    .style(Style::default().fg(Color::DarkGray).bg(background)),
+                    .style(Style::default().fg(group_color).bg(background)),
                 center_vertically(image_area, 1),
             );
         }
@@ -586,10 +691,8 @@ fn draw_tile(
         Style::default()
             .fg(Color::LightYellow)
             .add_modifier(Modifier::BOLD)
-    } else if entry.is_dir {
-        Style::default().fg(Color::LightBlue)
     } else {
-        Style::default().fg(Color::Gray)
+        Style::default().fg(colors.color(FileGroup::classify(&entry.path, entry.is_dir)))
     };
 
     frame.render_widget(
@@ -834,7 +937,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             " Yazi2D · operation in progress — navigation stays available"
         }
         Focus::Panels => {
-            " Yazi2D · Tab switch · Shift+Tab favs · Ctrl+Q/Ctrl+P preview other · Ctrl+T thumbs · Ctrl+O open there · F5/c copy · F6/m move · F8/d delete · ? help · q quit"
+            " Yazi2D · Tab switch · Shift+Tab favs · Ctrl+Q/Ctrl+P preview · Ctrl+T thumbs · Ctrl+O open there · s sort · Ctrl+A all · F5/c copy · F6/m move · F8/d delete · ? help · q quit"
         }
     };
 
@@ -847,7 +950,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_help(frame: &mut Frame, area: Rect) {
     let width = area.width.saturating_sub(4).min(76);
-    let height = area.height.saturating_sub(2).min(34);
+    let height = area.height.saturating_sub(2);
     if width == 0 || height == 0 {
         return;
     }
@@ -858,53 +961,6 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         .fg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
     let key = Style::default().fg(Color::LightYellow);
-
-    let lines = vec![
-        Line::from(Span::styled("NAVIGATION", header)),
-        help_line("  ↑/k, ↓/j", "move cursor / scroll preview", key),
-        help_line("  PgUp / PgDn", "page up / down", key),
-        help_line("  Home/g, End/G", "top / bottom", key),
-        help_line("  Enter / l", "open directory", key),
-        help_line("  Backspace / h", "parent directory", key),
-        help_line("  Space / Insert", "select and move down", key),
-        help_line("  Esc", "clear selection / close preview", key),
-        Line::from(""),
-        Line::from(Span::styled("FILE OPERATIONS", header)),
-        help_line("  F5 / c", "copy to the other panel", key),
-        help_line("  F6 / m", "move to the other panel", key),
-        help_line("  F7 / n", "create directory", key),
-        help_line("  F2 / r", "rename", key),
-        help_line("  F8 / d / Del", "delete (Enter or y confirms)", key),
-        Line::from(""),
-        Line::from(Span::styled("VIEW & CROSS-PANEL", header)),
-        help_line("  Ctrl+Q / Ctrl+P", "quick preview in the OTHER panel", key),
-        help_line("  Ctrl+T", "thumbnail grid in the active panel", key),
-        help_line("  Ctrl+O", "open cursor folder in the other panel", key),
-        help_line(
-            "  Ctrl+← / Ctrl+→",
-            "preview in that panel (may be OS-bound)",
-            key,
-        ),
-        help_line("  Alt+← / Alt+→", "open cursor folder in that panel", key),
-        Line::from(""),
-        Line::from(Span::styled("PANELS & FAVORITES", header)),
-        help_line("  Tab", "switch active panel", key),
-        help_line(
-            "  Shift+Tab / Ctrl+D",
-            "focus favorites / back to panels",
-            key,
-        ),
-        help_line("  Ctrl+B / a", "add current dir to favorites", key),
-        help_line("  Ctrl+F / f", "toggle favorites sidebar", key),
-        help_line("  Ctrl+R", "refresh both panels", key),
-        help_line("  Ctrl+H / .", "toggle hidden files", key),
-        help_line("  Esc while loading", "cancel the directory load", key),
-        Line::from(""),
-        Line::from(Span::styled(
-            "  ? / F1 close help      q / Ctrl+C quit",
-            Style::default().fg(Color::Gray),
-        )),
-    ];
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -918,7 +974,59 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         ))
         .style(Style::default().bg(Color::Rgb(18, 18, 24)));
 
-    frame.render_widget(Paragraph::new(lines).block(block), rect);
+    let lines = vec![
+        Line::from(Span::styled("NAVIGATION", header)),
+        help_line("  ↑/k, ↓/j", "move cursor / scroll preview", key),
+        help_line("  PgUp / PgDn", "page up / down", key),
+        help_line("  Home/g, End/G", "top / bottom", key),
+        help_line("  Enter / l", "open directory", key),
+        help_line("  Backspace / h", "parent directory", key),
+        help_line("  Space / Insert", "select and move down", key),
+        help_line("  Esc", "clear selection / close preview", key),
+        Line::from(Span::styled("FILE OPERATIONS", header)),
+        help_line("  F5 / c", "copy to the other panel", key),
+        help_line("  F6 / m", "move to the other panel", key),
+        help_line("  F7 / n", "create directory", key),
+        help_line("  F2 / r", "rename", key),
+        help_line("  F8 / d / Del", "delete (Enter or y confirms)", key),
+        help_line("  Ctrl+A", "select everything", key),
+        help_line("  Ctrl+G", "bulk rename with a pattern", key),
+        Line::from(Span::styled("SORT & COLOURS", header)),
+        help_line("  s / Ctrl+S", "sort menu (name/size/type/date)", key),
+        help_line("  Ctrl+K", "colour menu for file types", key),
+        Line::from(Span::styled("VIEW & CROSS-PANEL", header)),
+        help_line("  Ctrl+Q / Ctrl+P", "quick preview in the OTHER panel", key),
+        help_line("  Ctrl+T", "thumbnail grid in the active panel", key),
+        help_line("  Ctrl+O", "open cursor folder in the other panel", key),
+        help_line(
+            "  Ctrl+← / Ctrl+→",
+            "preview in that panel (may be OS-bound)",
+            key,
+        ),
+        help_line("  Alt+← / Alt+→", "open cursor folder in that panel", key),
+        Line::from(Span::styled("PANELS & FAVORITES", header)),
+        help_line("  Tab", "switch active panel", key),
+        help_line(
+            "  Shift+Tab / Ctrl+D",
+            "focus favorites / back to panels",
+            key,
+        ),
+        help_line("  Ctrl+B / a", "add current dir to favorites", key),
+        help_line("  Ctrl+F / f", "toggle favorites sidebar", key),
+        help_line("  Ctrl+R", "refresh both panels", key),
+        help_line("  Ctrl+H / .", "toggle hidden files", key),
+        help_line("  Esc while loading", "cancel the directory load", key),
+        Line::from(Span::styled(
+            "  ? / F1 close help      q / Ctrl+C quit",
+            Style::default().fg(Color::Gray),
+        )),
+    ];
+
+    let visible: Vec<Line> = lines
+        .into_iter()
+        .take(rect.height.saturating_sub(2) as usize)
+        .collect();
+    frame.render_widget(Paragraph::new(visible).block(block), rect);
 }
 
 fn help_line<'a>(keys: &'a str, description: &'a str, key_style: Style) -> Line<'a> {
@@ -928,10 +1036,123 @@ fn help_line<'a>(keys: &'a str, description: &'a str, key_style: Style) -> Line<
     ])
 }
 
+/// Centered overlay listing the sort options and the active one.
+fn draw_sort_menu(frame: &mut Frame, area: Rect, panel: &Panel) {
+    let header = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let key = Style::default().fg(Color::LightYellow);
+    let active = Style::default()
+        .fg(Color::LightGreen)
+        .add_modifier(Modifier::BOLD);
+
+    let rows = [
+        ("n", "Name", crate::panel::SortKey::Name),
+        ("s", "Size", crate::panel::SortKey::Size),
+        ("t", "Type / extension", crate::panel::SortKey::Extension),
+        ("d", "Date modified", crate::panel::SortKey::Modified),
+    ];
+
+    let mut lines = vec![Line::from(Span::styled("SORT ORDER", header))];
+    for (binding, label, kind) in rows {
+        let style = if panel.sort_key == kind { active } else { key };
+        let marker = if panel.sort_key == kind { "●" } else { " " };
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {marker} {binding}  "), style),
+            Span::styled(
+                label,
+                if panel.sort_key == kind {
+                    active
+                } else {
+                    Style::default().fg(Color::Gray)
+                },
+            ),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(help_line(
+        "  r",
+        if panel.sort_reverse {
+            "reverse: on"
+        } else {
+            "reverse: off"
+        },
+        key,
+    ));
+    lines.push(help_line("  Esc", "close", key));
+
+    draw_menu_overlay(frame, area, " Sort ", 34, lines);
+}
+
+/// Centered overlay with a preview of every file group colour.
+fn draw_theme_menu(frame: &mut Frame, area: Rect, colors: &crate::colors::Colors) {
+    let header = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("THEME: {}", colors.preset().label().to_uppercase()),
+            header,
+        )),
+        Line::from(""),
+    ];
+
+    for group in FileGroup::ALL {
+        lines.push(Line::from(vec![
+            Span::styled("  ██  ", Style::default().fg(colors.color(group))),
+            Span::styled(
+                format!("{:<12}", group.label()),
+                Style::default().fg(colors.color(group)),
+            ),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(help_line(
+        "  1 / 2 / 3",
+        "default / vivid / mono",
+        Style::default().fg(Color::LightYellow),
+    ));
+    lines.push(help_line(
+        "  Esc",
+        "close",
+        Style::default().fg(Color::LightYellow),
+    ));
+
+    draw_menu_overlay(frame, area, " Colours ", 40, lines);
+}
+
+fn draw_menu_overlay(frame: &mut Frame, area: Rect, title: &str, width: u16, lines: Vec<Line>) {
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let width = width.min(area.width.saturating_sub(2));
+    if width == 0 || height == 0 {
+        return;
+    }
+
+    let rect = centered(width, height, area);
+    frame.render_widget(Clear, rect);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(Color::Rgb(18, 18, 24)));
+
+    frame.render_widget(Paragraph::new(lines).block(block), rect);
+}
+
 fn draw_prompt(frame: &mut Frame, area: Rect, prompt: &Prompt) {
     let (title, preferred_width, preferred_height) = match prompt {
         Prompt::Mkdir { .. } => (" New folder ", 62, 3),
         Prompt::Rename { .. } => (" Rename ", 62, 3),
+        Prompt::BulkRename { .. } => (" Bulk rename ", 72, 5),
         Prompt::Delete { .. } => (" Confirm delete ", 64, 5),
     };
 
@@ -970,6 +1191,25 @@ fn draw_prompt(frame: &mut Frame, area: Rect, prompt: &Prompt) {
             let y = inner.y;
             frame.set_cursor_position((x.min(inner.right().saturating_sub(1)), y));
         }
+        Prompt::BulkRename { buffer, sources } => {
+            let hint = format!(
+                "{} item(s) · {{name}} base · {{ext}} ext · {{n}} counter · %e=ext",
+                sources.len()
+            );
+            let lines = vec![
+                Line::from(vec![
+                    Span::styled("> ", Style::default().fg(Color::Yellow)),
+                    Span::styled(buffer.clone(), Style::default().fg(Color::White)),
+                    Span::styled("▌", Style::default().fg(Color::Yellow)),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray))),
+            ];
+            frame.render_widget(Paragraph::new(lines), inner);
+
+            let x = inner.x + 2 + buffer.width() as u16;
+            frame.set_cursor_position((x.min(inner.right().saturating_sub(1)), inner.y));
+        }
         Prompt::Delete { sources } => {
             let text = format!(
                 "Delete {} item(s)?\n\nPress Enter or y to confirm, n/Esc to cancel.",
@@ -985,13 +1225,21 @@ fn draw_prompt(frame: &mut Frame, area: Rect, prompt: &Prompt) {
     }
 }
 
-fn list_item(entry: &Entry, selected: bool, width: usize) -> ListItem<'static> {
+fn list_item(
+    entry: &Entry,
+    selected: bool,
+    width: usize,
+    colors: &crate::colors::Colors,
+) -> ListItem<'static> {
+    let group = FileGroup::classify(&entry.path, entry.is_dir);
+    let group_color = colors.color(group);
+
     let (prefix, prefix_style) = if entry.is_parent {
         ("↑ ", Style::default().fg(Color::DarkGray))
     } else if selected {
         ("▣ ", Style::default().fg(Color::LightYellow))
     } else if entry.is_dir {
-        ("▸ ", Style::default().fg(Color::LightBlue))
+        ("▸ ", Style::default().fg(group_color))
     } else {
         ("  ", Style::default())
     };
@@ -1017,8 +1265,10 @@ fn list_item(entry: &Entry, selected: bool, width: usize) -> ListItem<'static> {
         String::new()
     } else if entry.is_dir {
         "<DIR>".to_string()
-    } else {
+    } else if entry.stats_loaded {
         human_size(entry.size)
+    } else {
+        "…".to_string()
     };
 
     let date = format_mtime(entry.modified);
@@ -1027,10 +1277,8 @@ fn list_item(entry: &Entry, selected: bool, width: usize) -> ListItem<'static> {
         Style::default().fg(Color::LightYellow)
     } else if entry.is_parent {
         Style::default().fg(Color::DarkGray)
-    } else if entry.is_dir {
-        Style::default().fg(Color::LightBlue)
     } else {
-        Style::default().fg(Color::Gray)
+        Style::default().fg(group_color)
     };
 
     let styles = RowStyles {
@@ -1092,6 +1340,14 @@ fn build_row(
     }
 
     Line::from(spans)
+}
+
+/// Size of a file without blocking the UI: directories and unknown paths report 0.
+fn fs_metadata_size(path: &Path) -> u64 {
+    if path.is_dir() {
+        return 0;
+    }
+    std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
 }
 
 fn human_size(bytes: u64) -> String {
@@ -1198,16 +1454,33 @@ mod tests {
     use std::fs;
 
     fn render(app: &mut App, width: u16, height: u16) -> String {
-        let backend = TestBackend::new(width, height);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| draw(frame, app)).unwrap();
-        terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect()
+        render_until(app, width, height, |text| !text.is_empty())
+    }
+
+    /// Keep drawing until `done` accepts the frame.
+    ///
+    /// Previews and image decodes are asynchronous now, so the first frame is a
+    /// "loading" placeholder. This mirrors what the real event loop does: the
+    /// background worker finishes and the next frame shows the content.
+    fn render_until(app: &mut App, width: u16, height: u16, done: impl Fn(&str) -> bool) -> String {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            app.tick();
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| draw(frame, app)).unwrap();
+            let last: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            if done(&last) || std::time::Instant::now() > deadline {
+                return last;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 
     #[test]
@@ -1269,7 +1542,7 @@ mod tests {
         app.panels[0].set_mode(PanelMode::Preview);
         app.panels[1].select_name("notes.txt");
 
-        let text = render(&mut app, 120, 30);
+        let text = render_until(&mut app, 120, 30, |text| text.contains("hello preview"));
         assert!(text.contains("preview"));
         assert!(text.contains("notes.txt"));
         assert!(text.contains("hello preview"));
@@ -1288,6 +1561,33 @@ mod tests {
     }
 
     #[test]
+    fn preview_of_a_folder_shows_a_thumbnail_grid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inner = tmp.path().join("gallery");
+        fs::create_dir(&inner).unwrap();
+        let image = RgbImage::from_pixel(8, 8, image::Rgb([240, 120, 20]));
+        image.save(inner.join("shot.png")).unwrap();
+        fs::create_dir(inner.join("nested")).unwrap();
+
+        let mut app = App::new(vec![tmp.path().to_path_buf(), tmp.path().to_path_buf()]);
+        app.panels[0].select_name("gallery");
+        app.panels[0].set_mode(PanelMode::Preview);
+        app.panels[1].select_name("gallery");
+
+        // The folder listing and the image decode are both asynchronous.
+        let text = render_until(&mut app, 120, 40, |text| {
+            text.contains("shot.png") && text.contains("▀")
+        });
+        assert!(text.contains("folder"), "folder caption missing");
+        assert!(text.contains("shot.png"), "image name missing");
+        assert!(text.contains("nested"), "subfolder name missing");
+        assert!(
+            text.contains("▀"),
+            "folder preview did not draw image thumbnails"
+        );
+    }
+
+    #[test]
     fn renders_a_thumbnail_grid_with_file_names() {
         let tmp = tempfile::tempdir().unwrap();
         let image = RgbImage::from_pixel(4, 4, image::Rgb([200, 40, 40]));
@@ -1296,7 +1596,7 @@ mod tests {
         let mut app = App::new(vec![tmp.path().to_path_buf(), tmp.path().to_path_buf()]);
         app.panels[0].set_mode(PanelMode::Thumbnails);
 
-        let text = render(&mut app, 120, 40);
+        let text = render_until(&mut app, 120, 40, |text| text.contains("▀"));
         assert!(text.contains("thumbnails"));
         assert!(text.contains("red.png"));
         assert!(
@@ -1316,7 +1616,7 @@ mod tests {
         app.panels[0].set_mode(PanelMode::Preview);
         app.panels[1].select_name("blue.png");
 
-        let text = render(&mut app, 120, 30);
+        let text = render_until(&mut app, 120, 30, |text| text.contains("▀"));
         assert!(text.contains("image"));
         assert!(text.contains("blue.png"));
         assert!(

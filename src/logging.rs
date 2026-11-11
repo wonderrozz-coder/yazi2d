@@ -2,24 +2,24 @@
 //!
 //! The log exists to explain hangs: every directory load, image decode and job
 //! is recorded with a timestamp and duration, and slow loads are marked `WARN`.
-//! It is intentionally dependency-free, never panics, and can be disabled with
-//! `YAZI2D_LOG=off`.
+//! Each line is written and flushed immediately, because the whole point is to
+//! have the last line on disk when the process hangs or is killed. The file
+//! lives in the local config directory, so appending costs microseconds and
+//! never blocks on a network share. Logging never panics and can be disabled
+//! with `YAZI2D_LOG=off`.
 
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{
-    mpsc::{self, SyncSender},
-    OnceLock,
-};
+use std::sync::{Mutex, OnceLock};
 
 use chrono::Local;
 
-/// Rotate the log once it grows past this size.
+/// Rotate the log once it grows past this size (checked at startup).
 const MAX_LOG_BYTES: u64 = 4 * 1024 * 1024;
 
 struct Sink {
-    sender: SyncSender<String>,
+    file: Mutex<File>,
     path: PathBuf,
 }
 
@@ -67,10 +67,14 @@ fn write(level: &str, message: &str) {
     let Some(Some(sink)) = SINK.get() else {
         return;
     };
+    let Ok(mut file) = sink.file.lock() else {
+        return;
+    };
     let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
-    let _ = sink
-        .sender
-        .try_send(format!("{timestamp} {level:<5} {message}"));
+    // Flush every line: if the app hangs or is killed right after this call,
+    // the line must already be on disk for the user to inspect.
+    let _ = writeln!(file, "{timestamp} {level:<5} {message}");
+    let _ = file.flush();
 }
 
 fn open_sink() -> Option<Sink> {
@@ -92,15 +96,10 @@ fn open_sink() -> Option<Sink> {
         .append(true)
         .open(&path)
         .ok()?;
-    let (sender, receiver) = mpsc::sync_channel::<String>(1024);
-    std::thread::spawn(move || {
-        let mut file = file;
-        while let Ok(line) = receiver.recv() {
-            let _ = writeln!(file, "{line}");
-            let _ = file.flush();
-        }
-    });
-    Some(Sink { sender, path })
+    Some(Sink {
+        file: Mutex::new(file),
+        path,
+    })
 }
 
 fn is_off(value: &str) -> bool {

@@ -21,6 +21,8 @@ pub struct Entry {
     pub is_parent: bool,
     pub size: u64,
     pub modified: Option<SystemTime>,
+    /// False until a background worker has stat'ed this entry.
+    pub stats_loaded: bool,
 }
 
 impl Entry {
@@ -33,8 +35,35 @@ impl Entry {
             is_parent: true,
             size: 0,
             modified: None,
+            stats_loaded: true,
         }
     }
+}
+
+/// Sort order for a panel listing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SortKey {
+    Name,
+    Size,
+    Modified,
+    Extension,
+}
+
+impl SortKey {
+    pub fn label(self) -> &'static str {
+        match self {
+            SortKey::Name => "name",
+            SortKey::Size => "size",
+            SortKey::Modified => "date",
+            SortKey::Extension => "type",
+        }
+    }
+}
+
+/// One batch of stat results from the background enrichment worker.
+pub struct StatsUpdate {
+    pub generation: u64,
+    pub stats: Vec<(usize, u64, Option<SystemTime>)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -87,7 +116,20 @@ pub struct Panel {
     pub loading_path: Option<PathBuf>,
     /// Monotonic id of the newest load request; stale results are ignored.
     pub generation: u64,
+    /// Current sort order; re-applied whenever a listing arrives.
+    pub sort_key: SortKey,
+    pub sort_reverse: bool,
+    /// True while background stat workers are still filling in sizes/dates.
+    pub enriching: bool,
 }
+
+/// Work queue and result channel handed to the stat worker.
+pub type EnrichmentStart = (
+    mpsc::Sender<StatsUpdate>,
+    Receiver<StatsUpdate>,
+    Vec<(usize, PathBuf)>,
+    u64,
+);
 
 impl Panel {
     pub fn new(cwd: PathBuf) -> Self {
@@ -111,6 +153,9 @@ impl Panel {
             loading: false,
             loading_path: None,
             generation: 0,
+            sort_key: SortKey::Name,
+            sort_reverse: false,
+            enriching: false,
         }
     }
 
@@ -172,11 +217,12 @@ impl Panel {
         self.selected.retain(|p| valid.contains(p));
 
         self.entries = entries;
+        self.error = None;
+        self.apply_sort();
         self.cursor = keep
             .and_then(|name| self.entries.iter().position(|e| e.name == name))
             .unwrap_or(if self.entries.len() > 1 { 1 } else { 0 })
             .min(self.entries.len().saturating_sub(1));
-        self.error = None;
         self.ensure_mode_visible();
         Ok(())
     }
@@ -199,6 +245,7 @@ impl Panel {
         self.entries = entries;
         self.selected.clear();
         self.offset = 0;
+        self.apply_sort();
         self.cursor = select
             .and_then(|name| self.entries.iter().position(|e| e.name == name))
             .unwrap_or(if self.entries.len() > 1 { 1 } else { 0 })
@@ -251,6 +298,52 @@ impl Panel {
         receiver
     }
 
+    /// Collect the stat work for the current entries and mark the panel as
+    /// enriching. Returns the work queue and a channel for the batches.
+    pub fn begin_enrichment(&mut self) -> EnrichmentStart {
+        self.enriching = true;
+        let (sender, receiver) = mpsc::channel();
+        let work = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| !entry.is_parent && !entry.stats_loaded)
+            .map(|(index, entry)| (index, entry.path.clone()))
+            .collect();
+        (sender, receiver, work, self.generation)
+    }
+
+    /// Fill in size/date synchronously. Used only for the initial startup
+    /// listing so the first frame is complete; navigation uses `stat_entries`.
+    pub fn enrich_blocking(&mut self) {
+        let paths: Vec<(usize, PathBuf)> = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| !entry.is_parent && !entry.stats_loaded)
+            .map(|(index, entry)| (index, entry.path.clone()))
+            .collect();
+
+        for (index, path) in paths {
+            let Ok(meta) = fs::metadata(&path) else {
+                continue;
+            };
+            if let Some(entry) = self.entries.get_mut(index) {
+                entry.size = if meta.is_dir() { 0 } else { meta.len() };
+                entry.modified = meta.modified().ok();
+                entry.stats_loaded = true;
+            }
+        }
+        if self.sort_key != SortKey::Name {
+            self.apply_sort();
+        }
+    }
+
+    /// Mark enrichment finished once the worker channel is closed.
+    pub fn finish_enrichment(&mut self) {
+        self.enriching = false;
+    }
+
     /// Apply a background load. Returns `true` when the directory was replaced.
     ///
     /// Results from superseded or cancelled loads are ignored.
@@ -288,12 +381,14 @@ impl Panel {
                     }
                 }
 
+                self.apply_sort();
                 self.cursor = load
                     .select
                     .and_then(|name| self.entries.iter().position(|entry| entry.name == name))
                     .unwrap_or(if self.entries.len() > 1 { 1 } else { 0 })
                     .min(self.entries.len().saturating_sub(1));
                 self.error = None;
+                self.enriching = false;
                 self.ensure_mode_visible();
                 true
             }
@@ -323,6 +418,50 @@ impl Panel {
                 .map(|name| name.to_string_lossy().to_string())
                 .unwrap_or_else(|| path.display().to_string())
         })
+    }
+
+    /// Sort the visible entries, keeping `..` first and the cursor on its entry.
+    pub fn apply_sort(&mut self) {
+        let selected_name = self.current_entry().map(|entry| entry.name.clone());
+        sort_entries(&mut self.entries, self.sort_key, self.sort_reverse);
+
+        if let Some(name) = selected_name {
+            if let Some(index) = self.entries.iter().position(|entry| entry.name == name) {
+                self.cursor = index;
+            }
+        }
+        self.cursor = self.cursor.min(self.entries.len().saturating_sub(1));
+        self.ensure_mode_visible();
+    }
+
+    /// Cycle the sort key, or flip direction when the key does not change.
+    pub fn set_sort(&mut self, key: SortKey, reverse: bool) {
+        self.sort_key = key;
+        self.sort_reverse = reverse;
+        self.apply_sort();
+    }
+
+    /// Merge a batch of stat results. Returns true when anything changed.
+    pub fn apply_stats(&mut self, update: StatsUpdate) -> bool {
+        if update.generation != self.generation {
+            return false;
+        }
+        let mut changed = false;
+        for (index, size, modified) in update.stats {
+            if let Some(entry) = self.entries.get_mut(index) {
+                if entry.is_parent {
+                    continue;
+                }
+                entry.size = size;
+                entry.modified = modified;
+                entry.stats_loaded = true;
+                changed = true;
+            }
+        }
+        if changed && self.sort_key != SortKey::Name {
+            self.apply_sort();
+        }
+        changed
     }
 
     pub fn move_cursor(&mut self, delta: i32) {
@@ -361,6 +500,32 @@ impl Panel {
             self.cursor = index;
             self.ensure_mode_visible();
         }
+    }
+
+    /// Ctrl+A: select every real entry in the panel.
+    pub fn select_all(&mut self) -> usize {
+        self.selected = self
+            .entries
+            .iter()
+            .filter(|entry| !entry.is_parent)
+            .map(|entry| entry.path.clone())
+            .collect();
+        self.selected.len()
+    }
+
+    /// Put the cursor on `name` if it still exists, otherwise on the nearest
+    /// remaining row at or above `previous` (used after deleting entries).
+    pub fn focus_after_removal(&mut self, names: &[String], previous: usize) {
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|entry| names.contains(&entry.name))
+        {
+            self.cursor = index;
+        } else {
+            self.cursor = previous.min(self.entries.len().saturating_sub(1));
+        }
+        self.ensure_mode_visible();
     }
 
     /// Space/Insert: toggle the current entry and advance like Total Commander.
@@ -435,6 +600,46 @@ impl Panel {
     }
 }
 
+fn extension_of(entry: &Entry) -> String {
+    entry
+        .path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
+/// Sort in place: `..` first, then directories, then the chosen key.
+fn sort_entries(entries: &mut [Entry], key: SortKey, reverse: bool) {
+    entries.sort_by(|a, b| {
+        let rank = |entry: &Entry| u8::from(!entry.is_parent);
+        let rank_order = rank(a).cmp(&rank(b));
+        if rank_order != std::cmp::Ordering::Equal {
+            return rank_order;
+        }
+
+        // Directories stay grouped before files so navigation stays predictable.
+        let dir_order = b.is_dir.cmp(&a.is_dir);
+        if dir_order != std::cmp::Ordering::Equal {
+            return dir_order;
+        }
+
+        let order = match key {
+            SortKey::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            SortKey::Size => a.size.cmp(&b.size),
+            SortKey::Modified => a.modified.cmp(&b.modified),
+            SortKey::Extension => extension_of(a)
+                .cmp(&extension_of(b))
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
+        };
+        if reverse {
+            order.reverse()
+        } else {
+            order
+        }
+    });
+}
+
 fn list_dir(path: &Path, show_hidden: bool) -> io::Result<Vec<Entry>> {
     let started = Instant::now();
     let result = list_dir_inner(path, show_hidden);
@@ -479,27 +684,15 @@ fn list_dir_inner(path: &Path, show_hidden: bool) -> io::Result<Vec<Entry>> {
             continue;
         }
 
+        // `file_type()` comes from the directory entry itself on every platform
+        // we care about, so it does not need a `stat`. This matters a lot on
+        // cloud shares (Nextcloud/iCloud), where a `stat` can materialise the
+        // file and take hundreds of milliseconds.
         let Ok(file_type) = item.file_type() else {
             continue;
         };
         let is_symlink = file_type.is_symlink();
-
-        // Follow symlinks for display, but never for the symlink check itself.
-        let meta = if is_symlink {
-            fs::metadata(item.path()).ok()
-        } else {
-            item.metadata().ok()
-        };
-
-        let is_dir = meta
-            .as_ref()
-            .map(|m| m.is_dir())
-            .unwrap_or_else(|| file_type.is_dir());
-        let size = meta
-            .as_ref()
-            .map(|m| if m.is_dir() { 0 } else { m.len() })
-            .unwrap_or(0);
-        let modified = meta.as_ref().and_then(|m| m.modified().ok());
+        let is_dir = file_type.is_dir();
 
         entries.push(Entry {
             name,
@@ -507,21 +700,57 @@ fn list_dir_inner(path: &Path, show_hidden: bool) -> io::Result<Vec<Entry>> {
             is_dir,
             is_symlink,
             is_parent: false,
-            size,
-            modified,
+            size: 0,
+            modified: None,
+            stats_loaded: false,
         });
     }
 
-    // Parent first, then directories, then files, case-insensitively.
-    entries.sort_by_cached_key(|e| {
-        (
-            if e.is_parent { 0 } else { 1 },
-            if e.is_dir { 0 } else { 1 },
-            e.name.to_lowercase(),
-        )
-    });
-
     Ok(entries)
+}
+
+/// Fill in size/date for entries that do not have them yet.
+///
+/// Runs on a worker thread and reports batches so the UI can update
+/// incrementally. Symlinks are stat'ed through their target to report the real
+/// kind, exactly like the synchronous listing used to do.
+pub fn stat_entries(
+    paths: Vec<(usize, PathBuf)>,
+    generation: u64,
+    sender: mpsc::Sender<StatsUpdate>,
+) {
+    const BATCH: usize = 16;
+
+    let mut batch = Vec::with_capacity(BATCH);
+    for (index, path) in paths {
+        let meta = fs::metadata(&path).ok();
+        let size = meta
+            .as_ref()
+            .map(|m| if m.is_dir() { 0 } else { m.len() })
+            .unwrap_or(0);
+        let modified = meta.as_ref().and_then(|m| m.modified().ok());
+        batch.push((index, size, modified));
+
+        if batch.len() >= BATCH {
+            if sender
+                .send(StatsUpdate {
+                    generation,
+                    stats: std::mem::take(&mut batch),
+                })
+                .is_err()
+            {
+                return;
+            }
+            batch.reserve(BATCH);
+        }
+    }
+
+    if !batch.is_empty() {
+        let _ = sender.send(StatsUpdate {
+            generation,
+            stats: batch,
+        });
+    }
 }
 
 #[cfg(test)]

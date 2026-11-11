@@ -1,4 +1,5 @@
 mod app;
+mod colors;
 mod favorites;
 mod logging;
 mod panel;
@@ -141,6 +142,10 @@ fn print_help() {
          \x20 F7 / n          create directory\n\
          \x20 F8 / d / Del    delete selection (Enter or y confirms)\n\
          \x20 F2 / r          rename entry\n\
+         \x20 Ctrl+A          select everything\n\
+         \x20 Ctrl+G          bulk rename ({{name}} {{ext}} {{n}} or %e=ext)\n\
+         \x20 s / Ctrl+S      sort menu (name/size/type/date, r reverse)\n\
+         \x20 Ctrl+K          colour menu for file types\n\
          \x20 Ctrl+Q / Ctrl+P quick preview in the OTHER panel\n\
          \x20 Ctrl+T          thumbnail grid in the active panel\n\
          \x20 Ctrl+O          open cursor folder in the other panel\n\

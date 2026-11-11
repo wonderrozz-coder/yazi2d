@@ -291,3 +291,82 @@ only one pixel per cell column and two per row, and the old code used a cheap
 **Consequences:** Noticeably crisper thumbnails and previews at the same
 terminal resolution; decoding cost is bounded (pre-scale is linear, Lanczos3
 runs on a ≤1600 px image). The binary and memory limits are unchanged.
+
+## ADR-019 — Directory listing never stats entries
+
+**Status:** accepted (2026-11-11, `0.3.1`)
+
+**Context:** A user log showed one folder taking 13 059 ms for 75 entries
+(`Work/+Portfolio/3D`, 50–90 MB TIFFs on a Nextcloud mount). Re-running the same
+directory took 0.1 s. The cause is that `fs::read_dir` plus one `metadata()` per
+entry forces the macOS File Provider to materialise every cloud placeholder; the
+first pass is arbitrarily slow and the work sat on the UI thread.
+
+**Decision:**
+
+1. `list_dir` reads only names and `DirEntry::file_type()` (which comes from the
+   directory entry itself and does not stat the file). Entries start with
+   `stats_loaded = false`.
+2. Size and mtime are filled in later by `stat_entries`, a worker thread that
+   sends `StatsUpdate` batches of 16 entries. The UI keeps rendering and shows
+   `…` in the size column until a row is enriched.
+3. Sorting by size/date re-runs when stats arrive, so the order converges
+   without blocking.
+4. Only the initial startup listing is enriched synchronously, because the very
+   first frame must be complete.
+
+**Consequences:** A 75-entry cloud folder now lists in 0 ms instead of 13 s.
+Sorting by size is briefly approximated until stats land. A cancelled or
+superseded load drops its stats by generation number.
+
+## ADR-020 — Previews and image decoding run off the UI thread
+
+**Status:** accepted (2026-11-11, `0.3.1`)
+
+**Context:** `PreviewCache::get` read files and listed directories inside
+`ui::draw`, and the directory branch called `fs::metadata` for every child. Even
+after ADR-019, opening a preview of a cloud folder froze the TUI for seconds and
+`Esc` could not be processed because the event loop was inside the draw call.
+
+**Decision:**
+
+1. `PreviewCache::get` returns `Option<&PreviewContent>`. On a miss it starts one
+   worker for the requested path and returns `None`; the renderer shows
+   `Loading…`. Finished content is merged on the next `tick`.
+2. The directory preview uses `DirEntry::file_type()` only and reports names, so
+   it never stats children.
+3. `ImageCache::render` is asynchronous too, with at most four decodes in flight.
+   Failures are remembered so a broken file is not retried every frame.
+4. `App::tick` marks the frame dirty while a preview or decode is pending, so the
+   result appears without any keypress.
+
+**Consequences:** The UI thread only ever touches cached data. Fast scrolling
+through a large folder no longer stacks up decodes. Content is one frame late,
+which is invisible at 80 ms polling.
+
+## ADR-021 — Folder previews are thumbnail grids; sorting, type colours, bulk rename
+
+**Status:** accepted (2026-11-11, `0.3.1`)
+
+**Context:** The user asked for the preview pane to show thumbnails when a
+folder is the subject, plus sorting, colour groups with a menu, bulk rename,
+`Ctrl+A`, and a cursor that stays near the deleted row.
+
+**Decision:**
+
+1. A preview of a folder renders the same adaptive tile grid as `Ctrl+T`
+   (`draw_folder_grid`); files keep text/image/binary previews.
+2. `SortKey` (`Name`, `Size`, `Modified`, `Extension`) with a reverse flag on
+   `Panel`; `s`/`Ctrl+S` opens a menu, `r` flips the direction. `..` is always
+   the first row and directories stay grouped before files.
+3. `colors.rs` classifies entries into `FileGroup` (directory, image, video,
+   audio, text, archive, temporary, model, code, other), applies one of three
+   presets, and persists the choice to `$YAZI2D_CONFIG_DIR/theme`. `Ctrl+K`
+   opens a preview of all groups.
+4. `Ctrl+G` bulk rename supports `{name}`, `{ext}`, `{n}` and `%e=new`.
+5. `Ctrl+A` selects every non-parent entry; `Esc` clears the selection.
+6. After a delete the cursor is restored to the row index it had, so it stays
+   next to the removed entry instead of jumping to the top.
+
+**Consequences:** Six user requests are covered without adding dependencies.
+Colours are presets, not per-extension rules; bulk rename has no preview step.

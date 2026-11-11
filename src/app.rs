@@ -4,9 +4,10 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::colors::Colors;
 use crate::favorites::Favorites;
 use crate::logging;
-use crate::panel::{LoadKind, LoadResult, Panel, PanelMode};
+use crate::panel::{LoadKind, LoadResult, Panel, PanelMode, SortKey, StatsUpdate};
 use crate::preview::{ImageCache, PreviewCache};
 use crate::transfer::{self, Job, JobKind, JobMsg};
 
@@ -17,9 +18,20 @@ pub enum Focus {
 }
 
 pub enum Prompt {
-    Mkdir { buffer: String },
-    Rename { buffer: String, target: PathBuf },
-    Delete { sources: Vec<PathBuf> },
+    Mkdir {
+        buffer: String,
+    },
+    Rename {
+        buffer: String,
+        target: PathBuf,
+    },
+    Delete {
+        sources: Vec<PathBuf>,
+    },
+    BulkRename {
+        buffer: String,
+        sources: Vec<PathBuf>,
+    },
 }
 
 pub struct App {
@@ -35,8 +47,20 @@ pub struct App {
     pub job: Option<Job>,
     /// At most one pending background directory load per panel.
     pub loads: [Option<Receiver<LoadResult>>; 2],
+    /// Background stat workers that fill in sizes/dates after a fast listing.
+    pub stat_jobs: [Option<Receiver<StatsUpdate>>; 2],
+    /// Sort menu overlay.
+    pub sort_menu: bool,
+    /// Colour-theme menu overlay.
+    pub theme_menu: bool,
+    /// File-type colour palette.
+    pub colors: Colors,
     pub preview_cache: PreviewCache,
     pub image_cache: ImageCache,
+    /// After a delete, where the cursor should land: the names that were
+    /// removed and the row index the cursor had. Applied when the refresh
+    /// completes so the cursor does not jump to the top.
+    pub pending_cursor_after: Option<(Vec<String>, usize)>,
     pub status: String,
     pub should_quit: bool,
     /// Set when the screen must be repainted. Keeps idle CPU usage near zero.
@@ -72,6 +96,10 @@ impl App {
             if let Err(e) = panel.reload(hidden) {
                 errors.push(format!("{}: {}", panel.cwd.display(), e));
             }
+            // The first frame must show sizes and dates, so the initial
+            // listing is enriched synchronously. Startup is the only blocking
+            // listing; everything after it runs in the background.
+            panel.enrich_blocking();
         }
 
         let status = if errors.is_empty() {
@@ -98,8 +126,13 @@ impl App {
             help: false,
             job: None,
             loads: [None, None],
+            stat_jobs: [None, None],
+            sort_menu: false,
+            theme_menu: false,
+            colors: Colors::new(),
             preview_cache: PreviewCache::new(),
             image_cache: ImageCache::new(),
+            pending_cursor_after: None,
             status,
             should_quit: false,
             dirty: true,
@@ -121,7 +154,13 @@ impl App {
     /// Drain worker-thread progress and finish completed jobs.
     pub fn tick(&mut self) {
         self.poll_loads();
+        self.poll_stats();
         self.sync_preview_scroll();
+        // Background preview/image loads complete after a frame or two; repaint
+        // when something new showed up.
+        if self.preview_cache.is_loading() || self.image_cache.is_loading() {
+            self.dirty = true;
+        }
         let mut finished = false;
         let mut changed = false;
 
@@ -150,6 +189,7 @@ impl App {
 
         if finished {
             let job = self.job.take().expect("job disappeared");
+            self.preview_cache.invalidate();
             for index in 0..2 {
                 if !self.panels[index].loading {
                     self.reload_panel_async(index);
@@ -193,8 +233,14 @@ impl App {
                     let path = load.path.clone();
                     let applied = self.panels[index].apply_load(load);
                     if applied {
+                        // Restore a sensible cursor after a delete instead of
+                        // letting it jump to the first row.
+                        if let Some((names, previous)) = self.pending_cursor_after.take() {
+                            self.panels[index].focus_after_removal(&names, previous);
+                        }
                         let label = if index == 0 { "Left" } else { "Right" };
                         self.status = format!("{label}: {}", self.panels[index].cwd.display());
+                        self.start_stat_worker(index);
                     } else if let Some(error) = self.panels[index].error.clone() {
                         self.status = format!("Cannot open {}: {error}", path.display());
                     }
@@ -210,6 +256,48 @@ impl App {
                 None => {}
             }
         }
+    }
+
+    /// Drain stat batches from the enrichment workers.
+    fn poll_stats(&mut self) {
+        for index in 0..self.panels.len() {
+            let received = match self.stat_jobs[index].as_ref() {
+                Some(receiver) => match receiver.try_recv() {
+                    Ok(update) => Some(Ok(update)),
+                    Err(TryRecvError::Empty) => None,
+                    Err(TryRecvError::Disconnected) => Some(Err(())),
+                },
+                None => None,
+            };
+
+            match received {
+                Some(Ok(update)) => {
+                    if self.panels[index].apply_stats(update) {
+                        self.dirty = true;
+                    }
+                }
+                Some(Err(())) => {
+                    self.stat_jobs[index] = None;
+                    self.panels[index].finish_enrichment();
+                    self.dirty = true;
+                }
+                None => {}
+            }
+        }
+    }
+
+    /// Spawn the stat worker for a freshly applied listing.
+    fn start_stat_worker(&mut self, index: usize) {
+        let (sender, receiver, work, generation) = self.panels[index].begin_enrichment();
+        if work.is_empty() {
+            self.panels[index].finish_enrichment();
+            self.stat_jobs[index] = None;
+            return;
+        }
+        std::thread::spawn(move || {
+            crate::panel::stat_entries(work, generation, sender);
+        });
+        self.stat_jobs[index] = Some(receiver);
     }
 
     /// Start a background listing for one panel.
@@ -261,6 +349,16 @@ impl App {
 
         if self.prompt.is_some() {
             self.handle_prompt_key(key);
+            return;
+        }
+
+        if self.sort_menu {
+            self.handle_sort_menu_key(key);
+            return;
+        }
+
+        if self.theme_menu {
+            self.handle_theme_menu_key(key);
             return;
         }
 
@@ -334,6 +432,31 @@ impl App {
                     self.reload_panel_async(0);
                     self.reload_panel_async(1);
                     self.status = "Refreshing…".to_string();
+                    return;
+                }
+                KeyCode::Char('a') => {
+                    let count = self.active_mut().select_all();
+                    self.sync_preview_scroll();
+                    self.status = if count == 0 {
+                        "Nothing to select".to_string()
+                    } else {
+                        format!("Selected {count} item(s)")
+                    };
+                    return;
+                }
+                KeyCode::Char('s') => {
+                    self.sort_menu = true;
+                    self.status =
+                        "Sort: n name · s size · t type · d date · r reverse · Esc".into();
+                    return;
+                }
+                KeyCode::Char('k') => {
+                    self.theme_menu = true;
+                    self.status = "Colour themes: 1 default · 2 vivid · 3 mono · Esc".into();
+                    return;
+                }
+                KeyCode::Char('g') => {
+                    self.begin_bulk_rename();
                     return;
                 }
                 _ => {}
@@ -475,10 +598,75 @@ impl App {
             KeyCode::F(7) | KeyCode::Char('n') => self.begin_mkdir(),
             KeyCode::F(8) | KeyCode::Delete | KeyCode::Char('d') => self.begin_delete(),
             KeyCode::F(2) | KeyCode::Char('r') => self.begin_rename(),
+            KeyCode::Char('s') => {
+                self.sort_menu = true;
+                self.status =
+                    "Sort: n name · s size · t type · d date · r reverse · Esc".to_string();
+            }
             KeyCode::Char('.') => self.toggle_hidden(),
             _ => return false,
         }
         true
+    }
+
+    fn sort_from(&mut self, key: SortKey) {
+        let panel = self.active_mut();
+        panel.set_sort(key, panel.sort_reverse);
+        let label = panel.sort_key.label();
+        let reverse = panel.sort_reverse;
+        self.status = format!(
+            "Sorted by {label}{}",
+            if reverse { " (reverse)" } else { "" }
+        );
+        self.sort_menu = false;
+    }
+
+    fn handle_sort_menu_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('n') => self.sort_from(SortKey::Name),
+            KeyCode::Char('s') => self.sort_from(SortKey::Size),
+            KeyCode::Char('t') => self.sort_from(SortKey::Extension),
+            KeyCode::Char('d') => self.sort_from(SortKey::Modified),
+            KeyCode::Char('r') => {
+                let panel = self.active_mut();
+                panel.sort_reverse = !panel.sort_reverse;
+                let key = panel.sort_key;
+                let reverse = panel.sort_reverse;
+                panel.set_sort(key, reverse);
+                self.sort_menu = false;
+                self.status = format!("Reverse sort: {}", if reverse { "on" } else { "off" });
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.sort_menu = false;
+                self.status.clear();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_theme_menu_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('1') => {
+                self.colors.set_theme(crate::colors::Preset::Default);
+                self.theme_menu = false;
+                self.status = "Colours: default theme".to_string();
+            }
+            KeyCode::Char('2') => {
+                self.colors.set_theme(crate::colors::Preset::Vivid);
+                self.theme_menu = false;
+                self.status = "Colours: vivid theme".to_string();
+            }
+            KeyCode::Char('3') => {
+                self.colors.set_theme(crate::colors::Preset::Mono);
+                self.theme_menu = false;
+                self.status = "Colours: mono theme".to_string();
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.theme_menu = false;
+                self.status.clear();
+            }
+            _ => {}
+        }
     }
 
     fn clear_selection(&mut self) {
@@ -519,6 +707,20 @@ impl App {
                 KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
                     if let Some(Prompt::Delete { sources }) = self.prompt.take() {
                         let count = sources.len();
+                        let names: Vec<String> = sources
+                            .iter()
+                            .filter_map(|path| {
+                                path.file_name()
+                                    .map(|name| name.to_string_lossy().to_string())
+                            })
+                            .collect();
+                        let previous = self
+                            .active()
+                            .entries
+                            .iter()
+                            .position(|entry| sources.iter().any(|path| path == &entry.path))
+                            .unwrap_or(self.active().cursor);
+                        self.pending_cursor_after = Some((names, previous));
                         self.job = Some(transfer::spawn(JobKind::Delete, sources, None));
                         self.status = format!("Deleting {count} item(s)...");
                     }
@@ -533,8 +735,9 @@ impl App {
         }
 
         let mut submit = false;
-        if let Some(Prompt::Mkdir { buffer }) | Some(Prompt::Rename { buffer, .. }) =
-            self.prompt.as_mut()
+        if let Some(Prompt::Mkdir { buffer })
+        | Some(Prompt::Rename { buffer, .. })
+        | Some(Prompt::BulkRename { buffer, .. }) = self.prompt.as_mut()
         {
             match key.code {
                 KeyCode::Esc => {
@@ -564,6 +767,7 @@ impl App {
         match self.prompt.take() {
             Some(Prompt::Mkdir { buffer }) => self.do_mkdir(&buffer),
             Some(Prompt::Rename { buffer, target }) => self.do_rename(&buffer, &target),
+            Some(Prompt::BulkRename { buffer, sources }) => self.do_bulk_rename(&buffer, &sources),
             _ => {}
         }
     }
@@ -695,6 +899,127 @@ impl App {
             return;
         }
         self.prompt = Some(Prompt::Delete { sources });
+    }
+
+    /// Ctrl+G: rename many files at once with pattern tokens.
+    ///
+    /// Tokens: `{name}` base name, `{ext}` extension, `{n}` counter starting at
+    /// 1, `%e` → new extension. Examples: `IMG_{n}` → `IMG_1.jpg`,
+    /// `{name}.bak`, `%e=txt` changes only the extension.
+    fn begin_bulk_rename(&mut self) {
+        if self.blocked_by_preview() || self.blocked_by_loading() {
+            return;
+        }
+        if self.job.is_some() {
+            self.status = "Wait: another operation is running".to_string();
+            return;
+        }
+        let sources = self.active().selection_or_current();
+        if sources.is_empty() {
+            self.status = "Nothing selected".to_string();
+            return;
+        }
+        self.prompt = Some(Prompt::BulkRename {
+            buffer: String::new(),
+            sources,
+        });
+        self.status = "{name} base · {ext} ext · {n} counter · e.g. IMG_{n}".to_string();
+    }
+
+    fn do_bulk_rename(&mut self, pattern: &str, sources: &[PathBuf]) {
+        let pattern = pattern.trim();
+        if pattern.is_empty() {
+            self.status = "Pattern is empty".to_string();
+            return;
+        }
+
+        // `%e=new` replaces only the extension, which is the most common bulk
+        // operation and needs no counter support.
+        if let Some(new_ext) = pattern.strip_prefix("%e=") {
+            let new_ext = new_ext.trim().trim_start_matches('.');
+            let mut renamed = 0;
+            let mut errors = Vec::new();
+            for path in sources {
+                let dest = path.with_extension(new_ext);
+                if dest == *path {
+                    continue;
+                }
+                if dest.exists() {
+                    errors.push(format!("{} exists", dest.display()));
+                    continue;
+                }
+                match fs::rename(path, &dest) {
+                    Ok(()) => renamed += 1,
+                    Err(e) => errors.push(format!("{}: {e}", path.display())),
+                }
+            }
+            self.finish_bulk_rename(renamed, errors);
+            return;
+        }
+
+        let mut renamed = 0;
+        let mut errors = Vec::new();
+        for (index, path) in sources.iter().enumerate() {
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let stem = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or(name);
+            let extension = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or_default();
+
+            let mut new_name = pattern
+                .replace("{name}", stem)
+                .replace("{ext}", extension)
+                .replace("{n}", &(index + 1).to_string());
+
+            if new_name.contains('/') || new_name == "." || new_name == ".." {
+                errors.push(format!("{name}: invalid target"));
+                continue;
+            }
+            // Keep the original extension when the pattern does not name one.
+            if !extension.is_empty()
+                && Path::new(&new_name)
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_none()
+            {
+                new_name = format!("{new_name}.{extension}");
+            }
+
+            let dest = path.with_file_name(&new_name);
+            if dest == *path {
+                continue;
+            }
+            if dest.exists() {
+                errors.push(format!("{new_name} exists"));
+                continue;
+            }
+            match fs::rename(path, &dest) {
+                Ok(()) => renamed += 1,
+                Err(e) => errors.push(format!("{name}: {e}")),
+            }
+        }
+        self.finish_bulk_rename(renamed, errors);
+    }
+
+    fn finish_bulk_rename(&mut self, renamed: usize, errors: Vec<String>) {
+        let index = self.active;
+        self.reload_panel_async(index);
+        self.preview_cache.invalidate();
+        if errors.is_empty() {
+            self.status = format!("Renamed {renamed} item(s)");
+        } else {
+            self.status = format!(
+                "Renamed {renamed}, {} error(s): {}",
+                errors.len(),
+                errors[0]
+            );
+        }
     }
 
     fn do_mkdir(&mut self, buffer: &str) {
@@ -1035,6 +1360,22 @@ mod tests {
         }
     }
 
+    /// Drive `App::tick` until the background stats have been merged.
+    fn wait_for_stats(app: &mut App) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            app.tick();
+            if app.stat_jobs.iter().all(Option::is_none) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "background stats did not finish in time"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     #[test]
     fn ctrl_arrow_makes_the_neighbour_a_viewer_and_toggles_back() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1137,13 +1478,107 @@ mod tests {
     fn shift_tab_toggles_favorites_focus() {
         let tmp = tempfile::tempdir().unwrap();
         let mut app = app_for(tmp.path(), tmp.path());
-
         press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
         assert_eq!(app.focus, Focus::Favorites);
         assert!(app.show_favorites);
 
         press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
         assert_eq!(app.focus, Focus::Panels);
+    }
+
+    #[test]
+    fn ctrl_a_selects_every_entry_and_esc_clears_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("a.txt"), "a").unwrap();
+        fs::write(tmp.path().join("b.txt"), "b").unwrap();
+        fs::create_dir(tmp.path().join("folder")).unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+
+        press(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
+        assert_eq!(app.panels[0].selected.len(), 3);
+        assert_eq!(app.panels[0].selection_or_current().len(), 3);
+
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.panels[0].selected.is_empty());
+    }
+
+    #[test]
+    fn sort_menu_sorts_by_size_and_toggles_reverse() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("small.txt"), "x").unwrap();
+        fs::write(tmp.path().join("big.txt"), "x".repeat(4096)).unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+        wait_for_loads(&mut app);
+        wait_for_stats(&mut app);
+
+        press(&mut app, KeyCode::Char('s'), KeyModifiers::NONE);
+        assert!(app.sort_menu);
+        press(&mut app, KeyCode::Char('s'), KeyModifiers::NONE);
+        assert!(!app.sort_menu);
+
+        let names: Vec<&str> = app.panels[0]
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["..", "small.txt", "big.txt"]);
+
+        press(&mut app, KeyCode::Char('s'), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char('r'), KeyModifiers::NONE);
+        let names: Vec<&str> = app.panels[0]
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["..", "big.txt", "small.txt"]);
+    }
+
+    #[test]
+    fn bulk_rename_replaces_names_with_a_counter() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("a.txt"), "a").unwrap();
+        fs::write(tmp.path().join("b.txt"), "b").unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+
+        press(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
+        press(&mut app, KeyCode::Char('g'), KeyModifiers::CONTROL);
+        for ch in "photo_{n}".chars() {
+            press(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        wait_for_loads(&mut app);
+
+        assert!(tmp.path().join("photo_1.txt").exists());
+        assert!(tmp.path().join("photo_2.txt").exists());
+        assert!(!tmp.path().join("a.txt").exists());
+    }
+
+    #[test]
+    fn bulk_rename_can_change_only_the_extension() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("a.txt"), "a").unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+
+        press(&mut app, KeyCode::Char('g'), KeyModifiers::CONTROL);
+        for ch in "%e=md".chars() {
+            press(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        wait_for_loads(&mut app);
+
+        assert!(tmp.path().join("a.md").exists());
+    }
+
+    #[test]
+    fn colour_menu_switches_theme() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL);
+        assert!(app.theme_menu);
+
+        press(&mut app, KeyCode::Char('2'), KeyModifiers::NONE);
+        assert!(!app.theme_menu);
+        assert_eq!(app.colors.preset(), crate::colors::Preset::Vivid);
     }
 
     #[test]

@@ -20,7 +20,8 @@ filesystems, a GUI, sixel/Kitty image protocols.
 
 ## Current status (2026-11-11)
 
-Version `0.3.0` — MVP + quick view, thumbnails, background loading and logging.
+Version `0.3.1` — MVP + quick view, thumbnails, background loading, logging,
+sorting, type colours and bulk rename.
 
 - [x] Two panels, independent cwd/cursor/selection, active-panel highlighting.
 - [x] Path bar at the top of both panels (left-truncated, tail always visible).
@@ -34,7 +35,9 @@ Version `0.3.0` — MVP + quick view, thumbnails, background loading and logging
 - [x] Background directory loading with `Loading <path>…`, `Esc` cancel, generation checks.
 - [x] File log with load timings and `WARN` for slow paths (`YAZI2D_LOG=off` disables).
 - [x] Safe conflict policy: unique suffix instead of overwrite.
-- [x] 38 unit tests + a real-PTY end-to-end test, all green.
+- [x] Multi-select, select-all (`Ctrl+A`), bulk rename (`Ctrl+G`), sorting (`s`),
+  file-type colours with a menu (`Ctrl+K`).
+- [x] 47 unit tests + a real-PTY end-to-end test, all green.
 - [x] `cargo fmt`, `cargo clippy -D warnings`, release build (≈2 MB binary).
 
 Known limitations and the next steps are in `docs/STATUS.md` and
@@ -74,7 +77,8 @@ rust-toolchain.toml        stable toolchain
 src/main.rs                CLI, terminal setup/restore, event loop, --help
 src/app.rs                 App state, key dispatch, prompts, jobs, favorites actions
 src/panel.rs               Panel state, modes, navigation, background directory loads
-src/preview.rs             text/image/directory preview caches, image resampling
+src/preview.rs             async preview/image caches, image resampling
+src/colors.rs              file-type groups, colour presets, persisted theme
 src/logging.rs             append-only file log (timings, slow loads, panics)
 src/transfer.rs            background copy/move/delete engine + progress channel
 src/favorites.rs           favorites model and TOML persistence
@@ -111,10 +115,17 @@ inspiration: https://github.com/sxyazi/yazi.
   keeps the subject path in sync and resets scroll when it changes; only one
   preview panel exists at a time. Preview is read-only: file operations are
   rejected while the active panel is a preview.
-- `preview.rs` caches text/directory previews keyed by path+mtime+size and
-  decodes images once, pre-scales to ≤1600 px, then resizes with Lanczos3 into
-  cached half-block-sized RGB buffers (two pixel rows per terminal cell). No
-  external viewer or sixel/Kitty protocol is used.
+- `preview.rs` never blocks: `PreviewCache` and `ImageCache` return `None` on a
+  miss, load on a worker thread, and the next `tick` picks the result up. Images
+  are pre-scaled to ≤1600 px, then resized with Lanczos3 into cached
+  half-block-sized RGB buffers (two pixel rows per terminal cell). No external
+  viewer or sixel/Kitty protocol is used.
+- Directory listing reads only names and `file_type()`; sizes/dates are filled
+  in by `panel::stat_entries` in batches. This is what keeps Nextcloud folders
+  fast (ADR-019). Never introduce a `metadata()` call inside a listing or inside
+  `ui::draw`.
+- `colors.rs` maps paths to `FileGroup` and a `Preset`; the chosen preset lives
+  in `$YAZI2D_CONFIG_DIR/theme`.
 - File operations never run on the UI thread. `transfer::spawn` returns a
   `Job` with an `mpsc::Receiver<JobMsg>`; `App::tick` drains it and refreshes
   panels on completion.
@@ -151,7 +162,12 @@ Detailed invariants and data flow: `docs/ARCHITECTURE.md`.
   active cursor folder in that neighbour. Do not reuse these for history.
 - Only the newest directory load generation may change a panel; cancelled or
   superseded loads are ignored.
-- Logging must never panic and must never block the UI on I/O.
+- Logging must never panic; lines are flushed immediately so the last one
+  survives a hang.
+- No `stat`/`metadata` call may run inside `list_dir`, `PreviewCache::get` or any
+  draw function: on cloud mounts those block for hundreds of milliseconds.
+- Previews and image decoding must stay asynchronous; the UI thread only reads
+  caches.
 
 ## Key handling summary
 
@@ -163,7 +179,8 @@ selects and advances; `F5`/`c` copies; `F6`/`m` moves; `F7`/`n` mkdir;
 favorites; `Ctrl+R` refresh; `Ctrl+H`/`.` hidden files; `?` help; `q` quit.
 `Esc` cancels a pending directory load.
 
-View: `Ctrl+Q`/`Ctrl+P` previews the **other** panel; `Ctrl+T` toggles
+View: `Ctrl+Q`/`Ctrl+P` previews the **other** panel (a folder subject renders
+as a thumbnail grid, a file as text/image/binary); `Ctrl+T` toggles
 thumbnails; `Ctrl+O` opens the cursor folder in the other panel;
 `Ctrl+←/→` previews the indicated panel; `Alt+←/→` opens the cursor folder
 there. Preview: arrows/`hjkl` scroll, `Esc`/`Ctrl+Q`/`Ctrl+P` closes.
@@ -171,6 +188,9 @@ Thumbnails: arrows/`hjkl` move, `Enter` opens, `Ctrl+T` returns to the list.
 
 Favorites focus: arrows/`jk`, `Enter` navigate, `Del`/`d` remove,
 `Esc`/`Shift+Tab` close.
+
+Selection & tools: `Ctrl+A` selects all, `Ctrl+G` bulk rename (`{name}`,
+`{ext}`, `{n}`, `%e=ext`), `s`/`Ctrl+S` sort menu, `Ctrl+K` colour menu.
 
 Global: `Ctrl+C` quits, `q` quits outside prompts/help, `?`/`F1` help.
 

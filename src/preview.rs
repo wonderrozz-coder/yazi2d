@@ -1,9 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime};
+use std::thread;
+use std::time::Instant;
 
 use image::{DynamicImage, RgbImage};
 
@@ -23,9 +25,9 @@ pub const MAX_SOURCE_EDGE: u32 = 1600;
 #[derive(Clone, Debug)]
 pub struct DirChild {
     pub name: String,
+    pub path: PathBuf,
     pub is_dir: bool,
     pub is_image: bool,
-    pub size: u64,
 }
 
 pub enum PreviewContent {
@@ -45,16 +47,21 @@ pub enum PreviewContent {
     Error(String),
 }
 
-struct PreviewEntry {
-    mtime: Option<SystemTime>,
-    len: u64,
-    hidden: bool,
-    content: PreviewContent,
+/// Result of a background preview load.
+pub struct PreviewLoaded {
+    pub path: PathBuf,
+    pub content: PreviewContent,
 }
 
-/// Caches text and directory previews keyed by path, mtime and size.
+/// Caches previews and loads them off the UI thread.
+///
+/// Directory listings and file reads used to run inside `ui::draw`, which froze
+/// the whole TUI on slow shares: a `stat` on a Nextcloud placeholder can block
+/// for hundreds of milliseconds. Now every miss returns `None` immediately,
+/// starts one worker, and the next frame shows the cached result.
 pub struct PreviewCache {
-    entries: HashMap<PathBuf, PreviewEntry>,
+    entries: HashMap<PathBuf, PreviewContent>,
+    pending: Option<(PathBuf, bool, Receiver<PreviewLoaded>)>,
 }
 
 impl Default for PreviewCache {
@@ -67,57 +74,80 @@ impl PreviewCache {
     pub fn new() -> Self {
         Self {
             entries: HashMap::new(),
+            pending: None,
         }
     }
 
-    pub fn get(&mut self, path: &Path, show_hidden: bool) -> &PreviewContent {
-        let meta = fs::metadata(path).ok();
-        let mtime = meta.as_ref().and_then(|m| m.modified().ok());
-        let len = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+    /// Return cached content, starting a background load on a miss.
+    ///
+    /// Never blocks: the caller renders a "loading" placeholder for one or two
+    /// frames and then gets the content.
+    pub fn get(&mut self, path: &Path, show_hidden: bool) -> Option<&PreviewContent> {
+        self.poll();
 
-        let stale = match self.entries.get(path) {
-            Some(entry) => {
-                entry.mtime != mtime
-                    || entry.len != len
-                    || (matches!(&entry.content, PreviewContent::Directory { .. })
-                        && entry.hidden != show_hidden)
-            }
-            None => true,
-        };
+        let pending_matches = self
+            .pending
+            .as_ref()
+            .map(|(pending, hidden, _)| pending == path && *hidden == show_hidden)
+            .unwrap_or(false);
 
-        if stale {
-            let started = Instant::now();
-            logging::info(format!(
-                "preview load start: {} ({}, {})",
-                path.display(),
-                if path.is_dir() { "directory" } else { "file" },
-                len
-            ));
-            let content = if path.is_dir() {
-                load_directory(path, show_hidden)
-            } else {
-                load_file(path)
-            };
-            logging::info(format!(
-                "preview load done in {} ms: {}",
-                started.elapsed().as_millis(),
-                path.display()
-            ));
-            if self.entries.len() > 64 {
-                self.entries.clear();
-            }
-            self.entries.insert(
-                path.to_path_buf(),
-                PreviewEntry {
-                    mtime,
-                    len,
-                    hidden: show_hidden,
-                    content,
-                },
-            );
+        if let Some(content) = self.entries.get(path) {
+            return Some(content);
+        }
+        if pending_matches {
+            return None;
         }
 
-        &self.entries[path].content
+        let (sender, receiver) = mpsc::channel();
+        let thread_path = path.to_path_buf();
+        thread::spawn(move || {
+            let content = if thread_path.is_dir() {
+                load_directory(&thread_path, show_hidden)
+            } else {
+                load_file(&thread_path)
+            };
+            let _ = sender.send(PreviewLoaded {
+                path: thread_path,
+                content,
+            });
+        });
+        self.pending = Some((path.to_path_buf(), show_hidden, receiver));
+        None
+    }
+
+    /// True when a preview load is currently in flight.
+    pub fn is_loading(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Forget every cached preview (used after renames/deletes).
+    pub fn invalidate(&mut self) {
+        self.entries.clear();
+        self.pending = None;
+    }
+
+    fn poll(&mut self) {
+        let received = match self.pending.as_ref() {
+            Some((_, _, receiver)) => match receiver.try_recv() {
+                Ok(loaded) => Some(Ok(loaded)),
+                Err(TryRecvError::Empty) => None,
+                Err(TryRecvError::Disconnected) => Some(Err(())),
+            },
+            None => None,
+        };
+
+        match received {
+            Some(Ok(loaded)) => {
+                if self.entries.len() > 64 {
+                    self.entries.clear();
+                }
+                logging::info(format!("preview ready: {}", loaded.path.display()));
+                self.entries.insert(loaded.path, loaded.content);
+                self.pending = None;
+            }
+            Some(Err(())) => self.pending = None,
+            None => {}
+        }
     }
 }
 
@@ -167,6 +197,7 @@ fn load_file(path: &Path) -> PreviewContent {
 }
 
 fn load_directory(path: &Path, show_hidden: bool) -> PreviewContent {
+    let started = Instant::now();
     let read_dir = match fs::read_dir(path) {
         Ok(read_dir) => read_dir,
         Err(e) => return PreviewContent::Error(e.to_string()),
@@ -185,21 +216,30 @@ fn load_directory(path: &Path, show_hidden: bool) -> PreviewContent {
             continue;
         }
 
+        // Use the directory-entry type only. `fs::metadata()` here would stat
+        // every child, which is exactly what made previews hang on Nextcloud
+        // and iCloud: each stat can materialise a cloud placeholder.
+        let is_dir = item.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
         let child_path = item.path();
-        let meta = fs::metadata(&child_path).ok();
-        let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
-        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let is_image = !is_dir && is_image_path(&child_path);
 
         children.push(DirChild {
             name,
-            is_image: !is_dir && is_image_path(&child_path),
+            path: child_path,
+            is_image,
             is_dir,
-            size,
         });
     }
 
     children
         .sort_by_cached_key(|child| (if child.is_dir { 0 } else { 1 }, child.name.to_lowercase()));
+
+    logging::info(format!(
+        "directory preview in {} ms: {} ({} entries)",
+        started.elapsed().as_millis(),
+        path.display(),
+        total
+    ));
 
     PreviewContent::Directory { children, total }
 }
@@ -224,16 +264,32 @@ pub fn is_image_path(path: &Path) -> bool {
 }
 
 struct ImageEntry {
-    mtime: Option<SystemTime>,
-    len: u64,
     source: Option<DynamicImage>,
     resized: HashMap<(u32, u32), Arc<RgbImage>>,
 }
 
+/// Outcome of a background decode.
+struct DecodedImage {
+    path: PathBuf,
+    source: Option<DynamicImage>,
+}
+
 /// Decodes images and caches half-block-sized RGB thumbnails.
+///
+/// Decoding big TIFFs (tens of megabytes) on the UI thread stalled the whole
+/// TUI. Misses now return `None` and decode on a worker thread; the final
+/// resize to the requested cell size stays cached and cheap.
 pub struct ImageCache {
     entries: HashMap<PathBuf, ImageEntry>,
+    /// Decodes in flight, ordered oldest first. A small cap keeps a fast scroll
+    /// from spawning a thread per cell while still filling a grid progressively.
+    pending: Vec<(PathBuf, Receiver<DecodedImage>)>,
+    /// Paths that failed to decode, so we do not retry every frame.
+    failed: HashSet<PathBuf>,
 }
+
+/// How many image decodes may run at once.
+const MAX_PENDING_DECODES: usize = 4;
 
 impl Default for ImageCache {
     fn default() -> Self {
@@ -245,13 +301,16 @@ impl ImageCache {
     pub fn new() -> Self {
         Self {
             entries: HashMap::new(),
+            pending: Vec::new(),
+            failed: HashSet::new(),
         }
     }
 
     /// Return an image fitted into `max_width` cells by `max_height` cells.
     ///
     /// The returned image has `2 * height` pixel rows (two pixels per terminal
-    /// cell). The caller centers it and draws it with half blocks.
+    /// cell). The caller centers it and draws it with half blocks. Returns
+    /// `None` while the background decode is still running.
     pub fn render(
         &mut self,
         path: &Path,
@@ -262,57 +321,17 @@ impl ImageCache {
             return None;
         }
 
-        let meta = fs::metadata(path).ok()?;
-        if meta.len() > MAX_IMAGE_BYTES {
+        self.poll();
+
+        if !self.entries.contains_key(path) {
+            if self.failed.contains(path) {
+                return None;
+            }
+            let pending_matches = self.pending.iter().any(|(pending, _)| pending == path);
+            if !pending_matches && self.pending.len() < MAX_PENDING_DECODES {
+                self.spawn_decode(path);
+            }
             return None;
-        }
-        let mtime = meta.modified().ok();
-        let len = meta.len();
-
-        let stale = match self.entries.get(path) {
-            Some(entry) => entry.mtime != mtime || entry.len != len,
-            None => true,
-        };
-
-        if stale {
-            let started = Instant::now();
-            logging::info(format!(
-                "image decode start: {} ({} bytes)",
-                path.display(),
-                len
-            ));
-            let decoded = image::ImageReader::open(path)
-                .ok()
-                .and_then(|reader| reader.with_guessed_format().ok())
-                .and_then(|reader| reader.decode().ok());
-            let source = decoded.map(shrink_source);
-            match &source {
-                Some(image) => logging::info(format!(
-                    "image decode done in {} ms: {} ({}×{})",
-                    started.elapsed().as_millis(),
-                    path.display(),
-                    image.width(),
-                    image.height()
-                )),
-                None => logging::warn(format!(
-                    "image decode failed in {} ms: {}",
-                    started.elapsed().as_millis(),
-                    path.display()
-                )),
-            }
-
-            if self.entries.len() > 64 {
-                self.entries.clear();
-            }
-            self.entries.insert(
-                path.to_path_buf(),
-                ImageEntry {
-                    mtime,
-                    len,
-                    source,
-                    resized: HashMap::new(),
-                },
-            );
         }
 
         let entry = self.entries.get_mut(path)?;
@@ -337,6 +356,85 @@ impl ImageCache {
         });
 
         entry.resized.get(&key).cloned()
+    }
+
+    /// True when at least one decode is in flight.
+    pub fn is_loading(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    fn spawn_decode(&mut self, path: &Path) {
+        let (sender, receiver) = mpsc::channel();
+        let thread_path = path.to_path_buf();
+        thread::spawn(move || {
+            let started = Instant::now();
+            logging::info(format!("image decode start: {}", thread_path.display()));
+            let source = image::ImageReader::open(&thread_path)
+                .ok()
+                .and_then(|reader| reader.with_guessed_format().ok())
+                .and_then(|reader| reader.decode().ok())
+                .filter(|image| {
+                    let pixels = u64::from(image.width()) * u64::from(image.height());
+                    pixels.saturating_mul(4) <= MAX_IMAGE_BYTES
+                })
+                .map(shrink_source);
+            match &source {
+                Some(image) => logging::info(format!(
+                    "image decode done in {} ms: {} ({}×{})",
+                    started.elapsed().as_millis(),
+                    thread_path.display(),
+                    image.width(),
+                    image.height()
+                )),
+                None => logging::warn(format!(
+                    "image decode failed in {} ms: {}",
+                    started.elapsed().as_millis(),
+                    thread_path.display()
+                )),
+            }
+            let _ = sender.send(DecodedImage {
+                path: thread_path,
+                source,
+            });
+        });
+        self.pending.push((path.to_path_buf(), receiver));
+    }
+
+    fn poll(&mut self) {
+        let mut finished = Vec::new();
+        let mut disconnected = Vec::new();
+
+        for (index, (path, receiver)) in self.pending.iter().enumerate() {
+            match receiver.try_recv() {
+                Ok(decoded) => finished.push(decoded),
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => disconnected.push((index, path.clone())),
+            }
+        }
+
+        for (index, path) in disconnected.into_iter().rev() {
+            self.pending.remove(index);
+            self.failed.insert(path);
+        }
+
+        for decoded in finished {
+            self.pending.retain(|(path, _)| path != &decoded.path);
+            if self.entries.len() > 64 {
+                self.entries.clear();
+            }
+            if decoded.source.is_none() {
+                self.failed.insert(decoded.path);
+            } else {
+                self.failed.remove(&decoded.path);
+                self.entries.insert(
+                    decoded.path,
+                    ImageEntry {
+                        source: decoded.source,
+                        resized: HashMap::new(),
+                    },
+                );
+            }
+        }
     }
 }
 
@@ -397,6 +495,38 @@ fn composite_on_dark(image: &image::RgbaImage) -> RgbImage {
 mod tests {
     use super::*;
     use std::fs;
+    use std::time::{Duration, Instant};
+
+    /// Poll the async preview cache until content arrives or the deadline hits.
+    fn wait_for(cache: &mut PreviewCache, path: &Path, show_hidden: bool) -> PreviewContent {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(content) = cache.get(path, show_hidden) {
+                return match content {
+                    PreviewContent::Text {
+                        lines,
+                        truncated,
+                        size,
+                    } => PreviewContent::Text {
+                        lines: lines.clone(),
+                        truncated: *truncated,
+                        size: *size,
+                    },
+                    PreviewContent::Binary { size, sample } => PreviewContent::Binary {
+                        size: *size,
+                        sample: sample.clone(),
+                    },
+                    PreviewContent::Directory { children, total } => PreviewContent::Directory {
+                        children: children.clone(),
+                        total: *total,
+                    },
+                    PreviewContent::Error(error) => PreviewContent::Error(error.clone()),
+                };
+            }
+            assert!(Instant::now() < deadline, "preview did not load in time");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 
     #[test]
     fn text_preview_expands_tabs_and_reports_size() {
@@ -405,10 +535,10 @@ mod tests {
         fs::write(&path, "hello\n\tworld\n").unwrap();
 
         let mut cache = PreviewCache::new();
-        match cache.get(&path, false) {
+        match wait_for(&mut cache, &path, false) {
             PreviewContent::Text { lines, size, .. } => {
-                assert_eq!(lines, &vec!["hello".to_string(), "    world".to_string()]);
-                assert_eq!(*size, 13);
+                assert_eq!(lines, vec!["hello".to_string(), "    world".to_string()]);
+                assert_eq!(size, 13);
             }
             _ => panic!("expected text preview"),
         }
@@ -422,7 +552,7 @@ mod tests {
 
         let mut cache = PreviewCache::new();
         assert!(matches!(
-            cache.get(&path, false),
+            wait_for(&mut cache, &path, false),
             PreviewContent::Binary { .. }
         ));
     }
@@ -435,9 +565,9 @@ mod tests {
         fs::write(tmp.path().join(".secret"), "x").unwrap();
 
         let mut cache = PreviewCache::new();
-        match cache.get(tmp.path(), false) {
+        match wait_for(&mut cache, tmp.path(), false) {
             PreviewContent::Directory { children, total } => {
-                assert_eq!(*total, 2);
+                assert_eq!(total, 2);
                 assert_eq!(children[0].name, "beta");
                 assert!(children[0].is_dir);
                 assert_eq!(children[1].name, "alpha.txt");
@@ -447,18 +577,27 @@ mod tests {
     }
 
     #[test]
-    fn image_cache_decodes_and_fits() {
+    fn image_cache_is_async_and_fills_in() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("red.png");
         let image = RgbImage::from_pixel(4, 2, image::Rgb([255, 0, 0]));
         image.save(&path).unwrap();
 
         let mut cache = ImageCache::new();
-        let rendered = cache.render(&path, 10, 5).expect("image should decode");
-        assert!(rendered.width() <= 10);
-        assert!(rendered.height() <= 10);
-        assert!(rendered.width() > 0);
-        assert!(rendered.height() > 0);
+        // First call starts the decode and must not block the UI.
+        assert!(cache.render(&path, 10, 5).is_none());
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(rendered) = cache.render(&path, 10, 5) {
+                assert!(rendered.width() <= 10);
+                assert!(rendered.height() <= 10);
+                assert!(rendered.width() > 0);
+                break;
+            }
+            assert!(Instant::now() < deadline, "image decode did not finish");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
