@@ -100,6 +100,7 @@ src/favorites.rs           favorites model and TOML persistence
 src/ui.rs                  ratatui rendering, layout, overlays, preview/thumbnails, UI tests
 packaging/render-icon.py   draws packaging/icon-source.png (stdlib only)
 packaging/macos/build-app.sh  builds and installs Yazi2D.app with the icon
+packaging/macos/launcher.sh   picks a truecolor terminal and starts the binary
 scripts/e2e_pty.py         end-to-end test in a real pseudo-terminal
 docs/CONCEPT.md            product concept and UX spec (Russian)
 docs/ARCHITECTURE.md       module/data-flow/design details (English)

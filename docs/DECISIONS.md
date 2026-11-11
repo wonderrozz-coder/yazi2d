@@ -736,3 +736,30 @@ shipping a binary blob that nobody can regenerate is poor practice.
 appears in Launchpad, Spotlight and the Dock with its icon. `dist/` is
 git-ignored because the bundle is reproducible from source. On Linux/Windows the
 plain binary remains the way to run it.
+
+## ADR-036 — The app bundle prefers a truecolor terminal
+
+**Status:** accepted (2026-11-11, `0.5.3`)
+
+**Context:** The first bundle launcher always used Terminal.app, which has no
+truecolor support (`COLORTERM` is unset and it renders 24-bit escapes as flat
+colours). Image previews and thumbnails therefore appeared as black blocks —
+the same build looked correct in Ghostty.
+
+**Decision:** `packaging/macos/launcher.sh` probes for terminals in order of
+preference and launches the first one present:
+
+```
+Ghostty → kitty → WezTerm → iTerm2 → Terminal.app
+```
+
+Ghostty is started with `open -na Ghostty.app --args -e <binary>`, which the
+Ghostty docs give as the way to launch the macOS build with a command. kitty and
+WezTerm use their own CLI forms, iTerm2 uses AppleScript, and Terminal.app stays
+as a last resort that posts a notification explaining the missing truecolor.
+The launcher lives in its own file so it can be syntax-checked with `bash -n`
+and reviewed without nested heredoc quoting.
+
+**Consequences:** Double-clicking the app now opens a truecolor terminal when one
+is installed, so previews work. Users without any of those terminals still get a
+working app, with a hint about why images look flat.

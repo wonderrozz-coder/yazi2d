@@ -70,7 +70,17 @@ The binary lands in `target/release/yazi2d` (≈2 MB) and can be copied to
 
 This builds **Yazi2D.app** with a custom icon and installs it to
 `/Applications`, so it appears in Launchpad, Spotlight and the Dock. Because
-Yazi2D is a terminal UI, the app opens a Terminal window and starts there.
+Yazi2D is a terminal UI, the app opens a terminal window and starts there.
+
+The launcher picks the best terminal automatically, preferring ones with
+**truecolor** so image previews and thumbnails render correctly:
+
+```
+Ghostty → kitty → WezTerm → iTerm2 → Terminal.app (last resort)
+```
+
+Terminal.app has no truecolor support, so previews appear as black blocks
+there. Install [Ghostty](https://ghostty.org) to get the full experience.
 Pass `--no-copy` to build into `dist/` without installing.
 
 The icon is generated from `packaging/icon-source.png`; regenerate it with
@@ -292,7 +302,17 @@ source "$HOME/.cargo/env"
 
 Собирает **Yazi2D.app** с иконкой и устанавливает в `/Applications` — приложение
 появится в Launchpad, Spotlight и Dock. Yazi2D — терминальный интерфейс, поэтому
-при запуске открывается окно Terminal и программа стартует в нём. Флаг
+при запуске открывается окно терминала и программа стартует в нём.
+
+Лаунчер сам выбирает лучший терминал, отдавая приоритет тем, что поддерживают
+**truecolor** — без этого превью и миниатюры выглядят чёрными квадратами:
+
+```
+Ghostty → kitty → WezTerm → iTerm2 → Terminal.app (крайний случай)
+```
+
+В Terminal.app нет truecolor, поэтому картинки там будут плоскими. Поставьте
+[Ghostty](https://ghostty.org), чтобы получить полную картинку. Флаг
 `--no-copy` собирает бандл в `dist/` без установки.
 
 Иконка генерируется из `packaging/icon-source.png`; перерисовать её можно

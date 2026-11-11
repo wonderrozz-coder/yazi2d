@@ -46,31 +46,8 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/bin"
 cp "$BINARY" "$APP/Contents/Resources/bin/yazi2d"
 
 # --- Launcher ---------------------------------------------------------------
-# Runs in Terminal.app. The `open` trick gives the new window a PTY, which is
-# what a curses-style program needs.
-cat > "$APP/Contents/MacOS/$APP_NAME" <<'LAUNCHER'
-#!/bin/bash
-# Resolve the bundle this script lives in, then start Yazi2D in Terminal.
-BUNDLE="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="$BUNDLE/Resources/bin/yazi2d"
-
-if [ ! -x "$BIN" ]; then
-  osascript -e 'display alert "Yazi2D" message "The application is damaged: the yazi2d binary is missing."'
-  exit 1
-fi
-
-# Command to run inside the new terminal window. Single quotes are escaped so
-# paths with spaces or quotes survive the AppleScript round trip.
-CMD=$(printf '%q' "$BIN")
-ESCAPED=${CMD//\'/\'\\\'\'}
-osascript <<APPLESCRIPT >/dev/null 2>&1
-tell application "Terminal"
-  activate
-  do script "$ESCAPED"
-end tell
-APPLESCRIPT
-LAUNCHER
-chmod +x "$APP/Contents/MacOS/$APP_NAME"
+# A separate file is easier to lint and read than a heredoc with nested quotes.
+install -m 755 "$ROOT/packaging/macos/launcher.sh" "$APP/Contents/MacOS/$APP_NAME"
 
 # --- Icon -------------------------------------------------------------------
 if [ -f "$ICON_SRC" ]; then
