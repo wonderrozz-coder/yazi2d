@@ -20,10 +20,12 @@ filesystems, a GUI, sixel/Kitty image protocols.
 
 ## Current status (2026-11-11)
 
-Version `0.6.0` — MVP + quick view, thumbnails, background loading, logging,
+Version `0.6.1` — MVP + quick view, thumbnails, background loading, logging,
 sorting, type colours, bulk rename, trackpad gestures, a live footer, a
 polished thumbnail grid, full mouse support (click, double click, path-bar
-copy, right-click menu), recursive search and Windows builds.
+copy, right-click menu), recursive search, Windows builds, native image
+protocols (kitty/iTerm2/sixel), Yazi-style Nerd Font icons, accelerated arrow
+repeat with wrap-around, and a chip footer with a screen per modifier.
 
 - [x] Two panels, independent cwd/cursor/selection, active-panel highlighting.
 - [x] Path bar at the top of both panels (left-truncated, tail always visible).
@@ -90,10 +92,11 @@ rust-toolchain.toml        stable toolchain
 src/main.rs                CLI, terminal setup/restore, event loop, --help
 src/app.rs                 App state, key dispatch, prompts, jobs, favorites actions
 src/panel.rs               Panel state, modes, navigation, background directory loads
-src/preview.rs             async preview/image caches, image resampling
+src/graphics.rs            image protocol detection (kitty/iTerm2/sixel), no stdin
+src/preview.rs             async preview/image caches, image resampling, protocol cache
 src/colors.rs              file-type groups, colour presets, persisted theme
 src/keys.rs                Cyrillic→Latin key mapping so shortcuts ignore layout
-src/icons.rs               block-art icons per FileGroup for the thumbnail grid
+src/icons.rs               Yazi's Nerd Font icon tables + block art for the grid
 src/settings.rs            key bindings + trackpad settings, persisted TOML
 src/logging.rs             append-only file log (timings, slow loads, panics)
 src/transfer.rs            background copy/move/delete engine + progress channel

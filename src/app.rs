@@ -110,7 +110,23 @@ pub struct App {
     /// Where the last tap landed: panel index and row index. A second tap on a
     /// different row starts a new gesture instead of opening anything.
     pub last_tap_target: Option<(usize, usize)>,
+    /// The arrow key that is currently held, if any, and when it was pressed.
+    /// Held arrows accelerate: after the keyboard's own repeat delay the app
+    /// starts moving the cursor by itself, much faster than the terminal
+    /// repeats the key.
+    pub held_arrow: Option<(KeyCode, Instant)>,
+    /// Last automatic move of a held arrow.
+    pub last_auto_repeat: Option<Instant>,
 }
+
+/// After the arrow has been held this long, the app moves the cursor itself.
+const REPEAT_DELAY: Duration = Duration::from_millis(320);
+/// Interval between two automatic moves at the first repeat speed.
+const REPEAT_START: Duration = Duration::from_millis(55);
+/// Fastest automatic repeat interval.
+const REPEAT_MIN: Duration = Duration::from_millis(12);
+/// How often the repeat speed is doubled.
+const REPEAT_RAMP: Duration = Duration::from_millis(500);
 
 /// One row of the right-click menu.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -329,6 +345,8 @@ impl App {
             leader: None,
             last_tap: None,
             last_tap_target: None,
+            held_arrow: None,
+            last_auto_repeat: None,
         }
     }
 
@@ -528,8 +546,12 @@ impl App {
     /// Pressing and releasing a bare modifier produces no `Press` event on most
     /// terminals, so this is the only way to know when Ctrl/Alt/Shift is held.
     pub fn on_key_release(&mut self, key: KeyEvent) {
-        if let KeyCode::Modifier(modifier) = key.code {
-            self.release_modifier(modifier);
+        match key.code {
+            KeyCode::Modifier(modifier) => self.release_modifier(modifier),
+            KeyCode::Up | KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('k') => {
+                self.release_arrow();
+            }
+            _ => {}
         }
     }
 
@@ -849,7 +871,125 @@ impl App {
         }
     }
 
+    /// Move the active panel's cursor by `delta` in the current mode.
+    ///
+    /// Arrow keys wrap around at the ends (Total Commander / Yazi behaviour);
+    /// everything that targets a place instead of a direction keeps clamping.
+    fn move_active(&mut self, delta: i32) {
+        match self.active().mode {
+            PanelMode::Thumbnails => self.active_mut().move_grid_wrapping(delta),
+            _ => self.active_mut().move_cursor_wrapping(delta),
+        }
+        self.sync_preview_scroll();
+    }
+
+    /// Remember that an arrow key is held, so `on_tick` can accelerate it.
+    fn arm_arrow(&mut self, code: KeyCode) {
+        let already = self
+            .held_arrow
+            .map(|(held, _)| held == code)
+            .unwrap_or(false);
+        if !already {
+            self.held_arrow = Some((code, Instant::now()));
+            self.last_auto_repeat = None;
+        }
+    }
+
+    /// Forget the held arrow (a release, or a key that is not an arrow).
+    fn release_arrow(&mut self) {
+        self.held_arrow = None;
+        self.last_auto_repeat = None;
+    }
+
+    /// Drive the held arrow.
+    ///
+    /// Terminals repeat a held key at their own rate, which is slow and often
+    /// capped. Instead of waiting for those events the app moves the cursor
+    /// itself: after `REPEAT_DELAY` it repeats every `REPEAT_START`, halving
+    /// that interval every `REPEAT_RAMP`, and it grows the step so a long list
+    /// is crossed in a second or two. Called from the event loop while it
+    /// waits for input, so the movement is smooth between key repeats.
+    pub fn tick_key_repeat(&mut self) -> bool {
+        let Some((code, pressed)) = self.held_arrow else {
+            return false;
+        };
+        if self.should_quit
+            || self.help
+            || self.prompt.is_some()
+            || self.sort_menu
+            || self.theme_menu
+            || self.settings_menu
+            || self.context_menu.is_some()
+            || self.search.is_some()
+        {
+            return false;
+        }
+
+        let now = Instant::now();
+        let held = now.saturating_duration_since(pressed);
+        if held < REPEAT_DELAY {
+            return false;
+        }
+
+        let interval = self.repeat_interval(held);
+        if let Some(last) = self.last_auto_repeat {
+            if now.saturating_duration_since(last) < interval {
+                return false;
+            }
+        }
+        self.last_auto_repeat = Some(now);
+
+        let direction: i32 = if matches!(code, KeyCode::Up | KeyCode::Char('k') | KeyCode::PageUp) {
+            -1
+        } else {
+            1
+        };
+        let cols = self.active().grid_cols.max(1) as i32;
+        let step = if self.active().mode == PanelMode::Thumbnails {
+            cols
+        } else {
+            self.repeat_step_for(held)
+        };
+
+        self.move_active(direction * step);
+        self.dirty = true;
+        true
+    }
+
+    /// Interval between automatic moves for a key held for `held`.
+    fn repeat_interval(&self, held: Duration) -> Duration {
+        let ramps = (held.as_millis() / REPEAT_RAMP.as_millis()) as u32;
+        let millis = REPEAT_START
+            .as_millis()
+            .saturating_div(1u128 << ramps.min(4))
+            .max(REPEAT_MIN.as_millis());
+        Duration::from_millis(millis as u64)
+    }
+
+    /// How many rows one automatic move covers for a key held for `held`.
+    fn repeat_step_for(&self, held: Duration) -> i32 {
+        if held > Duration::from_millis(1800) {
+            4
+        } else if held > Duration::from_millis(900) {
+            2
+        } else {
+            1
+        }
+    }
+
     fn handle_panel_key(&mut self, key: KeyEvent) {
+        // A held arrow accelerates; every other key stops the auto-repeat so it
+        // can never fight with what the user is typing.
+        if matches!(
+            key.code,
+            KeyCode::Up | KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('k')
+        ) && key.modifiers.is_empty()
+        {
+            self.arm_arrow(key.code);
+        } else {
+            self.release_arrow();
+        }
+
         if self.active().loading && key.code == KeyCode::Esc {
             self.cancel_active_load();
             return;
@@ -872,8 +1012,8 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') => self.active_mut().move_cursor(-1),
-            KeyCode::Down | KeyCode::Char('j') => self.active_mut().move_cursor(1),
+            KeyCode::Up | KeyCode::Char('k') => self.move_active(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_active(1),
             KeyCode::PageUp => {
                 let delta = self.active().page_size.max(1) as i32;
                 self.active_mut().move_cursor(-delta);
@@ -906,8 +1046,8 @@ impl App {
         let page = self.active().grid_cols.max(1) as i32 * self.active().grid_rows.max(1) as i32;
 
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') => self.active_mut().move_grid(-cols),
-            KeyCode::Down | KeyCode::Char('j') => self.active_mut().move_grid(cols),
+            KeyCode::Up | KeyCode::Char('k') => self.move_active(-cols),
+            KeyCode::Down | KeyCode::Char('j') => self.move_active(cols),
             KeyCode::Left | KeyCode::Char('h') => self.active_mut().move_grid(-1),
             KeyCode::Right | KeyCode::Char('l') => self.active_mut().move_grid(1),
             KeyCode::PageUp => self.active_mut().move_grid(-page),
@@ -3926,5 +4066,68 @@ mod tests {
             "unexpected status: {}",
             app.status
         );
+    }
+
+    #[test]
+    fn a_held_arrow_moves_faster_than_the_terminal_repeats() {
+        let tmp = tempfile::tempdir().unwrap();
+        let left = tmp.path().join("left");
+        fs::create_dir_all(&left).unwrap();
+        for index in 0..200 {
+            fs::write(left.join(format!("f{index:03}.txt")), "x").unwrap();
+        }
+
+        let mut app = app_for(&left, &left);
+        app.panels[0].cursor = 1;
+
+        // Simulate a hold: arm the arrow, then let the clock pass and drive the
+        // repeat by hand. One terminal press, many app moves.
+        app.held_arrow = Some((KeyCode::Down, Instant::now() - Duration::from_millis(1000)));
+        app.last_auto_repeat = None;
+
+        let mut moves = 0;
+        for _ in 0..50 {
+            if app.tick_key_repeat() {
+                moves += 1;
+            }
+            // Pretend time passes between event-loop iterations.
+            app.last_auto_repeat = app
+                .last_auto_repeat
+                .map(|last| last - Duration::from_millis(100));
+        }
+        assert!(
+            moves > 10,
+            "a held arrow produced only {moves} moves in one second"
+        );
+        assert!(
+            app.panels[0].cursor > 1,
+            "the cursor did not advance while the arrow was held"
+        );
+    }
+
+    #[test]
+    fn releasing_the_arrow_stops_the_acceleration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+
+        app.held_arrow = Some((KeyCode::Down, Instant::now() - Duration::from_millis(1000)));
+        assert!(app.tick_key_repeat());
+
+        app.on_key_release(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert!(app.held_arrow.is_none());
+        assert!(
+            !app.tick_key_repeat(),
+            "the repeat must stop once the key is released"
+        );
+    }
+
+    #[test]
+    fn seconds_of_holding_grow_the_repeat_step() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = app_for(tmp.path(), tmp.path());
+
+        assert_eq!(app.repeat_step_for(Duration::from_millis(300)), 1);
+        assert_eq!(app.repeat_step_for(Duration::from_millis(1000)), 2);
+        assert_eq!(app.repeat_step_for(Duration::from_millis(2000)), 4);
     }
 }

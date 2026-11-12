@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::thread;
@@ -266,6 +267,9 @@ pub fn is_image_path(path: &Path) -> bool {
 struct ImageEntry {
     source: Option<DynamicImage>,
     resized: HashMap<(u32, u32), Arc<RgbImage>>,
+    /// Encoded native-graphics payloads (kitty/iTerm2/sixel), keyed by the
+    /// terminal area. Encoding is expensive, so it is done once per size.
+    protocols: HashMap<(u16, u16), Rc<ratatui_image::protocol::Protocol>>,
 }
 
 /// Outcome of a background decode.
@@ -358,6 +362,74 @@ impl ImageCache {
         entry.resized.get(&key).cloned()
     }
 
+    /// Ask for a decode without waiting for it.
+    ///
+    /// The renderer calls this for every image it is about to show (a preview,
+    /// a grid of thumbnails), so the worker starts one frame earlier and the
+    /// `…` placeholder disappears sooner. A no-op when the image is cached, in
+    /// flight, or already known to be undecodable.
+    pub fn prefetch(&mut self, path: &Path) {
+        if self.entries.contains_key(path) || self.failed.contains(path) {
+            return;
+        }
+        if self.pending.iter().any(|(pending, _)| pending == path)
+            || self.pending.len() >= MAX_PENDING_DECODES
+        {
+            return;
+        }
+        self.spawn_decode(path);
+    }
+
+    /// The decoded source image, if the background decode has finished.
+    ///
+    /// The caller then chooses between a native graphics protocol and half
+    /// blocks, which needs the original aspect ratio rather than the
+    /// pre-resized half-block image.
+    pub fn decoded(&mut self, path: &Path) -> Option<DynamicImage> {
+        self.poll();
+        let entry = self.entries.get(path)?;
+        entry.source.clone()
+    }
+
+    /// Encoded native protocol for `area`, built once per terminal size.
+    ///
+    /// Returns `None` when the terminal has no native protocol, so the caller
+    /// draws half blocks instead.
+    pub fn protocol(
+        &mut self,
+        path: &Path,
+        area: ratatui::layout::Rect,
+    ) -> Option<Rc<ratatui_image::protocol::Protocol>> {
+        self.poll();
+        if !crate::graphics::native() || area.width == 0 || area.height == 0 {
+            return None;
+        }
+
+        if !self.entries.contains_key(path) {
+            if self.failed.contains(path) {
+                return None;
+            }
+            if !self.pending.iter().any(|(pending, _)| pending == path)
+                && self.pending.len() < MAX_PENDING_DECODES
+            {
+                self.spawn_decode(path);
+            }
+            return None;
+        }
+
+        let entry = self.entries.get_mut(path)?;
+        let source = entry.source.clone()?;
+        let key = (area.width, area.height);
+        if let Some(protocol) = entry.protocols.get(&key) {
+            return Some(protocol.clone());
+        }
+
+        let protocol = crate::graphics::render(source, area)?;
+        let protocol = Rc::new(protocol);
+        entry.protocols.insert(key, protocol.clone());
+        Some(protocol)
+    }
+
     /// True when at least one decode is in flight.
     pub fn is_loading(&self) -> bool {
         !self.pending.is_empty()
@@ -431,6 +503,7 @@ impl ImageCache {
                     ImageEntry {
                         source: decoded.source,
                         resized: HashMap::new(),
+                        protocols: HashMap::new(),
                     },
                 );
             }

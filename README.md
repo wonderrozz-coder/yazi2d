@@ -49,6 +49,18 @@ Favorites sidebar with a folder tree:
 ## Features
 
 - **Two panels** with independent working directories, cursor and selection.
+- **Sharp previews**: the terminal's own graphics protocol (kitty in Ghostty,
+  kitty, WezTerm or foot; iTerm2; sixel) draws real pixels instead of half-block
+  pixels, picked from the environment — no blocking query, no broken input.
+  Half blocks remain the fallback.
+- **Yazi icons**: Nerd Font glyph per file name and extension, coloured from
+  Yazi's theme (`icons = false` in the settings file turns them off).
+- **Fast arrows**: holding ↑/↓ accelerates (55 ms → 12 ms, 1 → 4 rows), so a
+  long listing is crossed in a second, and reaching the top or bottom jumps to
+  the other end without stopping — Total Commander style.
+- **Chip footer**: every key sits on its own light-orange plate, built from the
+  live bindings. Holding Ctrl, Alt, Shift or Cmd replaces the footer with that
+  modifier's screen only; releasing it restores the default.
 - **Mouse everywhere**: click a row to move the cursor, double click to open,
   click the **path bar to copy the path**, right click for a context menu
   (open, copy path/name, select, rename, delete, new folder, find).
@@ -234,6 +246,35 @@ protocol: Ghostty, kitty, WezTerm, foot, iTerm2).
 > neither is used. Ghostty encodes `Option+←/→` as `Esc b`/`Esc f`; Yazi2D accepts
 > `Option+b`/`Option+f` too, so it works without touching the terminal config.
 
+## Images and icons
+
+Previews use the terminal's native graphics protocol when it has one:
+
+| Terminal | Protocol |
+|---|---|
+| Ghostty, kitty, WezTerm, foot, Konsole | kitty graphics |
+| iTerm2 | iTerm2 inline images |
+| foot, mlterm, xterm (`-ti vt340`) | sixel |
+| macOS Terminal, plain xterm | half blocks (a warning is shown instead of dithered pixels) |
+
+Detection is deliberately a pure environment check (`TERM`, `TERM_PROGRAM`,
+`COLORTERM`). The escape-sequence query that `ratatui-image` ships with enables
+raw mode and ends by restoring it to *off*, and it leaves a thread blocked on
+`read()` when the terminal stays silent — that swallowed every keystroke. This
+app never queries stdin, so it cannot break input.
+
+Override the choice when a multiplexer hides the terminal's identity:
+
+```sh
+YAZI2D_IMAGE_PROTOCOL=kitty yazi2d      # or iterm2, sixel, halfblocks
+```
+
+Icons come from Yazi's default theme: 713 mappings — folder names (`Documents`,
+`Downloads`, `.git`…), exact file names (`.gitignore`, `README`…) and
+extensions (`*.rs`, `*.png`, `*.tar.gz`…). They need a **Nerd Font**; without
+one the glyphs render as boxes, and `icons = false` in the settings file switches
+the listing back to plain ASCII markers.
+
 ## Configuration
 
 Favorites: `~/.config/yazi2d/favorites.toml`
@@ -252,6 +293,8 @@ Settings: `$YAZI2D_CONFIG_DIR/settings.toml`.
 
 ```toml
 invert_scroll = true
+icons = true            # Nerd Font glyphs in the listing
+max_thumb_bytes = 4194304
 key.copy = "ctrl+y"
 key.delete = "f9"
 ```
@@ -355,6 +398,19 @@ two-panel model). No Yazi source is included.
 
 - **Две панели** с независимыми текущими каталогами, курсором и выделением.
 - **Строка пути** в верхней части каждой панели (обрезается слева, хвост всегда виден).
+- **Резкие превью**: картинки рисует сам терминал своим графическим протоколом
+  (kitty в Ghostty, kitty/WezTerm/foot, iTerm2, sixel) — это настоящие пиксели,
+  а не полублоки. Протокол определяется по переменным окружения, без
+  блокирующего запроса, поэтому ввод не ломается. Полублоки остаются запасным
+  вариантом.
+- **Иконки как в Yazi**: глиф Nerd Font для имени и расширения, цвет — из темы
+  Yazi (`icons = false` в файле настроек отключает их).
+- **Быстрые стрелки**: зажатая ↑/↓ ускоряется (55 мс → 12 мс, 1 → 4 строки),
+  длинный список пролетает за секунду; у верхнего и нижнего края курсор
+  перескакивает на противоположный и продолжает движение — как в Total Commander.
+- **Футер-плашки**: каждая клавиша на своей бледно-оранжевой плашке, набор
+  берётся из реальных привязок. Зажатый Ctrl, Alt, Shift или Cmd заменяет
+  футер экраном только этого модификатора; отпустили — вернулся обычный.
 - **Мышь**: клик по строке ставит курсор, двойной клик открывает, клик по
   **строке пути копирует путь**, правая кнопка открывает контекстное меню
   (открыть, копировать путь/имя, выделить, переименовать, удалить, создать
@@ -567,6 +623,36 @@ protocol: Ghostty, kitty, WezTerm, foot, iTerm2).
   `%e=txt` (только расширение). Пример: `photo_{n}` → `photo_1.jpg`.
 - **Размеры и даты** догружаются в фоне: список появляется мгновенно, колонки
   заполняются через доли секунды. Это убирает зависания на папках Nextcloud/iCloud.
+
+## Картинки и иконки
+
+Превью используют графический протокол терминала, если он есть:
+
+| Терминал | Протокол |
+|---|---|
+| Ghostty, kitty, WezTerm, foot, Konsole | kitty graphics |
+| iTerm2 | iTerm2 inline images |
+| foot, mlterm, xterm (`-ti vt340`) | sixel |
+| macOS Terminal, обычный xterm | полублоки (вместо «пиксельной каши» — предупреждение) |
+
+Определение намеренно сделано по переменным окружения (`TERM`, `TERM_PROGRAM`,
+`COLORTERM`). Запрос возможностей escape-последовательностями, который есть в
+`ratatui-image`, включает raw mode и в конце возвращает его в выключенное
+состояние, а если терминал молчит — оставляет поток, читающий stdin: из-за этого
+терялись все нажатия клавиш. Здесь stdin никогда не опрашивается, поэтому ввод
+не ломается.
+
+Если мультиплексор скрывает имя терминала, протокол задаётся вручную:
+
+```sh
+YAZI2D_IMAGE_PROTOCOL=kitty yazi2d      # или iterm2, sixel, halfblocks
+```
+
+Иконки взяты из темы Yazi по умолчанию: 713 соответствий — имена каталогов
+(`Documents`, `Downloads`, `.git`…), точные имена файлов (`.gitignore`,
+`README`…) и расширения (`*.rs`, `*.png`, `*.tar.gz`…). Для них нужен
+**Nerd Font**; без него глифы будут квадратиками, а `icons = false` в файле
+настроек возвращает обычные ASCII-маркеры.
 
 ## Избранное и конфигурация
 

@@ -1,6 +1,6 @@
 [package]
 name = "yazi2d"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 rust-version = "1.80"
 description = "Yazi2D — a fast dual-pane terminal file manager inspired by Yazi and Total Commander"
@@ -13,6 +13,9 @@ crossterm = "0.28"
 dirs = "5"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 ratatui = "0.29"
+# Native image protocols (kitty graphics, iTerm2, sixel) with half blocks as the
+# universal fallback — the same approach Yazi uses, so previews are sharp.
+ratatui-image = { version = "7", default-features = false, features = ["image-defaults"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 unicode-width = "0.2"

@@ -873,3 +873,75 @@ stays on stable. The cost is one nightly-only build in the release process, and
 the win7 build has to recompile `std` (about two minutes here). Ghostty cannot
 be bundled yet: it has no official Windows build, so `vendor/ghostty/` is a drop
 point the packaging script reads when it exists.
+
+## ADR-041 — Native image protocols instead of half-block "pixels"
+
+**Status:** accepted (2026-11-12, `0.6.1`)
+
+**Context:** Half blocks (`▀` with two colours per cell) work everywhere, but
+their resolution is one pixel per cell: a preview 80 cells wide is 80 pixels
+wide, which is why photos looked like huge pixels. Yazi draws photographs with
+the terminal's own graphics protocol and is visibly sharp.
+
+**Decision:** `src/graphics.rs` wraps `ratatui-image` and picks a protocol from
+the environment:
+
+| Signals | Protocol |
+|---|---|
+| `TERM_PROGRAM=ghostty/kitty/wezterm`, `TERM=xterm-kitty/foot*` | kitty graphics |
+| `TERM` mentions `sixel`/`mlterm` | sixel |
+| `TERM_PROGRAM=iterm*` | iTerm2 inline images |
+| anything else | half blocks |
+
+Encoded protocols are cached per image and per terminal size (`ImageCache`),
+because encoding a 1200×800 image on every frame would dominate a redraw.
+
+**Consequences:** In Ghostty a preview frame grew from ~5 KB to ~88 KB of
+escape data — i.e. real pixels instead of 80×40 half-block cells — while
+scrolling stays smooth thanks to the per-size cache. Terminals without graphics
+still work through half blocks.
+
+## ADR-042 — Never query stdin for graphics support
+
+**Status:** accepted (2026-11-12, `0.6.1`)
+
+**Context:** The obvious way to detect a graphics protocol is to ask the
+terminal: `Picker::from_query_stdio` writes DA1/XTGETTCAP queries and reads the
+replies. It enables raw mode for the query and always ends by restoring the
+previous state — which turns raw mode **off**. Worse, when the terminal does not
+answer in time it returns an error while its worker thread stays blocked in
+`read()`, so that thread competes with the event loop for every keystroke.
+
+In a pty test the app became completely unresponsive: the first frame drew and
+then no key ever arrived. Restoring raw mode after the call did not help,
+because the stuck reader had already consumed the input.
+
+**Decision:** The protocol is detected from environment variables only. No
+escape-sequence query touches stdin, ever. `YAZI2D_IMAGE_PROTOCOL` overrides the
+guess (`kitty`, `iterm2`, `sixel`, `halfblocks`), which also covers a
+multiplexer that hides the outer terminal's identity.
+
+**Consequences:** Detection is dumber — a terminal that supports kitty graphics
+but sets none of the usual variables needs the env override — but input handling
+can no longer be broken by an image feature, which is the far worse failure. The
+trade is documented in the README and in the log line
+(`image protocol: kitty graphics (TERM=…, TERM_PROGRAM=…)`).
+
+## ADR-043 — Icons from Yazi's theme, with an ASCII escape hatch
+
+**Status:** accepted (2026-11-12, `0.6.1`)
+
+**Context:** The listing used ASCII markers (`▸`, `▣`) and the grid used
+hand-drawn block art. Yazi instead shows a Nerd Font glyph per file name and
+extension, coloured by type, which makes a listing readable at a glance.
+
+**Decision:** `src/icons.rs` embeds Yazi's `[icon] dirs/files/exts` tables (14,
+214 and 485 entries) as static arrays and resolves them in Yazi's order: exact
+file name, then extension, then the generic folder/file glyph. Colours are the
+`#rrggbb` strings from Yazi's theme. The block art stays for the thumbnail grid,
+where one glyph is too small to recognise.
+
+**Consequences:** With a Nerd Font installed the listing matches Yazi's look.
+Without one the code points render as boxes, so `icons = false` in
+`settings.toml` switches back to ASCII — the table itself is never a hard
+dependency.

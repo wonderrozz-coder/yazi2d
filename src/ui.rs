@@ -16,6 +16,8 @@ use crate::app::{App, Focus, Prompt};
 use crate::colors::FileGroup;
 use crate::panel::{Entry, Panel, PanelMode};
 use crate::preview::{is_image_path, ImageCache, PreviewCache, PreviewContent};
+use crate::settings::KeySpec;
+use crossterm::event::KeyCode;
 
 const PATH_BG_ACTIVE: Color = Color::Rgb(0, 95, 135);
 const PATH_BG: Color = Color::Rgb(52, 58, 70);
@@ -23,6 +25,12 @@ const SELECT_BG_ACTIVE: Color = Color::Rgb(0, 80, 110);
 const SELECT_BG: Color = Color::Rgb(55, 55, 65);
 const STATUS_BG: Color = Color::Rgb(30, 32, 40);
 const FOOTER_BG: Color = Color::Rgb(20, 20, 26);
+/// Palette plate behind every key hint in the footer.
+const CHIP_BG: Color = Color::Rgb(214, 168, 110);
+/// The key itself: dark, bold, on the plate.
+const CHIP_KEY: Color = Color::Rgb(32, 24, 12);
+/// The description: dark but softer than the key.
+const CHIP_TEXT: Color = Color::Rgb(58, 44, 24);
 /// Slightly lighter than the panel so thumbnail tiles read as cards.
 const TILE_BG: Color = Color::Rgb(24, 26, 33);
 
@@ -51,6 +59,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let right_loading = app.panels[0].loading;
     let hidden = app.hidden;
     let colors = app.colors;
+    let show_icons = app.settings.icons;
 
     if show_favorites {
         let cols = Layout::default()
@@ -74,6 +83,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             &mut app.image_cache,
             hidden,
             &colors,
+            show_icons,
         );
         draw_panel(
             frame,
@@ -87,6 +97,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             &mut app.image_cache,
             hidden,
             &colors,
+            show_icons,
         );
     } else {
         let cols = Layout::default()
@@ -105,6 +116,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             &mut app.image_cache,
             hidden,
             &colors,
+            show_icons,
         );
         draw_panel(
             frame,
@@ -118,6 +130,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             &mut app.image_cache,
             hidden,
             &colors,
+            show_icons,
         );
     }
 
@@ -160,6 +173,7 @@ fn draw_panel(
     image_cache: &mut ImageCache,
     show_hidden: bool,
     colors: &crate::colors::Colors,
+    show_icons: bool,
 ) {
     let mode = panel.mode;
     let border_color = if active {
@@ -234,9 +248,10 @@ fn draw_panel(
                     );
                 }
             }
-            draw_list(frame, panel, rows[2], active, colors);
+            draw_list(frame, panel, rows[2], active, colors, show_icons);
         }
         PanelMode::Thumbnails => {
+            panel.body_area = rows[2];
             if rows[1].height > 0 {
                 let caption = if panel.loading {
                     loading_caption(panel)
@@ -252,6 +267,7 @@ fn draw_panel(
             draw_thumbnails(frame, panel, rows[2], active, image_cache, colors);
         }
         PanelMode::Preview => {
+            panel.body_area = rows[1];
             draw_preview(
                 frame,
                 panel,
@@ -287,6 +303,7 @@ fn draw_list(
     list_area: Rect,
     active: bool,
     colors: &crate::colors::Colors,
+    show_icons: bool,
 ) {
     if list_area.height == 0 {
         return;
@@ -310,7 +327,7 @@ fn draw_list(
         .iter()
         .map(|entry| {
             let selected = !entry.is_parent && panel.selected.contains(&entry.path);
-            list_item(entry, selected, width, colors)
+            list_item(entry, selected, width, colors, show_icons)
         })
         .collect();
 
@@ -382,6 +399,11 @@ fn draw_preview(
                     format!(" {name}  ·  folder  ·  {total} items ")
                 };
                 draw_caption(frame, header, &caption);
+                // Queue the decodes first: the renderer below draws whatever is
+                // already cached this frame and shows `…` for the rest.
+                for child in children.iter().filter(|child| child.is_image) {
+                    image_cache.prefetch(&child.path);
+                }
                 draw_folder_grid(frame, panel, children, area, image_cache, colors);
             }
             PreviewContent::Error(error) => render_message(frame, area, error),
@@ -391,19 +413,53 @@ fn draw_preview(
     }
 
     if is_image_path(path) {
-        match image_cache.render(path, area.width, area.height) {
+        match image_cache.decoded(path) {
             Some(image) => {
+                // Without truecolor half blocks are just a dithered mess, which
+                // is the "huge pixels" complaint. macOS Terminal gets a warning
+                // that points at a terminal which draws the preview properly.
+                if !crate::graphics::native()
+                    && crate::graphics::terminal() == crate::graphics::Terminal::Limited
+                {
+                    draw_caption(
+                        frame,
+                        header,
+                        &format!(" {name}  ·  image  ·  {} ", human_size(size)),
+                    );
+                    render_message(
+                        frame,
+                        area,
+                        "This terminal cannot draw truecolor images.\n\nUse Ghostty, kitty or WezTerm for sharp previews,\nor press Ctrl+T for the thumbnail grid.",
+                    );
+                    return;
+                }
+                let native = crate::graphics::native();
+                // With a native protocol the terminal draws real pixels, so the
+                // result is roughly `area.width * 8` pixels across; half blocks
+                // give one pixel per cell column. Report what is really shown.
+                let pixels_wide = if native {
+                    image.width().saturating_mul(8)
+                } else {
+                    image.width()
+                };
                 let dimensions = format!(
                     " {name}  ·  image {}×{}  ·  {} ",
-                    image.width(),
+                    pixels_wide,
                     image.height().div_ceil(2),
                     human_size(size)
                 );
                 draw_caption(frame, header, &dimensions);
                 clamp_preview(panel, 0, 0);
-                render_halfblocks(frame, &image, area);
+                if !draw_native(frame, area, image_cache.protocol(path, area)) {
+                    let halfblocks = image_cache.render(path, area.width, area.height);
+                    if let Some(halfblocks) = halfblocks {
+                        render_halfblocks(frame, &halfblocks, area);
+                    }
+                }
             }
             None => {
+                // Start the background decode through the regular cache API.
+                let _ = image_cache.render(path, area.width, area.height);
                 draw_caption(frame, header, &format!(" {name}  ·  image "));
                 let message = if image_cache.is_loading() {
                     "Decoding image…"
@@ -532,9 +588,8 @@ fn draw_folder_grid(
             if child.is_dir {
                 draw_group_icon(frame, body, FileGroup::Directory, color, TILE_BG);
             } else if child.is_image && body.width > 2 {
-                match image_cache.render(&child.path, body.width, body.height) {
-                    Some(image) => render_halfblocks(frame, &image, body),
-                    None => render_message(frame, body, "…"),
+                if !draw_tile_image(frame, image_cache, &child.path, body) {
+                    render_message(frame, body, "…");
                 }
             } else {
                 let group = FileGroup::classify(&child.path, false);
@@ -559,6 +614,13 @@ fn draw_thumbnails(
     image_cache: &mut ImageCache,
     colors: &crate::colors::Colors,
 ) {
+    // Queue decodes for the tiles that are about to be drawn.
+    for entry in &panel.entries {
+        if !entry.is_dir && is_image_path(&entry.path) {
+            image_cache.prefetch(&entry.path);
+        }
+    }
+
     const TILE_MIN_WIDTH: u16 = 16;
     const TILE_MAX_WIDTH: u16 = 32;
 
@@ -670,9 +732,8 @@ fn draw_tile(
                 background,
             );
         } else if is_image_path(&entry.path) {
-            match image_cache.render(&entry.path, body.width, body.height) {
-                Some(image) => render_halfblocks(frame, &image, body),
-                None => render_message(frame, body, "…"),
+            if !draw_tile_image(frame, image_cache, &entry.path, body) {
+                render_message(frame, body, "…");
             }
         } else {
             draw_file_icon(frame, entry, body, colors, background);
@@ -731,13 +792,13 @@ fn draw_group_icon(
     color: Color,
     background: Color,
 ) {
-    let art = crate::icons::icon(group);
+    let art = crate::icons::art(group);
     let art_height = art.len() as u16;
     let art_width = crate::icons::ICON_WIDTH as u16;
 
     if area.width < art_width || area.height < art_height {
         frame.render_widget(
-            Paragraph::new(crate::icons::glyph(group).to_string())
+            Paragraph::new(crate::icons::art_glyph(group).to_string())
                 .alignment(Alignment::Center)
                 .style(
                     Style::default()
@@ -820,6 +881,53 @@ fn draw_file_icon(
             label_area,
         );
     }
+}
+
+/// Draw an image into a tile, preferring the terminal's native protocol.
+///
+/// Falls back to half blocks, then to a "loading" ellipsis. Keeps the three
+/// call sites (folder preview grid, thumbnail grid, single preview) identical.
+fn draw_tile_image(frame: &mut Frame, cache: &mut ImageCache, path: &Path, body: Rect) -> bool {
+    if draw_native(frame, body, cache.protocol(path, body)) {
+        return true;
+    }
+    match cache.render(path, body.width, body.height) {
+        Some(image) => {
+            render_halfblocks(frame, &image, body);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Draw an image with the terminal's native graphics protocol.
+///
+/// Returns `false` when the terminal has no native protocol (or the thumbnail
+/// is not ready yet), and the caller then falls back to half blocks. The
+/// protocol object is cached per size in `ImageCache`, because encoding a
+/// 1200×800 image on every frame would dominate the redraw time.
+fn draw_native(
+    frame: &mut Frame,
+    area: Rect,
+    protocol: Option<std::rc::Rc<ratatui_image::protocol::Protocol>>,
+) -> bool {
+    if !crate::graphics::native() || area.width == 0 || area.height == 0 {
+        return false;
+    }
+    let Some(protocol) = protocol else {
+        return false;
+    };
+    if protocol.area().width == 0 || protocol.area().height == 0 {
+        return false;
+    }
+
+    let rendered = Rect {
+        x: area.x + (area.width - protocol.area().width) / 2,
+        y: area.y + (area.height - protocol.area().height) / 2,
+        ..protocol.area()
+    };
+    frame.render_widget(ratatui_image::Image::new(&protocol), rendered);
+    true
 }
 
 fn render_halfblocks(frame: &mut Frame, image: &RgbImage, area: Rect) {
@@ -1051,61 +1159,272 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-/// Modifier-specific hints shown while the key is held.
-///
-/// Only combinations that actually exist are listed, so the footer never
-/// promises a chord the app does not implement.
-fn modifier_hint(modifiers: crossterm::event::KeyModifiers) -> Option<&'static str> {
-    use crossterm::event::KeyModifiers as M;
-
-    if modifiers.contains(M::CONTROL) {
-        return Some(
-            " Ctrl · B add fav · D focus favs · F show/hide favs · Q/P preview other · T thumbs \
-             · O open there · A all · G rename · K colours · S sort · R refresh · H hidden · L copy path · Shift+C copy selection · E settings",
-        );
-    }
-    if modifiers.contains(M::ALT) {
-        return Some(" Option · ← / → open the cursor folder in that panel · F7 find files");
-    }
-    if modifiers.contains(M::SHIFT) {
-        return Some(" Shift · ← / → open the cursor folder in that panel · Tab focus favorites");
-    }
-    None
+/// One footer chip: a key and what it does.
+struct Hint {
+    key: String,
+    label: &'static str,
 }
 
-fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let hint = modifier_hint(app.held_modifiers);
+/// Short, human labels for the footer.
+///
+/// The settings menu uses long labels ("Copy to other panel"); a one-line footer
+/// needs short ones, so each action carries both.
+fn short_label(action: crate::settings::Action) -> &'static str {
+    use crate::settings::Action as A;
+    match action {
+        A::Quit => "quit",
+        A::Help => "help",
+        A::Copy => "copy",
+        A::Move => "move",
+        A::Mkdir => "new folder",
+        A::Rename => "rename",
+        A::Delete => "delete",
+        A::SelectAll => "select all",
+        A::BulkRename => "bulk rename",
+        A::ToggleHidden => "hidden",
+        A::Refresh => "refresh",
+        A::SortMenu => "sort",
+        A::ColourMenu => "colours",
+        A::Settings => "settings",
+        A::TogglePreview => "preview",
+        A::ToggleThumbnails => "thumbnails",
+        A::OpenInOther => "open there",
+        A::AddFavorite => "add fav",
+        A::FocusFavorites => "favorites",
+        A::ToggleSidebar => "sidebar",
+        A::OpenHere => "open",
+        A::OpenFolderThere => "open there",
+        A::PreviewThere => "preview there",
+        A::Confirm => "confirm",
+        A::Cancel => "cancel",
+    }
+}
 
-    let text = if let Some(hint) = hint {
-        hint
-    } else {
-        match app.focus {
-            Focus::Favorites => {
-                " Yazi2D · Favorites: ↑↓/jk move · Enter open · Del remove · Ctrl+B add · §/Shift+Tab/Ctrl+D panels · ? help · q quit"
+/// Display priority of an action in the footer (lower comes first).
+fn footer_rank(action: crate::settings::Action) -> u8 {
+    use crate::settings::Action as A;
+    match action {
+        A::Copy => 0,
+        A::Move => 1,
+        A::Mkdir => 2,
+        A::Rename => 3,
+        A::Delete => 4,
+        A::OpenHere => 5,
+        A::TogglePreview => 6,
+        A::ToggleThumbnails => 7,
+        A::SortMenu => 8,
+        A::ToggleHidden => 9,
+        A::SelectAll => 10,
+        A::BulkRename => 11,
+        A::Refresh => 12,
+        A::OpenInOther | A::OpenFolderThere => 13,
+        A::PreviewThere => 14,
+        A::AddFavorite => 15,
+        A::FocusFavorites => 16,
+        A::ToggleSidebar => 17,
+        A::ColourMenu => 18,
+        A::Settings => 19,
+        A::Help => 20,
+        // `Ctrl+C` is the terminal's interrupt and `Enter`/`Esc` only confirm a
+        // prompt; `hints_for` drops all three before ranking.
+        A::Confirm | A::Cancel | A::Quit => 250,
+    }
+}
+
+/// Chips for the actions bound to exactly `modifiers`.
+///
+/// Built from the live bindings, so a key rebound in the settings menu shows up
+/// here immediately and the footer never advertises something the app does not
+/// do. Modifiers are compared exactly: the default screen shows unmodified keys,
+/// and holding Ctrl replaces it with the Ctrl screen — that is the whole point
+/// of the separate hint screens.
+fn hints_for(app: &App, modifiers: crossterm::event::KeyModifiers) -> Vec<Hint> {
+    use crossterm::event::KeyModifiers as M;
+
+    let mut hints: Vec<(u8, Hint)> = app
+        .settings
+        .bindings()
+        .into_iter()
+        .filter(|(_, spec)| {
+            let wanted = spec.modifiers;
+            match modifiers {
+                M::NONE => wanted.is_empty(),
+                _ => wanted == modifiers,
             }
-            _ if app.leader.is_some() => {
-                " F9 + ←/→ open the cursor folder there · F9 + ↑/↓ thumbnails · Esc cancels"
+        })
+        .filter_map(|(action, spec)| {
+            // `Ctrl+C` is the terminal's own interrupt and `Enter`/`Esc` only
+            // confirm a prompt: none of them is a panel command, so the footer
+            // does not spend a chip on them.
+            if matches!(
+                action,
+                crate::settings::Action::Quit
+                    | crate::settings::Action::Confirm
+                    | crate::settings::Action::Cancel
+            ) {
+                return None;
             }
-            Focus::Panels if app.job.is_some() => {
-                " Yazi2D · operation in progress — navigation stays available"
-            }
-            Focus::Panels => {
-                " Yazi2D · Tab switch · § favs · Ctrl+E settings · Ctrl+Q preview · Ctrl+T thumbs · Alt+F7 find · Shift+←/→ open there · s sort · F5/c copy · F6/m move · F8/d delete · ? help"
-            }
+
+            Some((
+                footer_rank(action),
+                Hint {
+                    key: chip_key(&spec),
+                    label: short_label(action),
+                },
+            ))
+        })
+        .collect();
+
+    // A narrow footer must show the workhorses first, not `F6 move`. The rank
+    // follows a Total Commander user's day: copy, move, create, rename, delete…
+    hints.sort_by_key(|(rank, _)| *rank);
+    hints.dedup_by(|a, b| a.1.key == b.1.key);
+    let mut hints: Vec<Hint> = hints.into_iter().map(|(_, hint)| hint).collect();
+
+    // `Action::Settings` is deliberately absent from `Action::ALL`, because the
+    // settings menu must stay reachable, so its chip is added by hand.
+    if modifiers == M::CONTROL {
+        for spec in app.settings.keys_for(crate::settings::Action::Settings) {
+            hints.push(Hint {
+                key: chip_key(&spec),
+                label: short_label(crate::settings::Action::Settings),
+            });
         }
+    }
+
+    // The `F9` chord and the two-finger tap have no `Action` of their own.
+    if modifiers == M::NONE {
+        if let Some((index, _)) = hints
+            .iter()
+            .enumerate()
+            .find(|(_, hint)| hint.label == "open")
+        {
+            hints.insert(
+                index + 1,
+                Hint {
+                    key: "F9+←→".to_string(),
+                    label: "open there",
+                },
+            );
+        }
+    }
+
+    hints
+}
+
+/// Compact key name for a chip.
+fn chip_key(spec: &KeySpec) -> String {
+    let name = match spec.code {
+        KeyCode::Char(' ') => "Space".to_string(),
+        KeyCode::Char(c) => c.to_uppercase().to_string(),
+        KeyCode::Enter => "Enter".to_string(),
+        KeyCode::Esc => "Esc".to_string(),
+        KeyCode::Tab => "Tab".to_string(),
+        KeyCode::BackTab => "Shift+Tab".to_string(),
+        KeyCode::Backspace => "Bksp".to_string(),
+        KeyCode::Delete => "Del".to_string(),
+        KeyCode::Insert => "Ins".to_string(),
+        KeyCode::Home => "Home".to_string(),
+        KeyCode::End => "End".to_string(),
+        KeyCode::PageUp => "PgUp".to_string(),
+        KeyCode::PageDown => "PgDn".to_string(),
+        KeyCode::Up => "↑".to_string(),
+        KeyCode::Down => "↓".to_string(),
+        KeyCode::Left => "←".to_string(),
+        KeyCode::Right => "→".to_string(),
+        KeyCode::F(n) => format!("F{n}"),
+        other => format!("{other:?}"),
     };
 
-    let text = truncate_right(text, area.width as usize);
-    let style = if hint.is_some() {
-        Style::default()
-            .bg(FOOTER_BG)
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
+    // Modifiers are already the topic of the screen, so they are not repeated
+    // on every chip; only Shift on an arrow (a different gesture) stays.
+    if spec
+        .modifiers
+        .contains(crossterm::event::KeyModifiers::SHIFT)
+        && matches!(spec.code, KeyCode::Left | KeyCode::Right | KeyCode::Tab)
+    {
+        return format!("Shift+{name}");
+    }
+    name
+}
+
+/// Width a chip occupies: key, separator, label, padding.
+fn chip_width(hint: &Hint) -> usize {
+    hint.key.width() + hint.label.width() + 3
+}
+
+/// Draw the footer as a row of chips.
+///
+/// While a modifier is held the row shows only the chords of that modifier, so
+/// pressing Ctrl turns the footer into the Ctrl screen, releasing it restores
+/// the default screen. A chip is a light-orange plate with dark text; the key
+/// itself is bold and the label regular.
+fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    frame.render_widget(
+        ratatui::widgets::Block::default().style(Style::default().bg(FOOTER_BG)),
+        area,
+    );
+
+    let hints = if app.focus == Focus::Favorites {
+        vec![
+            Hint {
+                key: "↑↓".to_string(),
+                label: "move",
+            },
+            Hint {
+                key: "Enter".to_string(),
+                label: "go",
+            },
+            Hint {
+                key: "Del".to_string(),
+                label: "remove",
+            },
+            Hint {
+                key: "Ctrl+B".to_string(),
+                label: "add",
+            },
+            Hint {
+                key: "Esc".to_string(),
+                label: "back",
+            },
+        ]
     } else {
-        Style::default().bg(FOOTER_BG).fg(Color::DarkGray)
+        hints_for(app, app.held_modifiers)
     };
 
-    frame.render_widget(Paragraph::new(text).style(style), area);
+    let width = area.width as usize;
+    let mut spans: Vec<Span> = Vec::new();
+    let mut used = 0usize;
+
+    // A one-column gutter keeps the chips from touching the screen edge.
+    spans.push(Span::styled(" ", Style::default().bg(FOOTER_BG)));
+    used += 1;
+
+    for hint in &hints {
+        let needed = chip_width(hint) + 1;
+        if used + needed > width {
+            // Never draw a half chip: stop at the last complete one.
+            break;
+        }
+        spans.push(Span::styled(
+            format!(" {} ", hint.key),
+            Style::default()
+                .bg(CHIP_BG)
+                .fg(CHIP_KEY)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            format!("{} ", hint.label),
+            Style::default().bg(CHIP_BG).fg(CHIP_TEXT),
+        ));
+        spans.push(Span::styled(" ", Style::default().bg(FOOTER_BG)));
+        used += needed;
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn draw_help(frame: &mut Frame, area: Rect) {
@@ -1745,23 +2064,39 @@ fn entry_extension(entry: &Entry) -> String {
         .unwrap_or_default()
 }
 
+/// Marker shown in front of a selected row, whatever icon mode is active.
+const SELECTED_MARKER: &str = "▣ ";
+
 fn list_item(
     entry: &Entry,
     selected: bool,
     width: usize,
     colors: &crate::colors::Colors,
+    show_icons: bool,
 ) -> ListItem<'static> {
     let group = FileGroup::classify(&entry.path, entry.is_dir);
     let group_color = colors.color(group);
 
-    let (prefix, prefix_style) = if entry.is_parent {
-        ("↑ ", Style::default().fg(Color::DarkGray))
-    } else if selected {
-        ("▣ ", Style::default().fg(Color::LightYellow))
+    // The icon column mirrors Yazi: a per-type Nerd Font glyph in the type's
+    // own colour. A selected row keeps its marker so multi-select stays
+    // readable, and `--no-icons` falls back to the ASCII arrows.
+    let (prefix, prefix_style) = if selected {
+        (
+            SELECTED_MARKER.to_string(),
+            Style::default().fg(Color::LightYellow),
+        )
+    } else if show_icons {
+        let icon = crate::icons::resolve(&entry.name, &entry.path, entry.is_dir, entry.is_parent);
+        (
+            format!("{} ", icon.glyph),
+            Style::default().fg(crate::icons::color(icon.color)),
+        )
+    } else if entry.is_parent {
+        ("↑ ".to_string(), Style::default().fg(Color::DarkGray))
     } else if entry.is_dir {
-        ("▸ ", Style::default().fg(group_color))
+        ("▸ ".to_string(), Style::default().fg(group_color))
     } else {
-        ("  ", Style::default())
+        ("  ".to_string(), Style::default())
     };
 
     let name = if entry.is_parent {
@@ -1798,7 +2133,7 @@ fn list_item(
         detail: Style::default().fg(Color::DarkGray),
     };
     ListItem::new(build_row(
-        width, prefix, &name, &extension, &size, &date, styles,
+        width, &prefix, &name, &extension, &size, &date, styles,
     ))
 }
 
@@ -2221,5 +2556,72 @@ mod tests {
             text.contains("▀"),
             "image preview was not drawn with half blocks"
         );
+    }
+
+    /// Flatten a rendered buffer into lines, so a test can look at the footer.
+    /// An app whose settings are the built-in defaults.
+    ///
+    /// `App::new` loads the user's real `settings.toml`; a footer test must not
+    /// depend on whether the developer rebound a key on their machine.
+    fn default_app(dir: &Path) -> App {
+        let mut app = App::new(vec![dir.to_path_buf(), dir.to_path_buf()]);
+        app.settings = crate::settings::Settings::defaults();
+        app
+    }
+
+    fn footer_line(app: &mut App, width: u16, height: u16) -> String {
+        let text = render(app, width, height);
+        let row = (height as usize - 1) * width as usize;
+        text.chars().skip(row).take(width as usize).collect()
+    }
+
+    #[test]
+    fn the_footer_shows_chips_with_the_live_bindings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = default_app(tmp.path());
+
+        // Wide enough for every default chip; the real screen truncates instead.
+        let line = footer_line(&mut app, 240, 30);
+        // Default screen: unmodified keys only, in chips.
+        assert!(line.contains("F5"), "copy chip missing: {line:?}");
+        assert!(line.contains("copy"), "copy label missing: {line:?}");
+        assert!(line.contains("F7"), "mkdir chip missing: {line:?}");
+        assert!(line.contains("hidden"), "hidden chip missing: {line:?}");
+        // Ctrl-only chords must not leak into the default screen.
+        assert!(!line.contains("Ctrl"), "default screen shows Ctrl chords");
+    }
+
+    #[test]
+    fn holding_ctrl_switches_to_the_ctrl_screen_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = default_app(tmp.path());
+
+        app.held_modifiers = crossterm::event::KeyModifiers::CONTROL;
+        let line = footer_line(&mut app, 240, 30);
+        assert!(line.contains("favorites"), "Ctrl+B chip missing: {line:?}");
+        assert!(line.contains("settings"), "Ctrl+E chip missing: {line:?}");
+        assert!(line.contains("preview"), "Ctrl+Q chip missing: {line:?}");
+        // Function keys without Ctrl belong to the default screen.
+        assert!(!line.contains("F5"), "Ctrl screen shows F5: {line:?}");
+
+        app.held_modifiers = crossterm::event::KeyModifiers::ALT;
+        let line = footer_line(&mut app, 240, 30);
+        assert!(line.contains("preview there"), "Alt screen: {line:?}");
+        assert!(
+            !line.contains("favorites"),
+            "Alt screen shows Ctrl keys: {line:?}"
+        );
+    }
+
+    #[test]
+    fn a_rebound_key_changes_the_chip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = default_app(tmp.path());
+        app.settings
+            .rebind(crate::settings::Action::Copy, KeySpec::f(9));
+
+        let line = footer_line(&mut app, 160, 30);
+        assert!(line.contains("F9"), "rebound key missing: {line:?}");
+        assert!(!line.contains("F5"), "old key still shown: {line:?}");
     }
 }

@@ -366,22 +366,56 @@ fn parse_code(text: &str) -> Option<KeyCode> {
 pub struct Settings {
     /// Reverse the two-finger vertical direction.
     pub invert_scroll: bool,
+    /// Draw Nerd Font glyphs in the listing. Off for terminals without a
+    /// patched font, where the glyphs would render as boxes.
+    pub icons: bool,
+    /// Optional path of a Nerd Font `.ttf` used to rasterise thumbnail-grid
+    /// icons. Empty means "use the built-in block art".
+    pub icon_font: String,
+    /// Largest file (in bytes) decoded for a thumbnail; bigger ones keep the
+    /// block-art icon so scrolling stays fast.
+    pub max_thumb_bytes: u64,
     /// Per-action overrides; an empty map means "use the defaults".
     pub bindings: BTreeMap<String, KeySpec>,
     file: PathBuf,
 }
 
 impl Settings {
+    /// Built-in defaults, ignoring the user's file.
+    ///
+    /// Used by tests so a developer's `settings.toml` cannot change what they
+    /// assert.
+    #[cfg(test)]
+    pub fn defaults() -> Self {
+        Self {
+            invert_scroll: true,
+            icons: true,
+            icon_font: String::new(),
+            max_thumb_bytes: 4 * 1024 * 1024,
+            bindings: BTreeMap::new(),
+            file: settings_file(),
+        }
+    }
+
     /// Load settings, falling back to defaults when the file is missing.
     pub fn load() -> Self {
         let file = settings_file();
         let text = fs::read_to_string(&file).unwrap_or_default();
         let mut invert_scroll = true;
+        let mut icons = true;
+        let mut icon_font = String::new();
+        let mut max_thumb_bytes = 4 * 1024 * 1024;
         let mut bindings = BTreeMap::new();
 
         for (key, value) in parse_toml(&text) {
             if key == "invert_scroll" {
                 invert_scroll = matches!(value.as_str(), "true" | "1" | "on" | "yes");
+            } else if key == "icons" {
+                icons = matches!(value.as_str(), "true" | "1" | "on" | "yes");
+            } else if key == "icon_font" {
+                icon_font = value.to_string();
+            } else if key == "max_thumb_bytes" {
+                max_thumb_bytes = value.parse().unwrap_or(max_thumb_bytes);
             } else if let Some(action) = key.strip_prefix("key.") {
                 if let Some(spec) = KeySpec::parse(&value) {
                     bindings.insert(action.to_string(), spec);
@@ -391,6 +425,9 @@ impl Settings {
 
         Self {
             invert_scroll,
+            icons,
+            icon_font,
+            max_thumb_bytes,
             bindings,
             file,
         }
@@ -401,7 +438,10 @@ impl Settings {
         if let Some(parent) = self.file.parent() {
             fs::create_dir_all(parent)?;
         }
-        let mut text = format!("invert_scroll = {}\n", self.invert_scroll);
+        let mut text = format!(
+            "invert_scroll = {}\nicons = {}\nicon_font = \"{}\"\nmax_thumb_bytes = {}\n",
+            self.invert_scroll, self.icons, self.icon_font, self.max_thumb_bytes
+        );
         for (action, spec) in &self.bindings {
             text.push_str(&format!("key.{action} = \"{}\"\n", spec.label()));
         }
@@ -435,6 +475,21 @@ impl Settings {
 
     pub fn is_custom(&self, action: Action) -> bool {
         self.bindings.contains_key(action.id())
+    }
+
+    /// Every binding actually in effect: `(action, key)` pairs.
+    ///
+    /// Built from `keys_for`, so a rebound action reports the new key and the
+    /// footer can never promise a chord the app does not handle.
+    pub fn bindings(&self) -> Vec<(Action, KeySpec)> {
+        Action::ALL
+            .into_iter()
+            .flat_map(|action| {
+                self.keys_for(action)
+                    .into_iter()
+                    .map(move |spec| (action, spec))
+            })
+            .collect()
     }
 
     /// Find the action bound to a key (used by tests and future key hints).
@@ -543,6 +598,9 @@ mod tests {
     fn overrides_replace_the_default_keys() {
         let mut settings = Settings {
             invert_scroll: true,
+            icons: true,
+            icon_font: String::new(),
+            max_thumb_bytes: 4 * 1024 * 1024,
             bindings: BTreeMap::new(),
             file: PathBuf::from("/dev/null"),
         };
@@ -564,6 +622,9 @@ mod tests {
     fn finds_the_action_for_a_key() {
         let settings = Settings {
             invert_scroll: true,
+            icons: true,
+            icon_font: String::new(),
+            max_thumb_bytes: 4 * 1024 * 1024,
             bindings: BTreeMap::new(),
             file: PathBuf::from("/dev/null"),
         };

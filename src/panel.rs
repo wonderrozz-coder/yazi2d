@@ -517,12 +517,28 @@ impl Panel {
         changed
     }
 
+    /// Move the cursor by `delta` rows without wrapping (keys, page jumps).
     pub fn move_cursor(&mut self, delta: i32) {
         if self.entries.is_empty() {
             return;
         }
         let last = self.entries.len() as i32 - 1;
         self.cursor = (self.cursor as i32 + delta).clamp(0, last) as usize;
+        self.ensure_visible();
+    }
+
+    /// Move the cursor with Total Commander semantics.
+    ///
+    /// Used by the arrow keys: crossing the top or the bottom jumps to the
+    /// opposite end and keeps moving in the same direction, so a long list can
+    /// be cycled through without hitting a dead stop. Scrolling with the wheel
+    /// and page jumps stay clamped — they are aimed at a place, not a
+    /// direction.
+    pub fn move_cursor_wrapping(&mut self, delta: i32) {
+        if self.entries.is_empty() {
+            return;
+        }
+        self.cursor = wrap_index(self.cursor, delta, self.entries.len());
         self.ensure_visible();
     }
 
@@ -533,6 +549,15 @@ impl Panel {
         }
         let last = self.entries.len() as i32 - 1;
         self.cursor = (self.cursor as i32 + delta).clamp(0, last) as usize;
+        self.ensure_grid_visible();
+    }
+
+    /// Grid movement with the same wrap-around as `move_cursor_wrapping`.
+    pub fn move_grid_wrapping(&mut self, delta: i32) {
+        if self.entries.is_empty() {
+            return;
+        }
+        self.cursor = wrap_index(self.cursor, delta, self.entries.len());
         self.ensure_grid_visible();
     }
 
@@ -657,6 +682,25 @@ impl Panel {
             PanelMode::Thumbnails => self.move_grid(delta),
             _ => self.move_cursor(delta),
         }
+    }
+}
+
+/// Move `cursor` by `delta`, wrapping around both ends.
+///
+/// Total Commander (and Yazi) never stop at a border: pressing down on the
+/// last row jumps to the first one and keeps going, which is what makes a long
+/// list feel continuous. Wrapping only happens for ordinary single-row moves;
+/// page jumps still clamp so they cannot land in a surprise place.
+fn wrap_index(cursor: usize, delta: i32, len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let len_i = len as i32;
+    let next = (cursor as i32 + delta % len_i) % len_i;
+    if next < 0 {
+        (next + len_i) as usize
+    } else {
+        next as usize
     }
 }
 
@@ -902,6 +946,67 @@ mod tests {
         panel.move_grid(-4);
         assert_eq!(panel.cursor, 1);
         assert_eq!(panel.offset, 0);
+    }
+
+    #[test]
+    fn arrow_movement_wraps_at_both_ends() {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            fs::write(tmp.path().join(name), "x").unwrap();
+        }
+
+        let mut panel = Panel::new(tmp.path().to_path_buf());
+        panel.reload(false).unwrap();
+        let last = panel.entries.len() - 1;
+
+        // Going down from the last row lands on the first one.
+        panel.cursor = last;
+        panel.move_cursor_wrapping(1);
+        assert_eq!(panel.cursor, 0, "down at the bottom must wrap to the top");
+
+        // Going up from the first row lands on the last one.
+        panel.move_cursor_wrapping(-1);
+        assert_eq!(panel.cursor, last, "up at the top must wrap to the bottom");
+
+        // A longer jump wraps more than once.
+        panel.cursor = 1;
+        panel.move_cursor_wrapping(-(panel.entries.len() as i32 + 1));
+        assert_eq!(panel.cursor, 0);
+    }
+
+    #[test]
+    fn page_jumps_still_clamp_instead_of_wrapping() {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in ["a.txt", "b.txt"] {
+            fs::write(tmp.path().join(name), "x").unwrap();
+        }
+
+        let mut panel = Panel::new(tmp.path().to_path_buf());
+        panel.reload(false).unwrap();
+        let last = panel.entries.len() - 1;
+
+        panel.cursor = last;
+        panel.move_cursor(1);
+        assert_eq!(panel.cursor, last, "a plain move must not wrap");
+    }
+
+    #[test]
+    fn the_thumbnail_grid_wraps_too() {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in ["a", "b", "c", "d"] {
+            fs::create_dir(tmp.path().join(name)).unwrap();
+        }
+
+        let mut panel = Panel::new(tmp.path().to_path_buf());
+        panel.reload(false).unwrap();
+        panel.set_mode(PanelMode::Thumbnails);
+        panel.grid_cols = 2;
+        panel.grid_rows = 2;
+
+        let last = panel.entries.len() - 1;
+        panel.cursor = last;
+        panel.move_grid_wrapping(2);
+        assert!(panel.cursor < last, "grid movement must wrap as well");
     }
 
     #[test]

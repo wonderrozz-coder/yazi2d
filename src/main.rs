@@ -2,6 +2,7 @@ mod app;
 mod clipboard;
 mod colors;
 mod favorites;
+mod graphics;
 mod icons;
 mod keys;
 mod logging;
@@ -88,6 +89,12 @@ fn main() -> io::Result<()> {
         default_hook(info);
     }));
 
+    // Ask the terminal which graphics protocol it speaks (kitty, iTerm2,
+    // sixel). The probe is driven from the event loop rather than from a
+    // blocking call here, because `ratatui-image`'s own query leaves a thread
+    // reading stdin and swallows every keystroke when the terminal is silent.
+    graphics::probe::start();
+
     let mut app = App::new(paths);
     if logging::enabled() {
         logging::info(format!(
@@ -121,6 +128,9 @@ fn run(
 ) -> io::Result<()> {
     loop {
         app.tick();
+        // A held arrow accelerates: while waiting for the next key event the app
+        // moves the cursor itself, faster than the terminal repeats the key.
+        app.tick_key_repeat();
 
         if app.dirty {
             terminal.draw(|frame| ui::draw(frame, app))?;
@@ -131,7 +141,15 @@ fn run(
             return Ok(());
         }
 
-        if event::poll(Duration::from_millis(80))? {
+        // Short timeout while an arrow is held, so the automatic repeat keeps a
+        // steady pace; otherwise a long one keeps idle CPU near zero.
+        let timeout = if app.held_arrow.is_some() {
+            Duration::from_millis(10)
+        } else {
+            Duration::from_millis(80)
+        };
+
+        if event::poll(timeout)? {
             match event::read()? {
                 Event::Key(key) => match key.kind {
                     // `Repeat` is what a held key sends once keyboard
