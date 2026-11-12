@@ -1205,7 +1205,8 @@ fn short_label(action: crate::settings::Action) -> &'static str {
         A::Move => "move",
         A::Mkdir => "new folder",
         A::Rename => "rename",
-        A::Delete => "delete",
+        A::Delete => "trash",
+        A::DeletePermanent => "erase",
         A::SelectAll => "select all",
         A::BulkRename => "bulk rename",
         A::ToggleHidden => "hidden",
@@ -1240,6 +1241,7 @@ fn footer_rank(action: crate::settings::Action) -> u8 {
         A::Mkdir => 2,
         A::Rename => 3,
         A::Delete => 4,
+        A::DeletePermanent => 30,
         A::OpenHere => 5,
         A::TogglePreview => 6,
         A::ToggleThumbnails => 7,
@@ -1539,7 +1541,12 @@ fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
         help_line(&format!("  {}", live(Action::Rename)), "rename", key),
         help_line(
             &format!("  {}", live(Action::Delete)),
-            "delete (Enter or y confirms)",
+            "delete — moved to the trash (Enter/y confirms)",
+            key,
+        ),
+        help_line(
+            &format!("  {}", live(Action::DeletePermanent)),
+            "erase permanently, no trash",
             key,
         ),
         help_line(
@@ -2106,7 +2113,12 @@ fn draw_prompt(frame: &mut Frame, area: Rect, prompt: &Prompt) {
         Prompt::Mkdir { .. } => (" New folder ", 62, 3),
         Prompt::Rename { .. } => (" Rename ", 62, 3),
         Prompt::BulkRename { .. } => (" Bulk rename ", 72, 5),
-        Prompt::Delete { .. } => (" Confirm delete ", 64, 5),
+        Prompt::Delete {
+            permanent: false, ..
+        } => (" Move to trash ", 68, 6),
+        Prompt::Delete {
+            permanent: true, ..
+        } => (" Delete permanently ", 68, 6),
         Prompt::Transfer { kind, .. } => match kind {
             crate::transfer::JobKind::Copy => (" Confirm copy ", 68, 6),
             _ => (" Confirm move ", 68, 6),
@@ -2188,11 +2200,18 @@ fn draw_prompt(frame: &mut Frame, area: Rect, prompt: &Prompt) {
                 inner,
             );
         }
-        Prompt::Delete { sources } => {
-            let text = format!(
-                "Delete {} item(s)?\n\nPress Enter or y to confirm, n/Esc to cancel.",
-                sources.len()
-            );
+        Prompt::Delete { sources, permanent } => {
+            let text = if *permanent {
+                format!(
+                    "Delete {} item(s) PERMANENTLY?\n\nThis cannot be undone.\n\nEnter or y confirms, n/Esc cancels.",
+                    sources.len()
+                )
+            } else {
+                format!(
+                    "Move {} item(s) to the trash?\n\nThey can be restored from the system trash.\n\nEnter or y confirms, n/Esc cancels.",
+                    sources.len()
+                )
+            };
             frame.render_widget(
                 Paragraph::new(text)
                     .style(Style::default().fg(Color::Gray))
@@ -2894,12 +2913,17 @@ mod tests {
             1,
             "copy appears more than once: {line:?}"
         );
+        // The chip label is "trash" now, so "delete" must not appear at all.
         assert_eq!(
             line.matches("delete").count(),
-            1,
-            "delete appears more than once: {line:?}"
+            0,
+            "the old delete wording is still shown: {line:?}"
         );
         assert!(line.contains("F8/Del"), "delete chip merged: {line:?}");
+        assert!(
+            line.contains("trash"),
+            "the delete chip must say it goes to the trash: {line:?}"
+        );
     }
 
     #[test]
@@ -2913,5 +2937,26 @@ mod tests {
         // The F9 Up/Down chord was never in the settings menu and is gone.
         assert!(!text.contains("F9 + ↑"), "stale chord still listed: {text}");
         assert!(!text.contains("Cmd+"), "alias that never worked is listed");
+    }
+
+    #[test]
+    fn the_settings_menu_lists_both_slots_for_every_action() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = default_app(tmp.path());
+        app.settings_menu = true;
+        app.settings_cursor = crate::settings::Action::menu_actions()
+            .iter()
+            .position(|action| *action == Action::OpenFolderThere)
+            .unwrap();
+
+        let text = render(&mut app, 120, 50);
+        assert!(text.contains("Open folder there"), "action row missing");
+        assert!(
+            text.contains("shift+right"),
+            "slot 1 of Open folder there must be visible: {text}"
+        );
+        assert!(text.contains("shift+left"), "slot 2 must be visible too");
+        // Every action row shows two slots, so the header labels them.
+        assert!(text.contains("slot 1") || text.contains("slot1") || text.contains("slot"));
     }
 }

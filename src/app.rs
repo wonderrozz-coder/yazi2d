@@ -40,6 +40,8 @@ pub enum Prompt {
     },
     Delete {
         sources: Vec<PathBuf>,
+        /// `false` for the trash (the default), `true` for a hard delete.
+        permanent: bool,
     },
     BulkRename {
         buffer: String,
@@ -148,6 +150,7 @@ pub enum MenuItem {
     ClearSelection,
     Rename,
     Delete,
+    DeletePermanent,
     Mkdir,
     AddFavorite,
     Thumbnails,
@@ -165,7 +168,8 @@ impl MenuItem {
             MenuItem::CopySelection => "Copy selected paths",
             MenuItem::ClearSelection => "Clear selection",
             MenuItem::Rename => "Rename",
-            MenuItem::Delete => "Delete",
+            MenuItem::Delete => "Delete (to the trash)",
+            MenuItem::DeletePermanent => "Delete permanently",
             MenuItem::Mkdir => "New folder",
             MenuItem::AddFavorite => "Add folder to favorites",
             MenuItem::Thumbnails => "Thumbnails on / off",
@@ -423,7 +427,14 @@ impl App {
             changed = true;
 
             if job.errors.is_empty() {
-                self.status = format!("{} {} item(s).", job.kind.done_verb(), job.done);
+                self.status = match job.kind {
+                    JobKind::Delete => format!(
+                        "{} {} item(s) — restore from the system trash",
+                        job.kind.done_verb(),
+                        job.done
+                    ),
+                    _ => format!("{} {} item(s).", job.kind.done_verb(), job.done),
+                };
             } else {
                 self.status = format!(
                     "{} with {} error(s): {}",
@@ -822,6 +833,16 @@ impl App {
             return;
         }
 
+        // The favorites sidebar has its own key map: focus decides what a key
+        // means, so `Del` removes a bookmark there and a file in the panels.
+        // Dispatch must therefore happen *after* this branch, never before it —
+        // a global `Del` was exactly what deleted a real folder while the
+        // cursor was in the sidebar.
+        if self.focus == Focus::Favorites {
+            self.handle_favorites_key(key);
+            return;
+        }
+
         // Everything that is a rebindable shortcut is dispatched from the single
         // resolved list. Nothing below may hard-code one of those keys again:
         // that is exactly how `q` kept quitting after it was rebound.
@@ -830,10 +851,7 @@ impl App {
             return;
         }
 
-        match self.focus {
-            Focus::Panels => self.handle_panel_key(key),
-            Focus::Favorites => self.handle_favorites_key(key),
-        }
+        self.handle_panel_key(key);
     }
 
     /// Move the active panel's cursor by `delta` in the current mode.
@@ -1371,6 +1389,7 @@ impl App {
                 if !entry.is_parent {
                     items.push(MenuItem::Rename);
                     items.push(MenuItem::Delete);
+                    items.push(MenuItem::DeletePermanent);
                 }
             }
             None => {
@@ -1508,6 +1527,7 @@ impl App {
             MenuItem::CopySelection => self.copy_selection_paths(),
             MenuItem::Rename => self.begin_rename(),
             MenuItem::Delete => self.begin_delete(),
+            MenuItem::DeletePermanent => self.begin_delete_kind(true),
             MenuItem::Mkdir => self.begin_mkdir(),
             MenuItem::AddFavorite => self.add_favorite(),
             MenuItem::Thumbnails => self.toggle_thumbnails_in(panel),
@@ -1690,6 +1710,7 @@ impl App {
             Action::Mkdir => self.begin_mkdir(),
             Action::Rename => self.begin_rename(),
             Action::Delete => self.begin_delete(),
+            Action::DeletePermanent => self.begin_delete_kind(true),
             Action::SelectAll => {
                 let count = self.active_mut().select_all();
                 self.status = format!("Selected {count} item(s)");
@@ -1956,7 +1977,7 @@ impl App {
         if matches!(self.prompt, Some(Prompt::Delete { .. })) {
             match key.code {
                 KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    if let Some(Prompt::Delete { sources }) = self.prompt.take() {
+                    if let Some(Prompt::Delete { sources, permanent }) = self.prompt.take() {
                         let count = sources.len();
                         let names: Vec<String> = sources
                             .iter()
@@ -1972,8 +1993,17 @@ impl App {
                             .position(|entry| sources.iter().any(|path| path == &entry.path))
                             .unwrap_or(self.active().cursor);
                         self.pending_cursor_after = Some((names, previous));
-                        self.job = Some(transfer::spawn(JobKind::Delete, sources, None));
-                        self.status = format!("Deleting {count} item(s)...");
+                        let kind = if permanent {
+                            JobKind::Shred
+                        } else {
+                            JobKind::Delete
+                        };
+                        self.job = Some(transfer::spawn(kind, sources, None));
+                        self.status = if permanent {
+                            format!("Deleting {count} item(s) permanently...")
+                        } else {
+                            format!("Moving {count} item(s) to the trash...")
+                        };
                     }
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
@@ -2151,7 +2181,16 @@ impl App {
         });
     }
 
+    /// Delete: move the selection to the system trash.
+    ///
+    /// A permanent erase needs `Shift+Del` (or the "Delete permanently" menu
+    /// entry) and says so in the prompt. The trash is what makes a wrong key
+    /// press recoverable, which a single-key delete in a file manager is not.
     fn begin_delete(&mut self) {
+        self.begin_delete_kind(false);
+    }
+
+    fn begin_delete_kind(&mut self, permanent: bool) {
         if self.blocked_by_preview() || self.blocked_by_loading() {
             return;
         }
@@ -2164,7 +2203,7 @@ impl App {
             self.status = "Nothing selected".to_string();
             return;
         }
-        self.prompt = Some(Prompt::Delete { sources });
+        self.prompt = Some(Prompt::Delete { sources, permanent });
     }
 
     /// Ctrl+G: rename many files at once with pattern tokens.
@@ -4262,5 +4301,95 @@ mod tests {
 
         assert!(app.panels[0].selected.contains(&left.join("a.txt")));
         assert!(app.folder_size_pending.is_empty());
+    }
+
+    #[test]
+    fn favourites_keys_are_not_hijacked_by_file_actions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let left = tmp.path().join("left");
+        let bookmarked = tmp.path().join("bookmarked");
+        fs::create_dir_all(&left).unwrap();
+        fs::create_dir_all(&bookmarked).unwrap();
+        fs::write(left.join("a.txt"), "x").unwrap();
+
+        let mut app = app_for(&left, &left);
+        app.favorites.paths.clear();
+        app.favorites.paths.push(bookmarked.clone());
+        app.fav_cursor = 0;
+        app.focus = Focus::Favorites;
+        app.panels[0].select_name("a.txt");
+
+        // Delete/Del must remove the bookmark, never the file under the panel
+        // cursor. This is the accident that deleted a real folder.
+        press(&mut app, KeyCode::Delete, KeyModifiers::NONE);
+        assert!(
+            app.prompt.is_none(),
+            "a delete prompt is not a bookmark action"
+        );
+        assert_eq!(app.favorites.paths.len(), 0, "bookmark was not removed");
+        assert!(
+            left.join("a.txt").exists(),
+            "the panel file must be untouched"
+        );
+    }
+
+    #[test]
+    fn enter_in_favourites_opens_the_bookmark_not_the_panel_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let left = tmp.path().join("left");
+        let bookmarked = tmp.path().join("bookmarked");
+        fs::create_dir_all(&left).unwrap();
+        fs::create_dir_all(&bookmarked).unwrap();
+
+        let mut app = app_for(&left, &left);
+        app.favorites.paths.clear();
+        app.favorites.paths.push(bookmarked.clone());
+        app.fav_cursor = 0;
+        app.focus = Focus::Favorites;
+
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        wait_for_loads(&mut app);
+
+        assert_eq!(app.panels[0].cwd, bookmarked);
+        assert_eq!(app.focus, Focus::Panels);
+    }
+
+    #[test]
+    fn arrows_move_inside_favourites() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+        app.favorites.paths.clear();
+        for name in ["one", "two", "three"] {
+            let path = tmp.path().join(name);
+            fs::create_dir_all(&path).unwrap();
+            app.favorites.paths.push(path);
+        }
+        app.fav_cursor = 0;
+        app.focus = Focus::Favorites;
+
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(app.fav_cursor, 1);
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(app.fav_cursor, 2);
+        press(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(app.fav_cursor, 1);
+    }
+
+    #[test]
+    fn a_shift_arrow_binding_never_fires_on_a_plain_arrow() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = app_for(tmp.path(), tmp.path());
+        // Shift+Right belongs to "open folder there" by default.
+        let plain = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(
+            app.settings.action_for(plain),
+            None,
+            "a plain Right must not resolve to the Shift+Right action"
+        );
+        assert_eq!(
+            app.settings
+                .action_for(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT)),
+            Some(Action::OpenFolderThere)
+        );
     }
 }

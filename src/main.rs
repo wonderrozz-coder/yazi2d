@@ -11,6 +11,7 @@ mod preview;
 mod search;
 mod settings;
 mod transfer;
+mod trash;
 mod ui;
 
 use std::io::{self, stdout};

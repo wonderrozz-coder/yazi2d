@@ -21,6 +21,11 @@ import time
 
 BIN = sys.argv[1] if len(sys.argv) > 1 else "target/debug/yazi2d"
 
+# Every run gets its own trash, so the delete step can assert where the entry went
+# without touching the developer's real one.
+TRASH = tempfile.mkdtemp(prefix="yazi2d-trash-")
+os.environ["YAZI2D_TRASH_DIR"] = TRASH
+
 # Terminal escape sequences split words in the raw stream, so text assertions
 # run against a reconstructed screen instead.
 ANSI = re.compile(rb"\x1b\[[0-9;?]*[A-Za-z]")
@@ -230,6 +235,13 @@ try:
     while time.time() < deadline and os.path.isdir(os.path.join(left, "testdir")):
         drain(0.1)
     assert not os.path.isdir(os.path.join(left, "testdir")), "delete failed"
+    # The delete must go to the trash, not straight to /dev/null: that is the
+    # whole point of the safety change, and it is easy to regress.
+    trash_files = os.path.join(TRASH, "files")
+    assert os.path.isdir(trash_files), "no trash directory was created"
+    assert "testdir" in os.listdir(trash_files), (
+        f"testdir did not reach the trash: {os.listdir(trash_files)}"
+    )
     drain(0.6)
 
     # Ctrl+O opens the cursor folder in the right panel.

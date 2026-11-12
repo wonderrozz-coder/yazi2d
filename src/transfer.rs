@@ -10,7 +10,10 @@ use std::thread;
 pub enum JobKind {
     Copy,
     Move,
+    /// Move to the system trash; the safe default for the delete key.
     Delete,
+    /// Erase permanently. Never reachable from a single key press.
+    Shred,
 }
 
 impl JobKind {
@@ -19,7 +22,8 @@ impl JobKind {
         match self {
             JobKind::Copy => "Copying",
             JobKind::Move => "Moving",
-            JobKind::Delete => "Deleting",
+            JobKind::Delete => "Trashing",
+            JobKind::Shred => "Deleting",
         }
     }
 
@@ -28,7 +32,8 @@ impl JobKind {
         match self {
             JobKind::Copy => "Copied",
             JobKind::Move => "Moved",
-            JobKind::Delete => "Deleted",
+            JobKind::Delete => "Moved to trash",
+            JobKind::Shred => "Deleted",
         }
     }
 }
@@ -65,7 +70,7 @@ pub fn spawn(kind: JobKind, sources: Vec<PathBuf>, dest: Option<PathBuf>) -> Job
 
     thread::spawn(move || {
         let (done, errors) = match kind {
-            JobKind::Delete => run_delete(&sources, &tx),
+            JobKind::Delete | JobKind::Shred => run_delete(&sources, &tx, kind),
             JobKind::Copy | JobKind::Move => run_transfer(kind, &sources, &dest, &tx),
         };
         let _ = tx.send(JobMsg::Done { done, errors });
@@ -198,7 +203,7 @@ fn run_transfer(
     (done, errors)
 }
 
-fn run_delete(sources: &[PathBuf], tx: &Sender<JobMsg>) -> (usize, Vec<String>) {
+fn run_delete(sources: &[PathBuf], tx: &Sender<JobMsg>, kind: JobKind) -> (usize, Vec<String>) {
     let mut errors = Vec::new();
     let mut groups: Vec<(PathBuf, bool, usize)> = Vec::new();
 
@@ -231,13 +236,25 @@ fn run_delete(sources: &[PathBuf], tx: &Sender<JobMsg>) -> (usize, Vec<String>) 
             current: source.display().to_string(),
         });
 
-        let removed = if is_real_dir {
-            fs::remove_dir_all(&source)
-        } else {
-            fs::remove_file(&source)
+        // Trash first: it is reversible, so a wrong key press costs nothing.
+        // A hard delete happens only when the platform trash refuses (a full
+        // trash, a read-only volume), and then only for a `Shred` job.
+        let outcome = match crate::trash::trash(&source) {
+            Ok(_) => Ok(()),
+            Err(trash_error) => {
+                if matches!(kind, JobKind::Shred) {
+                    if is_real_dir {
+                        fs::remove_dir_all(&source)
+                    } else {
+                        fs::remove_file(&source)
+                    }
+                } else {
+                    Err(io::Error::other(trash_error))
+                }
+            }
         };
 
-        match removed {
+        match outcome {
             Ok(()) => done += units,
             Err(e) => push_error(&mut errors, format!("{}: {}", source.display(), e)),
         }

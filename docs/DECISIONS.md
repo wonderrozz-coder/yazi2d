@@ -1016,3 +1016,57 @@ chip per action with all of its keys (`F5/C copy`), and the help screen is
 generated from the same list, so it cannot drift again. The cost is that a key
 which is currently assigned nowhere does nothing at all — there is no hidden
 fallback, which is exactly the point.
+
+## ADR-046 — Delete moves to the trash; erasing needs Shift
+
+**Status:** accepted (2026-11-12, `0.6.4`)
+
+**Context:** `Del` called `fs::remove_dir_all` directly. In this project that was
+not hypothetical: browsing the favorites sidebar and pressing `Del` to remove a
+bookmark deleted a real folder instead, with no way back — the system trash was
+never involved and the folder was not in it either.
+
+**Decision:** Two separate jobs:
+
+* `JobKind::Delete` → `src/trash.rs`, which implements the
+  [freedesktop.org trash spec](https://specifications.freedesktop.org/trash-spec/latest/)
+  on Linux (`$XDG_DATA_HOME/Trash/files` + an `info/*.trashinfo` recording the
+  original path and the deletion date; `$topdir/.Trash/$uid` for files on another
+  mount, so the move stays a rename), `~/.Trash` on macOS, and
+  `Shell.Application`'s recycle-bin API on Windows. This is what `Del` and `F8`
+  do, and what the confirmation prompt says.
+* `JobKind::Shred` → a hard delete, reachable only from `Shift+Del` or the
+  "Delete permanently" context-menu entry, with a prompt that says it cannot be
+  undone.
+
+If the platform trash refuses (a read-only volume, a full trash), the job reports
+an error instead of silently erasing: losing data must never be the fallback.
+
+**Consequences:** A wrong key press now costs nothing — the entry is in the
+desktop's trash UI with its original path. The cost is one extra syscall per
+delete (rename instead of unlink) and a `.trashinfo` file per trashed entry, which
+is the price the spec asks for.
+
+## ADR-047 — Focus owns the key map
+
+**Status:** accepted (2026-11-12, `0.6.4`)
+
+**Context:** After moving dispatch into one resolved list (ADR-045), `Del` was
+looked up *before* the focus branch, so with the favorites sidebar focused it
+still started a file operation on the panel cursor — the exact accident that
+deleted the folder. `Enter` and the arrows were swallowed the same way, which
+broke navigating favorites entirely.
+
+**Decision:** `App::on_key` resolves the focus first: `Focus::Favorites` goes to
+`handle_favorites_key` and nothing else sees the key. Global dispatch runs only
+for `Focus::Panels`. The favorites map now uses the same actions
+(`FocusFavorites`, `AddFavorite`, `ToggleSidebar`, `OpenHere`, `Delete`, `Quit`,
+`Help`) plus unbound arrows, so the same key keeps meaning "remove a bookmark"
+there and "move to the trash" in the panels.
+
+`Esc` deliberately does nothing in the sidebar: a stray Esc must not hide the
+panel while browsing, which is why the panel is left with its own key.
+
+**Consequences:** The meaning of every key now depends on where the cursor is,
+which is what a dual-pane manager with a sidebar should do. A test locks the
+delete case in place (`favourites_keys_are_not_hijacked_by_file_actions`).

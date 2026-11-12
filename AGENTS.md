@@ -20,7 +20,7 @@ filesystems, a GUI, sixel/Kitty image protocols.
 
 ## Current status (2026-11-11)
 
-Version `0.6.3` — MVP + quick view, thumbnails, background loading, logging,
+Version `0.6.4` — MVP + quick view, thumbnails, background loading, logging,
 sorting, type colours, bulk rename, trackpad gestures, a live footer, a
 polished thumbnail grid, full mouse support (click, double click, path-bar
 copy, right-click menu), recursive search, Windows builds, native image
@@ -101,6 +101,7 @@ src/settings.rs            two editable key slots per action, duplicate resoluti
                            trackpad/icon settings, persisted TOML
 src/logging.rs             append-only file log (timings, slow loads, panics)
 src/transfer.rs            background copy/move/delete engine + progress channel
+src/trash.rs               system trash (freedesktop, macOS ~/.Trash, Windows recycle bin)
 src/favorites.rs           favorites model and TOML persistence
 src/ui.rs                  ratatui rendering, layout, overlays, preview/thumbnails, UI tests
 packaging/render-icon.py   draws packaging/icon-source.png (stdlib only)

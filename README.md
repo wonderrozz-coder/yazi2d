@@ -83,6 +83,10 @@ Favorites sidebar with a folder tree:
 - **Layout-independent shortcuts**: they work with the Russian keyboard layout.
 - **Background directory loading** — no freezes on slow or cloud folders.
 - **Diagnostics log** with timings and `WARN` lines for slow paths.
+- **Delete goes to the trash**: `Del`/`F8` move to the system trash
+  (freedesktop on Linux, `~/.Trash` on macOS, the real recycle bin on Windows),
+  so a wrong key press is recoverable. `Shift+Del` erases permanently and says
+  so in the prompt.
 - **Clipboard**: `Ctrl+L` copies the path, `Alt+I` the name, `Ctrl+Shift+C`
   the selected paths — through `pbcopy`/`wl-copy`/`xclip`/`clip`, with OSC 52
   as a fallback for terminals without a helper.
@@ -425,6 +429,10 @@ two-panel model). No Yazi source is included.
   папку, найти).
 - **Рекурсивный поиск** по `Alt+F7`: маски `*`/`?`, живой список результатов,
   `Tab` — открыть найденное в другой панели.
+- **Удаление — в корзину**: `Del`/`F8` перемещают в системную корзину
+  (freedesktop в Linux, `~/.Trash` на macOS, настоящая корзина в Windows),
+  поэтому случайное нажатие обратимо. `Shift+Del` стирает безвозвратно и
+  предупреждает об этом в подтверждении.
 - **Буфер обмена**: `Ctrl+L` — путь, `Alt+I` — имя, `Ctrl+Shift+C` — пути
   выделенных файлов; через `pbcopy`/`wl-copy`/`xclip`/`clip` с OSC 52 как
   резервным способом для терминалов без утилиты.

@@ -28,6 +28,8 @@ pub enum Action {
     Mkdir,
     Rename,
     Delete,
+    /// Erase without the trash. Deliberately not on a plain key.
+    DeletePermanent,
     SelectAll,
     BulkRename,
     ToggleHidden,
@@ -57,7 +59,7 @@ impl Action {
     ///
     /// `Settings` is deliberately absent: rebinding the key that opens the
     /// settings menu would make the menu unreachable.
-    pub const ALL: [Action; 28] = [
+    pub const ALL: [Action; 29] = [
         Action::Quit,
         Action::Help,
         Action::Copy,
@@ -65,6 +67,7 @@ impl Action {
         Action::Mkdir,
         Action::Rename,
         Action::Delete,
+        Action::DeletePermanent,
         Action::SelectAll,
         Action::BulkRename,
         Action::ToggleHidden,
@@ -98,6 +101,7 @@ impl Action {
             Action::Mkdir => "mkdir",
             Action::Rename => "rename",
             Action::Delete => "delete",
+            Action::DeletePermanent => "delete_permanent",
             Action::SelectAll => "select_all",
             Action::BulkRename => "bulk_rename",
             Action::ToggleHidden => "toggle_hidden",
@@ -131,7 +135,8 @@ impl Action {
             Action::Move => "Move to other panel",
             Action::Mkdir => "Create folder",
             Action::Rename => "Rename",
-            Action::Delete => "Delete",
+            Action::Delete => "Delete (to trash)",
+            Action::DeletePermanent => "Delete permanently",
             Action::SelectAll => "Select all",
             Action::BulkRename => "Bulk rename",
             Action::ToggleHidden => "Hidden files",
@@ -180,7 +185,12 @@ impl Action {
             Action::Move => [Some(KeySpec::f(6)), Some(KeySpec::plain_char('m'))],
             Action::Mkdir => [Some(KeySpec::f(7)), Some(KeySpec::plain_char('n'))],
             Action::Rename => [Some(KeySpec::f(2)), Some(KeySpec::plain_char('r'))],
+            // `Del` and `F8` are the everyday keys and both go to the trash.
             Action::Delete => [Some(KeySpec::f(8)), Some(KeySpec::code(KeyCode::Delete))],
+            Action::DeletePermanent => [
+                Some(KeySpec::new(KeyCode::Delete, KeyModifiers::SHIFT)),
+                None,
+            ],
             Action::SelectAll => [Some(KeySpec::ctrl('a')), None],
             Action::BulkRename => [Some(KeySpec::ctrl('g')), None],
             Action::ToggleHidden => [Some(KeySpec::ctrl('h')), Some(KeySpec::plain_char('.'))],
@@ -303,8 +313,9 @@ fn action_rank(action: Action) -> u8 {
         Action::Mkdir => 4,
         Action::Rename => 5,
         Action::Delete => 6,
-        Action::OpenHere => 7,
-        Action::TogglePreview => 8,
+        Action::DeletePermanent => 7,
+        Action::OpenHere => 8,
+        Action::TogglePreview => 9,
         Action::ToggleThumbnails => 9,
         Action::SortMenu => 10,
         Action::ToggleHidden => 11,
@@ -362,8 +373,9 @@ impl KeySpec {
     pub fn matches(self, key: KeyEvent) -> bool {
         // `PreviewThere` is bound to Alt+←/→, but Ghostty and iTerm2 encode
         // Alt+←/→ as `ESC b` / `ESC f` by default, so those letters arrive as
-        // the arrow. Only the Alt binding accepts them: a `Ctrl+←` spec must
-        // never answer to `Ctrl+F`, which is the sidebar toggle.
+        // the arrow. Only the Alt binding accepts them, and only when Alt is
+        // the sole modifier: a `Ctrl+←` spec must never answer to `Ctrl+F`,
+        // which is the sidebar toggle.
         if self.modifiers == KeyModifiers::ALT
             && key.modifiers == KeyModifiers::ALT
             && matches!(
@@ -378,16 +390,8 @@ impl KeySpec {
             return false;
         }
 
-        // A bare key accepts a stray Shift (a terminal reports `?` as Shift+/),
-        // but never Ctrl/Alt: those mean a different gesture.
-        if self.modifiers == KeyModifiers::NONE {
-            return !key
-                .modifiers
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
-        }
-
         // Command arrives as SUPER or META depending on the platform, so both
-        // sides are normalised to SUPER.
+        // sides are normalised to SUPER first.
         let mut wanted = self.modifiers;
         if wanted.intersects(KeyModifiers::META) {
             wanted.remove(KeyModifiers::META);
@@ -399,13 +403,27 @@ impl KeySpec {
             actual |= KeyModifiers::SUPER;
         }
 
-        // Modifiers are compared *exactly*, because distinct modifier sets are
-        // distinct gestures: `Ctrl+←` and `Shift+←` are bound to different
-        // actions, and `contains` would let both fire on `Ctrl+Shift+←`.
-        if !actual.contains(KeyModifiers::SHIFT) || !wanted.contains(KeyModifiers::SHIFT) {
-            actual.remove(KeyModifiers::SHIFT);
+        // A terminal reports `?` as Shift+/, and a shifted letter arrives as an
+        // uppercase character with no Shift modifier. A *character* binding may
+        // therefore tolerate a stray Shift — but nothing else may: a binding
+        // without Shift must never fire on Shift+←, which is a different
+        // gesture entirely (`Shift+→` opens the folder in the other panel).
+        if matches!(self.code, KeyCode::Char(_)) && !wanted.contains(KeyModifiers::SHIFT) {
+            // A shifted character (`?` is Shift+/) carries no SHIFT modifier on
+            // some terminals and does on others; a character binding accepts
+            // both. A *key* binding never does: `Shift+→` is a gesture of its
+            // own, and `→` must not fire on it.
             wanted.remove(KeyModifiers::SHIFT);
+            actual.remove(KeyModifiers::SHIFT);
+        } else if !wanted.contains(KeyModifiers::SHIFT) {
+            // A key binding without Shift must not answer to a shifted key…
+            actual.remove(KeyModifiers::SHIFT);
         }
+        // …and one *with* Shift keeps requiring it, which is the whole point of
+        // `Shift+→` being a separate gesture from `→`.
+
+        // Modifiers are compared *exactly*: `Ctrl+←`, `Shift+←` and `Alt+←` are
+        // three different actions, and a subset test would fire all of them.
         actual == wanted
     }
 
