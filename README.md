@@ -72,6 +72,9 @@ Favorites sidebar with a folder tree:
 - **Background operations** with progress; the UI stays navigable.
 - **Quick preview** (`Ctrl+Q`/`Ctrl+P`): the **opposite** panel shows text, an
   image, or a folder grid and follows the cursor. Read-only.
+- **Folder facts at a glance**: the `Ext` column shows how many folders a
+  folder contains, and `Space` on a folder measures its size in the background
+  (shown in the `Dir` column, in K/M/G).
 - **Thumbnail grid** (`Ctrl+T`) with cached image tiles and block-art icons per file type.
 - **Favorites, hidden files, mkdir, rename, delete, bulk rename, select-all.**
 - **Sorting** by name, size, type or date, with reverse.
@@ -186,7 +189,7 @@ alternative.
 | `PgUp`/`PgDn`, `Home`/`g`, `End`/`G` | page, top, bottom |
 | `Enter` / `l` / `→` | open folder; for a file, open with its associated app |
 | `Backspace` / `h` / `←` | go to parent directory |
-| `Space` / `Insert` | select and move down |
+| `Space` / `Insert` | select and move down; on a folder, measure its size |
 | `Esc` | clear selection / close preview / cancel |
 | `F5` / `c` | copy to the other panel (confirm with `Enter`/`y`) |
 | `F6` / `m` | move to the other panel (confirm with `Enter`/`y`) |
@@ -426,6 +429,9 @@ two-panel model). No Yazi source is included.
 - **Фоновые операции** с прогрессом: интерфейс не блокируется.
 - **Быстрый просмотр** (`Ctrl+Q`/`Ctrl+P`): **противоположная** панель показывает
   текст, изображение или сетку каталога и следует за курсором. Только чтение.
+- **Папка «на glance»**: в колонке `Ext` у папки стоит число вложенных папок
+  первого уровня, а `Space` на папке считает её объём в фоне (показывается в
+  колонке `Dir` в К/М/Г).
 - **Сетка миниатюр** (`Ctrl+T`) с кэшем изображений и блочными иконками по типам.
 - **Избранное, скрытые файлы, создание, переименование, удаление, массовое переименование, выделить всё.**
 - **Сортировка** по имени, размеру, типу или дате, с реверсом.
@@ -537,7 +543,7 @@ WIN7=0 ./packaging/windows/build-windows.sh   # только Windows 10/11
 | `PgUp`/`PgDn`, `Home`/`g`, `End`/`G` | страница, начало, конец |
 | `Enter` / `l` / `→` | войти в каталог; для файла — открыть приложением по умолчанию |
 | `Backspace` / `h` / `←` | подняться на уровень выше |
-| `Space` / `Insert` | выделить и перейти ниже |
+| `Space` / `Insert` | выделить и перейти ниже; на папке — посчитать объём |
 | `Esc` | снять выделение / закрыть просмотр / отменить |
 | `F5` / `c` | копировать в другую панель (подтверждение `Enter`/`y`) |
 | `F6` / `m` | переместить в другую панель (подтверждение `Enter`/`y`) |

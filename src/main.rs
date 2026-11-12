@@ -55,15 +55,19 @@ fn main() -> io::Result<()> {
     let mut out = stdout();
     execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
     // Ask the terminal to report key press *and release* events, so the footer
-    // can light up while a modifier is held. Terminals without kitty-protocol
-    // support silently ignore the sequence; releases then simply never arrive.
-    // We deliberately do not probe support first: the probe blocks for up to
-    // two seconds waiting for a reply.
+    // can light up while a modifier is held. `REPORT_ALL_KEYS_AS_ESCAPE_CODES`
+    // is what makes the terminal report the modifier keys themselves: with only
+    // event types, Ctrl produces nothing until a letter is pressed, and the
+    // footer could never switch on a bare Ctrl. Terminals without kitty-protocol
+    // support silently ignore the sequence; the footer then simply keeps its
+    // default screen. We deliberately do not probe support first: the probe
+    // blocks for up to two seconds waiting for a reply.
     let keyboard_enhanced = execute!(
         out,
         PushKeyboardEnhancementFlags(
             KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                 | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
         )
     )
     .is_ok();

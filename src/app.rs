@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
@@ -117,6 +118,11 @@ pub struct App {
     pub held_arrow: Option<(KeyCode, Instant)>,
     /// Last automatic move of a held arrow.
     pub last_auto_repeat: Option<Instant>,
+    /// Folder sizes measured on demand (Space on a folder). Keyed by path so a
+    /// measured size survives navigation and re-listing.
+    pub folder_sizes: HashMap<PathBuf, u64>,
+    /// Folders whose size is being measured right now.
+    pub folder_size_pending: Vec<(PathBuf, Receiver<(PathBuf, u64)>)>,
 }
 
 /// After the arrow has been held this long, the app moves the cursor itself.
@@ -347,6 +353,8 @@ impl App {
             last_tap_target: None,
             held_arrow: None,
             last_auto_repeat: None,
+            folder_sizes: HashMap::new(),
+            folder_size_pending: Vec::new(),
         }
     }
 
@@ -366,6 +374,7 @@ impl App {
     pub fn tick(&mut self) {
         self.poll_loads();
         self.poll_stats();
+        self.poll_folder_sizes();
         self.poll_search();
         self.sync_preview_scroll();
         // Background preview/image loads complete after a frame or two; repaint
@@ -496,6 +505,67 @@ impl App {
                 None => {}
             }
         }
+    }
+
+    /// Collect finished folder-size measurements.
+    fn poll_folder_sizes(&mut self) {
+        let mut finished = Vec::new();
+        let mut still_running = Vec::new();
+
+        for (path, receiver) in self.folder_size_pending.drain(..) {
+            match receiver.try_recv() {
+                Ok((path, size)) => {
+                    finished.push((path, size));
+                }
+                Err(TryRecvError::Empty) => still_running.push((path, receiver)),
+                Err(TryRecvError::Disconnected) => {}
+            }
+        }
+        self.folder_size_pending = still_running;
+
+        for (path, size) in finished {
+            self.folder_sizes.insert(path.clone(), size);
+            self.status = format!("{}: {}", path.display(), crate::ui::human_size(size));
+            self.dirty = true;
+        }
+    }
+
+    /// Start measuring a folder's size in the background (Space on a folder).
+    ///
+    /// The result lands in `folder_sizes`, which the renderer prefers over the
+    /// `"<DIR>"` placeholder.
+    fn measure_folder(&mut self, path: &Path) {
+        if self.folder_sizes.contains_key(path)
+            || self
+                .folder_size_pending
+                .iter()
+                .any(|(pending, _)| pending == path)
+        {
+            return;
+        }
+
+        let (sender, receiver) = mpsc::channel();
+        let thread_path = path.to_path_buf();
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let size = crate::panel::folder_size(&thread_path);
+            logging::info(format!(
+                "folder size in {} ms: {} = {size} bytes",
+                started.elapsed().as_millis(),
+                thread_path.display()
+            ));
+            let _ = sender.send((thread_path, size));
+        });
+        self.folder_size_pending
+            .push((path.to_path_buf(), receiver));
+        self.status = format!("Measuring {}…", path.display());
+        self.dirty = true;
+    }
+
+    /// Size of a folder if it was measured, `None` while unknown.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn folder_size(&self, path: &Path) -> Option<u64> {
+        self.folder_sizes.get(path).copied()
     }
 
     /// Spawn the stat worker for a freshly applied listing.
@@ -875,6 +945,22 @@ impl App {
     ///
     /// Arrow keys wrap around at the ends (Total Commander / Yazi behaviour);
     /// everything that targets a place instead of a direction keeps clamping.
+    /// Space/Insert: select the entry and, for a folder, measure its size.
+    ///
+    /// The measurement runs on a worker thread, so selecting a 200 GB folder
+    /// never blocks the UI; the number appears in the `Dir` column and in the
+    /// status line when it is ready.
+    fn toggle_selection_and_measure(&mut self) {
+        let entry = self.active().current_entry().cloned();
+        self.active_mut().toggle_selection();
+        if let Some(entry) = entry {
+            if entry.is_dir && !entry.is_parent {
+                self.measure_folder(&entry.path);
+            }
+        }
+        self.sync_preview_scroll();
+    }
+
     fn move_active(&mut self, delta: i32) {
         match self.active().mode {
             PanelMode::Thumbnails => self.active_mut().move_grid_wrapping(delta),
@@ -1026,7 +1112,7 @@ impl App {
             KeyCode::End | KeyCode::Char('G') => self.active_mut().go_bottom(),
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => self.enter_current(),
             KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => self.go_parent(),
-            KeyCode::Char(' ') | KeyCode::Insert => self.active_mut().toggle_selection(),
+            KeyCode::Char(' ') | KeyCode::Insert => self.toggle_selection_and_measure(),
             KeyCode::Esc => self.clear_selection(),
             _ => {}
         }
@@ -1056,7 +1142,7 @@ impl App {
             KeyCode::End | KeyCode::Char('G') => self.active_mut().go_bottom(),
             KeyCode::Enter => self.enter_current(),
             KeyCode::Backspace => self.go_parent(),
-            KeyCode::Char(' ') | KeyCode::Insert => self.active_mut().toggle_selection(),
+            KeyCode::Char(' ') | KeyCode::Insert => self.toggle_selection_and_measure(),
             KeyCode::Esc => self.clear_selection(),
             _ => {}
         }
@@ -4129,5 +4215,51 @@ mod tests {
         assert_eq!(app.repeat_step_for(Duration::from_millis(300)), 1);
         assert_eq!(app.repeat_step_for(Duration::from_millis(1000)), 2);
         assert_eq!(app.repeat_step_for(Duration::from_millis(2000)), 4);
+    }
+
+    #[test]
+    fn space_on_a_folder_starts_measuring_its_size() {
+        let tmp = tempfile::tempdir().unwrap();
+        let left = tmp.path().join("left");
+        let folder = left.join("big");
+        fs::create_dir_all(folder.join("nested")).unwrap();
+        fs::write(folder.join("data.bin"), vec![b'x'; 4096]).unwrap();
+        fs::write(folder.join("nested/more.bin"), vec![b'x'; 4096]).unwrap();
+
+        let mut app = app_for(&left, &left);
+        app.panels[0].select_name("big");
+        assert!(app.folder_size(&folder).is_none());
+
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
+
+        // Space still selects, and the measurement is queued.
+        assert!(app.panels[0].selected.contains(&folder));
+        assert!(
+            !app.folder_size_pending.is_empty() || app.folder_size(&folder).is_some(),
+            "no measurement was started"
+        );
+
+        // Drive the event loop until the worker answers.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && app.folder_size(&folder).is_none() {
+            app.tick();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(app.folder_size(&folder), Some(8192));
+    }
+
+    #[test]
+    fn space_on_a_file_measures_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let left = tmp.path().join("left");
+        fs::create_dir_all(&left).unwrap();
+        fs::write(left.join("a.txt"), "x").unwrap();
+
+        let mut app = app_for(&left, &left);
+        app.panels[0].select_name("a.txt");
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
+
+        assert!(app.panels[0].selected.contains(&left.join("a.txt")));
+        assert!(app.folder_size_pending.is_empty());
     }
 }

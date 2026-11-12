@@ -945,3 +945,30 @@ where one glyph is too small to recognise.
 Without one the code points render as boxes, so `icons = false` in
 `settings.toml` switches back to ASCII — the table itself is never a hard
 dependency.
+
+## ADR-044 — Folder facts in the listing: sub-folder count and measured size
+
+**Status:** accepted (2026-11-12, `0.6.2`)
+
+**Context:** A dual-pane manager is used to decide where to go next, and the two
+numbers that drive that decision are "how many folders are inside" and "how big
+is it". Total Commander shows `<DIR>` and makes the size an explicit action; a
+plain `stat` cannot answer the second question at all, and walking a tree during
+a listing would reintroduce the multi-second freezes that ADR-015 removed.
+
+**Decision:** Two separate mechanisms, both off the UI thread:
+
+* **Sub-folder count** — filled by the existing stat worker. `count_subdirs`
+  reads only the directory entries and never `stat`s them, so it costs one
+  `read_dir` per folder and lands in the same batched `StatsUpdate`. The count
+  is drawn in the `Ext` column, which is otherwise meaningless for a folder.
+* **Folder size** — measured on demand. `Space` (the select key, so the two
+  actions cannot disagree about which row is meant) queues `panel::folder_size`,
+  a depth-limited walk that skips symlinks, and the result is cached in
+  `App::folder_sizes` keyed by path. The `Dir` column shows `human_size` instead
+  of `<DIR>` once the number is known, and the status line repeats it.
+
+**Consequences:** A listing never walks a tree; a user who wants a size asks for
+it, and the answer survives re-listing because the cache is keyed by path. The
+count distinguishes "20 folders" from "empty" at a glance, which is what makes
+the `Ext` column worth its width.

@@ -25,6 +25,9 @@ pub struct Entry {
     pub modified: Option<SystemTime>,
     /// False until a background worker has stat'ed this entry.
     pub stats_loaded: bool,
+    /// Direct sub-folders of a directory. Shown in the `Ext` column, where a
+    /// folder has no extension to show. `None` until counted.
+    pub subdirs: Option<u32>,
 }
 
 impl Entry {
@@ -38,6 +41,7 @@ impl Entry {
             size: 0,
             modified: None,
             stats_loaded: true,
+            subdirs: None,
         }
     }
 }
@@ -65,7 +69,16 @@ impl SortKey {
 /// One batch of stat results from the background enrichment worker.
 pub struct StatsUpdate {
     pub generation: u64,
-    pub stats: Vec<(usize, u64, Option<SystemTime>)>,
+    pub stats: Vec<EntryStat>,
+}
+
+/// One measured entry: size, date, and (for folders) the sub-folder count.
+#[derive(Clone, Debug)]
+pub struct EntryStat {
+    pub index: usize,
+    pub size: u64,
+    pub modified: Option<SystemTime>,
+    pub subdirs: Option<u32>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -381,9 +394,11 @@ impl Panel {
             let Ok(meta) = fs::metadata(&path) else {
                 continue;
             };
+            let subdirs = meta.is_dir().then(|| count_subdirs(&path));
             if let Some(entry) = self.entries.get_mut(index) {
                 entry.size = if meta.is_dir() { 0 } else { meta.len() };
                 entry.modified = meta.modified().ok();
+                entry.subdirs = subdirs;
                 entry.stats_loaded = true;
             }
         }
@@ -500,13 +515,14 @@ impl Panel {
             return false;
         }
         let mut changed = false;
-        for (index, size, modified) in update.stats {
-            if let Some(entry) = self.entries.get_mut(index) {
+        for stat in update.stats {
+            if let Some(entry) = self.entries.get_mut(stat.index) {
                 if entry.is_parent {
                     continue;
                 }
-                entry.size = size;
-                entry.modified = modified;
+                entry.size = stat.size;
+                entry.modified = stat.modified;
+                entry.subdirs = stat.subdirs.or(entry.subdirs);
                 entry.stats_loaded = true;
                 changed = true;
             }
@@ -685,6 +701,58 @@ impl Panel {
     }
 }
 
+/// Recursively add up the size of everything below `path`.
+///
+/// Symlinks are not followed (they can loop and are cheap to skip), unreadable
+/// entries are ignored, and the walk is depth-limited: this runs on a worker
+/// thread after the user presses Space on a folder, and a runaway tree must not
+/// pin a core forever.
+pub fn folder_size(path: &Path) -> u64 {
+    const MAX_DEPTH: usize = 64;
+
+    let mut total = 0u64;
+    let mut stack = vec![(path.to_path_buf(), 0usize)];
+
+    while let Some((dir, depth)) = stack.pop() {
+        if depth > MAX_DEPTH {
+            continue;
+        }
+        let Ok(read) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for item in read.flatten() {
+            let Ok(kind) = item.file_type() else {
+                continue;
+            };
+            if kind.is_symlink() {
+                continue;
+            }
+            if kind.is_dir() {
+                stack.push((item.path(), depth + 1));
+            } else if let Ok(meta) = item.metadata() {
+                total = total.saturating_add(meta.len());
+            }
+        }
+    }
+
+    total
+}
+
+/// Number of direct sub-folders in `path`.
+///
+/// Only the directory entries are read, and nothing is `stat`ed, so this stays
+/// cheap even on a cloud share. Hidden folders count too: the number is about
+/// the folder's contents, not about what the listing currently shows.
+pub fn count_subdirs(path: &Path) -> u32 {
+    let Ok(read) = fs::read_dir(path) else {
+        return 0;
+    };
+    read.flatten()
+        .filter(|item| item.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+        .count()
+        .min(u32::MAX as usize) as u32
+}
+
 /// Move `cursor` by `delta`, wrapping around both ends.
 ///
 /// Total Commander (and Yazi) never stop at a border: pressing down on the
@@ -807,6 +875,7 @@ fn list_dir_inner(path: &Path, show_hidden: bool) -> io::Result<Vec<Entry>> {
             size: 0,
             modified: None,
             stats_loaded: false,
+            subdirs: None,
         });
     }
 
@@ -828,12 +897,20 @@ pub fn stat_entries(
     let mut batch = Vec::with_capacity(BATCH);
     for (index, path) in paths {
         let meta = fs::metadata(&path).ok();
+        let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
         let size = meta
             .as_ref()
             .map(|m| if m.is_dir() { 0 } else { m.len() })
             .unwrap_or(0);
         let modified = meta.as_ref().and_then(|m| m.modified().ok());
-        batch.push((index, size, modified));
+        // A folder's `Ext` column shows how many folders it contains; that is a
+        // single `read_dir` per entry, done here and never on the UI thread.
+        batch.push(EntryStat {
+            index,
+            size,
+            modified,
+            subdirs: is_dir.then(|| count_subdirs(&path)),
+        });
 
         if batch.len() >= BATCH {
             if sender
@@ -1009,6 +1086,78 @@ mod tests {
         assert!(panel.cursor < last, "grid movement must wrap as well");
     }
 
+    #[test]
+    fn folders_report_their_direct_sub_folder_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("parent");
+        fs::create_dir_all(parent.join("one/nested")).unwrap();
+        fs::create_dir(parent.join("two")).unwrap();
+        fs::write(parent.join("file.txt"), "x").unwrap();
+
+        let mut panel = Panel::new(tmp.path().to_path_buf());
+        panel.reload(false).unwrap();
+        panel.enrich_blocking();
+
+        let entry = panel
+            .entries
+            .iter()
+            .find(|entry| entry.name == "parent")
+            .expect("parent folder missing");
+        assert_eq!(entry.subdirs, Some(2), "only direct sub-folders count");
+
+        // A plain file in the same listing has no count at all.
+        let file = Entry {
+            name: "file.txt".to_string(),
+            path: parent.join("file.txt"),
+            is_dir: false,
+            is_symlink: false,
+            is_parent: false,
+            size: 1,
+            modified: None,
+            stats_loaded: true,
+            subdirs: None,
+        };
+        assert_eq!(file.subdirs, None, "files have no sub-folder count");
+    }
+
+    #[test]
+    fn those_counts_also_arrive_from_the_background_worker() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join("a")).unwrap();
+        fs::create_dir(tmp.path().join("b")).unwrap();
+        fs::create_dir(tmp.path().join("c")).unwrap();
+
+        let mut panel = Panel::new(tmp.path().to_path_buf());
+        panel.reload(false).unwrap();
+
+        let (sender, receiver, work, generation) = panel.begin_enrichment();
+        stat_entries(work, generation, sender);
+        for update in receiver.iter() {
+            panel.apply_stats(update);
+        }
+
+        let counts: Vec<u32> = panel
+            .entries
+            .iter()
+            .filter(|entry| entry.is_dir && !entry.is_parent)
+            .filter_map(|entry| entry.subdirs)
+            .collect();
+        assert_eq!(counts.len(), 3);
+    }
+
+    #[test]
+    fn folder_size_adds_up_everything_below() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("tree");
+        fs::create_dir_all(root.join("a/b")).unwrap();
+        fs::write(root.join("top.txt"), vec![b'x'; 100]).unwrap();
+        fs::write(root.join("a/mid.txt"), vec![b'x'; 200]).unwrap();
+        fs::write(root.join("a/b/deep.txt"), vec![b'x'; 300]).unwrap();
+
+        assert_eq!(folder_size(&root), 600);
+        assert_eq!(folder_size(&root.join("a")), 500);
+        assert_eq!(folder_size(&root.join("missing")), 0);
+    }
     #[test]
     fn leaving_preview_restores_the_previous_mode_and_clears_the_subject() {
         let mut panel = Panel::new(PathBuf::from("/tmp"));

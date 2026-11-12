@@ -60,6 +60,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let hidden = app.hidden;
     let colors = app.colors;
     let show_icons = app.settings.icons;
+    let folder_sizes = app.folder_sizes.clone();
 
     if show_favorites {
         let cols = Layout::default()
@@ -84,6 +85,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             hidden,
             &colors,
             show_icons,
+            &folder_sizes,
         );
         draw_panel(
             frame,
@@ -98,6 +100,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             hidden,
             &colors,
             show_icons,
+            &folder_sizes,
         );
     } else {
         let cols = Layout::default()
@@ -117,6 +120,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             hidden,
             &colors,
             show_icons,
+            &folder_sizes,
         );
         draw_panel(
             frame,
@@ -131,6 +135,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             hidden,
             &colors,
             show_icons,
+            &folder_sizes,
         );
     }
 
@@ -174,6 +179,7 @@ fn draw_panel(
     show_hidden: bool,
     colors: &crate::colors::Colors,
     show_icons: bool,
+    folder_sizes: &std::collections::HashMap<PathBuf, u64>,
 ) {
     let mode = panel.mode;
     let border_color = if active {
@@ -248,7 +254,15 @@ fn draw_panel(
                     );
                 }
             }
-            draw_list(frame, panel, rows[2], active, colors, show_icons);
+            draw_list(
+                frame,
+                panel,
+                rows[2],
+                active,
+                colors,
+                show_icons,
+                folder_sizes,
+            );
         }
         PanelMode::Thumbnails => {
             panel.body_area = rows[2];
@@ -304,6 +318,7 @@ fn draw_list(
     active: bool,
     colors: &crate::colors::Colors,
     show_icons: bool,
+    folder_sizes: &std::collections::HashMap<PathBuf, u64>,
 ) {
     if list_area.height == 0 {
         return;
@@ -327,7 +342,14 @@ fn draw_list(
         .iter()
         .map(|entry| {
             let selected = !entry.is_parent && panel.selected.contains(&entry.path);
-            list_item(entry, selected, width, colors, show_icons)
+            list_item(
+                entry,
+                selected,
+                width,
+                colors,
+                show_icons,
+                folder_sizes.get(&entry.path).copied(),
+            )
         })
         .collect();
 
@@ -1121,8 +1143,13 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
                 if entry.is_parent {
                     "..".to_string()
                 } else {
+                    // The status line repeats the row: a folder shows its
+                    // measured size once Space asked for it.
                     let kind = if entry.is_dir {
-                        "dir".to_string()
+                        match app.folder_sizes.get(&entry.path) {
+                            Some(bytes) => format!("dir · {}", human_size(*bytes)),
+                            None => "dir".to_string(),
+                        }
                     } else {
                         human_size(entry.size)
                     };
@@ -2073,6 +2100,7 @@ fn list_item(
     width: usize,
     colors: &crate::colors::Colors,
     show_icons: bool,
+    folder_size: Option<u64>,
 ) -> ListItem<'static> {
     let group = FileGroup::classify(&entry.path, entry.is_dir);
     let group_color = colors.color(group);
@@ -2104,12 +2132,26 @@ fn list_item(
     } else {
         entry_stem(entry)
     };
-    let extension = entry_extension(entry);
+    // A folder has no extension, so that column carries how many folders it
+    // contains — the one number Yazi users ask for when scanning a tree.
+    let extension = if entry.is_dir && !entry.is_parent {
+        match entry.subdirs {
+            Some(count) => format!("{count}"),
+            None => "…".to_string(),
+        }
+    } else {
+        entry_extension(entry)
+    };
 
     let size = if entry.is_parent {
         String::new()
     } else if entry.is_dir {
-        "<DIR>".to_string()
+        // `Dir` shows the measured size once Space asked for it, `<DIR>`
+        // otherwise, so the column keeps its Total Commander meaning.
+        match folder_size {
+            Some(bytes) => human_size(bytes),
+            None => "<DIR>".to_string(),
+        }
     } else if entry.stats_loaded {
         human_size(entry.size)
     } else {
@@ -2215,7 +2257,7 @@ fn fs_metadata_size(path: &Path) -> u64 {
     std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
 }
 
-fn human_size(bytes: u64) -> String {
+pub fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "K", "M", "G", "T"];
     let mut size = bytes as f64;
     let mut unit = 0;
@@ -2623,5 +2665,55 @@ mod tests {
         let line = footer_line(&mut app, 160, 30);
         assert!(line.contains("F9"), "rebound key missing: {line:?}");
         assert!(!line.contains("F5"), "old key still shown: {line:?}");
+    }
+
+    /// Extract the row of a rendered buffer that contains `needle`.
+    fn row_with(text: &str, width: u16, needle: &str) -> String {
+        text.chars()
+            .collect::<Vec<_>>()
+            .chunks(width as usize)
+            .map(|chunk| chunk.iter().collect::<String>())
+            .find(|line| line.contains(needle))
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_folder_row_shows_its_sub_folder_count_in_the_ext_column() {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder = tmp.path().join("Projects");
+        fs::create_dir_all(folder.join("one")).unwrap();
+        fs::create_dir_all(folder.join("two")).unwrap();
+        fs::create_dir_all(folder.join("three")).unwrap();
+
+        let mut app = App::new(vec![tmp.path().to_path_buf(), tmp.path().to_path_buf()]);
+        app.settings = crate::settings::Settings::defaults();
+        app.show_favorites = false;
+        app.panels[0].enrich_blocking();
+
+        let text = render(&mut app, 140, 30);
+        let row = row_with(&text, 140, "Projects");
+        // The header calls the column `Ext`; a folder fills it with its count.
+        assert!(row.contains('3'), "sub-folder count missing: {row:?}");
+        assert!(row.contains("<DIR>"), "size column lost <DIR>: {row:?}");
+    }
+
+    #[test]
+    fn a_measured_folder_shows_its_size_in_the_dir_column() {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder = tmp.path().join("Media");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("clip.bin"), vec![b'x'; 3 * 1024 * 1024]).unwrap();
+
+        let mut app = App::new(vec![tmp.path().to_path_buf(), tmp.path().to_path_buf()]);
+        app.settings = crate::settings::Settings::defaults();
+        app.show_favorites = false;
+        app.panels[0].enrich_blocking();
+        app.folder_sizes
+            .insert(folder.clone(), crate::panel::folder_size(&folder));
+
+        let text = render(&mut app, 140, 30);
+        let row = row_with(&text, 140, "Media");
+        assert!(row.contains("3.0M"), "measured size missing: {row:?}");
+        assert!(!row.contains("<DIR>"), "placeholder survived: {row:?}");
     }
 }

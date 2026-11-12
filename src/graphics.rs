@@ -215,12 +215,24 @@ mod tests {
     use super::*;
     use image::{Rgb, RgbImage};
 
+    /// The probe reads process-wide environment variables, and `cargo test` runs
+    /// these in parallel. This lock serialises them so one test cannot see the
+    /// variables another one just set.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     fn image() -> DynamicImage {
         DynamicImage::ImageRgb8(RgbImage::from_pixel(120, 80, Rgb([10, 200, 40])))
     }
 
     #[test]
     fn a_picker_produces_a_protocol_for_an_area() {
+        let _guard = lock_env();
         init();
         let encoded = render(image(), Rect::new(0, 0, 40, 20));
         assert!(encoded.is_some(), "no protocol even for half blocks");
@@ -228,6 +240,7 @@ mod tests {
 
     #[test]
     fn half_blocks_encode_a_fitted_area() {
+        let _guard = lock_env();
         std::env::set_var("YAZI2D_IMAGE_PROTOCOL", "halfblocks");
         init();
         std::env::remove_var("YAZI2D_IMAGE_PROTOCOL");
@@ -241,6 +254,7 @@ mod tests {
 
     #[test]
     fn kitty_is_reported_as_native() {
+        let _guard = lock_env();
         std::env::set_var("YAZI2D_IMAGE_PROTOCOL", "kitty");
         init();
         std::env::remove_var("YAZI2D_IMAGE_PROTOCOL");
@@ -250,6 +264,7 @@ mod tests {
 
     #[test]
     fn ghostty_and_kitty_terminals_are_detected() {
+        let _guard = lock_env();
         std::env::set_var("YAZI2D_IMAGE_PROTOCOL", "halfblocks");
         std::env::set_var("TERM_PROGRAM", "ghostty");
         init();
@@ -266,6 +281,7 @@ mod tests {
 
     #[test]
     fn truecolor_is_detected_from_the_environment() {
+        let _guard = lock_env();
         let saved = std::env::var("COLORTERM").ok();
         std::env::set_var("COLORTERM", "truecolor");
         std::env::set_var("YAZI2D_IMAGE_PROTOCOL", "halfblocks");
