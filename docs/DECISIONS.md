@@ -1070,3 +1070,37 @@ panel while browsing, which is why the panel is left with its own key.
 **Consequences:** The meaning of every key now depends on where the cursor is,
 which is what a dual-pane manager with a sidebar should do. A test locks the
 delete case in place (`favourites_keys_are_not_hijacked_by_file_actions`).
+
+## ADR-048 — Favorites are a list of typed rows, not a list of paths
+
+**Status:** accepted (2026-11-12, `0.6.5`)
+
+**Context:** The sidebar was a flat `Vec<PathBuf>`. That made four requested
+things impossible without hacks: named separators (a path has no title), file
+bookmarks (a path with a file works, but "reveal the file" needs a different
+action from "enter the folder"), reordering (no stable row identity to keep the
+cursor on) and browsing (the cursor had no way to say "show this in the panel
+but do not commit").
+
+**Decision:** `favorites::Entry { Path(PathBuf), Separator(String) }`, stored as
+ordered `[[group]]` rows (`kind = "path" | "separator"`, plus `path` / `title`).
+The old flat `favorites = [...]` key is still read and only written by versions
+before this one, so nobody loses their list.
+
+Behaviour follows from the row type:
+
+* **`↑↓`** moves the cursor, skipping separators, and *reveals* the row in the
+  active panel — a folder is loaded, a file is revealed with the cursor on it so
+  the preview shows it. The sidebar keeps the focus, which is what makes it
+  browsing rather than navigation.
+* **`Enter` and `→`** commit: a folder is entered, a file opens its folder with
+  the cursor on the file.
+* **`PageUp/PageDown`** reorder the cursor row (the only keys free for it) and
+  persist immediately, so the order the user built survives a restart.
+* **`S`** adds a separator after the cursor, asking for its title.
+* **`Ctrl+B`** bookmarks the cursor entry, so a file is a first-class favorite.
+
+**Consequences:** The sidebar is now a real outline: groups with captions, rows
+that can be rearranged, and entries that may point at a single document. The
+footer and the settings menu read the same `Action` enum, so the sidebar's
+`Del` still means "remove a bookmark" and never a file operation (ADR-047).

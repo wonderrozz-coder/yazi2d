@@ -286,12 +286,29 @@ Favorites: `~/.config/yazi2d/favorites.toml`
 Override the directory with `YAZI2D_CONFIG_DIR`.
 
 ```toml
-favorites = [
-  "/Users/me",
-  "/Users/me/Projects",
-  "/Volumes/Backup",
-]
+# Each row keeps the order shown in the sidebar. A row is a path or a
+# separator ("separator" with a title), and a path may be a file.
+[[group]]
+kind = "path"
+path = "/Users/me/Projects"
+
+[[group]]
+kind = "separator"
+title = "Work"
+
+[[group]]
+kind = "path"
+path = "/Volumes/Backup"
+
+[[group]]
+kind = "path"
+path = "/Users/me/notes.md"     # files can be bookmarked too
 ```
+
+In the sidebar: `↑↓` browse (the active panel follows the cursor — a folder
+opens, a file is previewed), `Enter`/`→` commit, `PageUp/PageDown` move the row,
+`S` add a separator, `Del` remove. A flat `favorites = ["/a", "/b"]` list from
+older versions still loads.
 
 Settings: `$YAZI2D_CONFIG_DIR/settings.toml`.
 
@@ -703,12 +720,29 @@ YAZI2D_IMAGE_PROTOCOL=kitty yazi2d      # или iterm2, sixel, halfblocks
 Каталог можно переопределить через `YAZI2D_CONFIG_DIR`.
 
 ```toml
-favorites = [
-  "/Users/me",
-  "/Users/me/Projects",
-  "/Volumes/Backup",
-]
+# Порядок строк — порядок в боковой панели. Строка это путь или разделитель
+# (kind = "separator" с title); путь может быть и файлом.
+[[group]]
+kind = "path"
+path = "/Users/me/Projects"
+
+[[group]]
+kind = "separator"
+title = "Работа"
+
+[[group]]
+kind = "path"
+path = "/Volumes/Backup"
+
+[[group]]
+kind = "path"
+path = "/Users/me/notes.md"     # файлы тоже можно добавлять
 ```
+
+В панели избранного: `↑↓` — листать (активная панель следует за курсором:
+папка открывается, файл показывается в превью), `Enter`/`→` — перейти,
+`PageUp/PageDown` — переставить строку, `S` — добавить разделитель,
+`Del` — удалить. Старый плоский список `favorites = ["/a", "/b"]` тоже читается.
 
 При первом запуске в избранное попадают `~`, `Desktop`, `Documents`, `Downloads`,
 если они существуют.

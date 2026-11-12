@@ -38,6 +38,9 @@ pub enum Prompt {
         buffer: String,
         target: PathBuf,
     },
+    Separator {
+        buffer: String,
+    },
     Delete {
         sources: Vec<PathBuf>,
         /// `false` for the trash (the default), `true` for a hard delete.
@@ -127,6 +130,8 @@ pub struct App {
     pub folder_sizes: HashMap<PathBuf, u64>,
     /// Folders whose size is being measured right now.
     pub folder_size_pending: Vec<(PathBuf, Receiver<(PathBuf, u64)>)>,
+    /// A row of the favorites sidebar waiting to be revealed in a panel.
+    pub favorites_preview: Option<(usize, PathBuf)>,
 }
 
 /// After the arrow has been held this long, the app moves the cursor itself.
@@ -142,7 +147,11 @@ const REPEAT_RAMP: Duration = Duration::from_millis(500);
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MenuItem {
     Open,
-    OpenInOther,
+    /// Only for folders: it is a different action from `Open` (which enters the
+    /// folder in the same panel) and used to be labelled identically.
+    OpenFolderInOther,
+    /// Only for files: hand it to the desktop's default application.
+    OpenWithApp,
     CopyPath,
     CopyName,
     ToggleSelect,
@@ -153,6 +162,7 @@ pub enum MenuItem {
     DeletePermanent,
     Mkdir,
     AddFavorite,
+    AddSeparator,
     Thumbnails,
     Search,
 }
@@ -160,8 +170,9 @@ pub enum MenuItem {
 impl MenuItem {
     pub fn label(self) -> &'static str {
         match self {
-            MenuItem::Open => "Open",
-            MenuItem::OpenInOther => "Open in the other panel",
+            MenuItem::Open => "Open (folders: enter, files: preview)",
+            MenuItem::OpenFolderInOther => "Open folder in the other panel",
+            MenuItem::OpenWithApp => "Open with the default application",
             MenuItem::CopyPath => "Copy full path",
             MenuItem::CopyName => "Copy name",
             MenuItem::ToggleSelect => "Select / deselect",
@@ -171,7 +182,8 @@ impl MenuItem {
             MenuItem::Delete => "Delete (to the trash)",
             MenuItem::DeletePermanent => "Delete permanently",
             MenuItem::Mkdir => "New folder",
-            MenuItem::AddFavorite => "Add folder to favorites",
+            MenuItem::AddFavorite => "Add to favorites",
+            MenuItem::AddSeparator => "Add a separator to favorites",
             MenuItem::Thumbnails => "Thumbnails on / off",
             MenuItem::Search => "Find (Alt+F7)",
         }
@@ -362,6 +374,7 @@ impl App {
             last_auto_repeat: None,
             folder_sizes: HashMap::new(),
             folder_size_pending: Vec::new(),
+            favorites_preview: None,
         }
     }
 
@@ -1093,7 +1106,7 @@ impl App {
 
     fn apply_scroll(&mut self, delta: i32) {
         if self.focus == Focus::Favorites {
-            let count = self.favorites.paths.len();
+            let count = self.favorites.len();
             if count == 0 {
                 return;
             }
@@ -1221,7 +1234,7 @@ impl App {
             self.focus = Focus::Favorites;
             let row = y.saturating_sub(self.favorites_area.y) as usize;
             let index = self.fav_offset + row;
-            if index < self.favorites.paths.len() {
+            if index < self.favorites.len() {
                 self.fav_cursor = index;
                 let target = (usize::MAX, index);
                 let doubled = self.register_tap(target);
@@ -1376,8 +1389,12 @@ impl App {
                 if !entry.is_parent {
                     items.push(MenuItem::Open);
                     if entry.is_dir {
-                        items.push(MenuItem::OpenInOther);
+                        items.push(MenuItem::OpenFolderInOther);
+                    } else {
+                        items.push(MenuItem::OpenWithApp);
                     }
+                    // Files are bookmarks too, so this is not folder-only.
+                    items.push(MenuItem::AddFavorite);
                 }
                 items.push(MenuItem::CopyPath);
                 items.push(MenuItem::CopyName);
@@ -1396,6 +1413,7 @@ impl App {
                 items.push(MenuItem::CopyPath);
                 items.push(MenuItem::Mkdir);
                 items.push(MenuItem::AddFavorite);
+                items.push(MenuItem::AddSeparator);
                 items.push(MenuItem::Thumbnails);
                 items.push(MenuItem::Search);
             }
@@ -1490,10 +1508,17 @@ impl App {
                 self.active = panel;
                 self.open_current_entry();
             }
-            MenuItem::OpenInOther => {
+            MenuItem::OpenFolderInOther => {
                 let index = index.unwrap_or(self.panels[panel].cursor);
                 self.panels[panel].cursor = index;
                 self.open_entry_in_panel(1 - panel);
+            }
+            MenuItem::OpenWithApp => {
+                let index = index.unwrap_or(self.panels[panel].cursor);
+                self.panels[panel].cursor = index;
+                if let Some(entry) = self.panels[panel].current_entry().cloned() {
+                    self.open_with_system(&entry.path);
+                }
             }
             MenuItem::CopyPath => {
                 let Some(index) = index else {
@@ -1529,7 +1554,16 @@ impl App {
             MenuItem::Delete => self.begin_delete(),
             MenuItem::DeletePermanent => self.begin_delete_kind(true),
             MenuItem::Mkdir => self.begin_mkdir(),
-            MenuItem::AddFavorite => self.add_favorite(),
+            MenuItem::AddFavorite => {
+                if let Some(index) = index {
+                    self.panels[panel].cursor = index;
+                }
+                self.add_favorite();
+            }
+            MenuItem::AddSeparator => {
+                self.focus = Focus::Favorites;
+                self.begin_separator();
+            }
             MenuItem::Thumbnails => self.toggle_thumbnails_in(panel),
             MenuItem::Search => self.begin_search_in(panel),
         }
@@ -1936,19 +1970,146 @@ impl App {
             }
         }
 
+        // Separators are captions: the cursor skips them, so a bookmark is
+        // always what Enter acts on.
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                if self.fav_cursor > 0 {
-                    self.fav_cursor -= 1;
-                }
+            KeyCode::Up | KeyCode::Char('k') => self.move_favorite(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_favorite(1),
+            KeyCode::PageUp => self.shift_favorite(-1),
+            KeyCode::PageDown => self.shift_favorite(1),
+            KeyCode::Home | KeyCode::Char('g') => {
+                self.fav_cursor = 0;
+                self.select_favorite_row();
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if self.fav_cursor + 1 < self.favorites.paths.len() {
-                    self.fav_cursor += 1;
-                }
+            KeyCode::End | KeyCode::Char('G') => {
+                self.fav_cursor = self.favorites.len().saturating_sub(1);
+                self.select_favorite_row();
             }
-            KeyCode::Enter | KeyCode::Char('l') => self.open_favorite(),
+            KeyCode::Char('S') => self.begin_separator(),
+            // Enter *and* `→`/`l` open the bookmark: `→` used to work and must
+            // keep working, `Enter` is the discoverable one.
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => self.open_favorite(),
             _ => {}
+        }
+    }
+
+    /// Move the favorites cursor by `delta`, skipping separators, and reveal the
+    /// row in the active panel as the cursor lands on it.
+    ///
+    /// This is the "browse without committing" behaviour: the panel follows the
+    /// cursor (a folder is opened, a file is previewed), while Enter chooses.
+    fn move_favorite(&mut self, delta: i32) {
+        let len = self.favorites.len();
+        if len == 0 {
+            return;
+        }
+        let mut index = self.fav_cursor as i32;
+        loop {
+            index += delta;
+            if index < 0 || index >= len as i32 {
+                return;
+            }
+            if !self.favorites.entries[index as usize].is_separator() {
+                break;
+            }
+        }
+        self.fav_cursor = index as usize;
+        self.select_favorite_row();
+    }
+
+    /// Reveal the cursor row in the active panel without leaving the sidebar.
+    fn select_favorite_row(&mut self) {
+        let Some(entry) = self.favorites.entries.get(self.fav_cursor).cloned() else {
+            return;
+        };
+        let Some(path) = entry.path() else {
+            return;
+        };
+        let path = path.to_path_buf();
+        let panel = self.active;
+
+        if path.is_dir() {
+            // Load the folder so the panel shows its contents; the sidebar keeps
+            // the focus, which is what makes arrow-browsing possible.
+            if self.panels[panel].cwd != path {
+                self.favorites_preview = Some((panel, path));
+            }
+        } else {
+            // A bookmarked file: open its folder and put the cursor on it, so
+            // the preview pane shows the file instead of a folder listing.
+            let parent = path.parent().map(Path::to_path_buf);
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string());
+            if let (Some(parent), Some(name)) = (parent, name) {
+                if self.panels[panel].cwd != parent {
+                    self.favorites_preview = Some((panel, parent.with_file_name(name)));
+                }
+            }
+        }
+        self.run_favorites_preview();
+    }
+
+    /// Apply a queued reveal once the sidebar has settled on a row.
+    fn run_favorites_preview(&mut self) {
+        let Some((panel, target)) = self.favorites_preview.clone() else {
+            return;
+        };
+        self.favorites_preview = None;
+
+        // For a file the stored path is `<parent>/<name>`; navigate to the
+        // parent and select the name.
+        let (dir, select) = if target.is_dir() {
+            (target.clone(), None)
+        } else {
+            (
+                target.parent().map(Path::to_path_buf).unwrap_or_default(),
+                target
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string()),
+            )
+        };
+
+        if self.panels[panel].loading {
+            return;
+        }
+        self.start_load(panel, dir, select, LoadKind::Navigate);
+    }
+
+    /// `PageUp`/`PageDown`: move the cursor row itself, not the view.
+    fn shift_favorite(&mut self, delta: i32) {
+        let Some(index) = self.favorites.move_row(self.fav_cursor, delta) else {
+            self.status = "Already at the edge of the list".to_string();
+            return;
+        };
+        self.fav_cursor = index;
+        self.persist_favorites();
+        let label = self.favorites.entries[index].label();
+        self.status = format!("{label}: moved {}", if delta < 0 { "up" } else { "down" });
+    }
+
+    fn begin_separator(&mut self) {
+        self.prompt = Some(Prompt::Separator {
+            buffer: String::new(),
+        });
+        self.status = "Separator title · Enter to add after the cursor · Esc cancels".to_string();
+    }
+
+    fn do_add_separator(&mut self, title: &str) {
+        if title.trim().is_empty() {
+            self.status = "Separator title is empty".to_string();
+            return;
+        }
+        self.favorites
+            .add_separator(title.to_string(), Some(self.fav_cursor));
+        self.fav_cursor = (self.fav_cursor + 1).min(self.favorites.len().saturating_sub(1));
+        self.persist_favorites();
+        self.status = format!("Separator added: {title}");
+    }
+
+    fn persist_favorites(&mut self) {
+        if let Err(error) = self.favorites.save() {
+            self.status = format!("Could not save favorites: {error}");
         }
     }
 
@@ -2018,6 +2179,7 @@ impl App {
         let mut submit = false;
         if let Some(Prompt::Mkdir { buffer })
         | Some(Prompt::Rename { buffer, .. })
+        | Some(Prompt::Separator { buffer })
         | Some(Prompt::BulkRename { buffer, .. }) = self.prompt.as_mut()
         {
             match key.code {
@@ -2047,6 +2209,7 @@ impl App {
     fn submit_input(&mut self) {
         match self.prompt.take() {
             Some(Prompt::Mkdir { buffer }) => self.do_mkdir(&buffer),
+            Some(Prompt::Separator { buffer }) => self.do_add_separator(&buffer),
             Some(Prompt::Rename { buffer, target }) => self.do_rename(&buffer, &target),
             Some(Prompt::BulkRename { buffer, sources }) => self.do_bulk_rename(&buffer, &sources),
             _ => {}
@@ -2407,15 +2570,13 @@ impl App {
         self.focus = Focus::Favorites;
         if let Some(index) = self
             .favorites
-            .paths
+            .entries
             .iter()
-            .position(|path| path == &self.active().cwd)
+            .position(|entry| entry.path() == Some(self.active().cwd.as_path()))
         {
             self.fav_cursor = index;
         }
-        self.fav_cursor = self
-            .fav_cursor
-            .min(self.favorites.paths.len().saturating_sub(1));
+        self.fav_cursor = self.fav_cursor.min(self.favorites.len().saturating_sub(1));
         self.status = "Favorites: Enter go, Del remove, Ctrl+B add, Esc back to panels".to_string();
     }
 
@@ -2823,47 +2984,69 @@ impl App {
         false
     }
 
+    /// Bookmark what the panel is showing: the folder at the top, or the file
+    /// under the cursor when there is one.
+    ///
+    /// Files are bookmarked as files, not as their parent folder — that is what
+    /// makes a shortcut to one document useful.
     fn add_favorite(&mut self) {
         if self.blocked_by_preview() || self.blocked_by_loading() {
             return;
         }
         let cwd = self.active().cwd.clone();
-        if !self.favorites.add(cwd.clone()) {
+        let cursor_entry = self.active().current_entry().cloned();
+
+        // A selected file is the more specific target; a folder in the listing
+        // is bookmarked too, but `..` never is.
+        let target = match &cursor_entry {
+            Some(entry) if !entry.is_parent => entry.path.clone(),
+            _ => cwd.clone(),
+        };
+
+        if !self.favorites.add(target.clone()) {
             self.status = "Already in favorites".to_string();
             return;
         }
 
-        self.fav_cursor = self.favorites.paths.len().saturating_sub(1);
-        match self.favorites.save() {
-            Ok(()) => self.status = format!("Added to favorites: {}", cwd.display()),
-            Err(e) => {
-                self.status = format!("Added, but could not save favorites: {e}");
-            }
-        }
+        self.fav_cursor = self.favorites.len().saturating_sub(1);
+        self.persist_favorites();
+        self.status = format!("Added to favorites: {}", target.display());
     }
 
     fn open_favorite(&mut self) {
-        let Some(path) = self.favorites.paths.get(self.fav_cursor).cloned() else {
+        let Some(entry) = self.favorites.entries.get(self.fav_cursor).cloned() else {
             return;
         };
+        let Some(path) = entry.path() else {
+            // A separator is not a target; Enter on it does nothing.
+            return;
+        };
+        let path = path.to_path_buf();
         let index = self.active;
-        self.start_load(index, path, None, LoadKind::Navigate);
         self.focus = Focus::Panels;
+
+        if path.is_dir() {
+            self.start_load(index, path, None, LoadKind::Navigate);
+            return;
+        }
+
+        // A file bookmark opens its folder with the cursor on the file.
+        let parent = path.parent().map(Path::to_path_buf);
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string());
+        if let Some(parent) = parent {
+            self.start_load(index, parent, name, LoadKind::Navigate);
+        }
     }
 
     fn remove_favorite(&mut self) {
         let Some(removed) = self.favorites.remove(self.fav_cursor) else {
             return;
         };
-        self.fav_cursor = self
-            .fav_cursor
-            .min(self.favorites.paths.len().saturating_sub(1));
-        match self.favorites.save() {
-            Ok(()) => self.status = format!("Removed from favorites: {}", removed.display()),
-            Err(e) => {
-                self.status = format!("Removed, but could not save favorites: {e}");
-            }
-        }
+        self.fav_cursor = self.fav_cursor.min(self.favorites.len().saturating_sub(1));
+        self.persist_favorites();
+        self.status = format!("Removed from favorites: {}", removed.label());
     }
 }
 
@@ -3585,18 +3768,22 @@ mod tests {
         fs::write(tmp.path().join("alpha.txt"), "x").unwrap();
         let mut app = app_for(tmp.path(), tmp.path());
 
-        // `и` is the Russian key that sits where `b` is: Ctrl+и adds a favorite.
+        // `и` is the Russian key that sits where `b` is: Ctrl+и bookmarks the
+        // entry under the cursor. The cursor starts on the first row, which is
+        // `beta` here.
+        app.panels[0].select_name("beta");
         press(&mut app, KeyCode::Char('и'), KeyModifiers::CONTROL);
         // Compare canonical paths: macOS reports /var and /private/var for the
         // same temporary directory.
-        let expected = fs::canonicalize(tmp.path()).unwrap();
+        let expected = fs::canonicalize(tmp.path().join("beta")).unwrap();
         assert!(
             app.favorites
-                .paths
+                .entries
                 .iter()
+                .filter_map(crate::favorites::Entry::path)
                 .any(|path| fs::canonicalize(path).ok() == Some(expected.clone())),
             "Ctrl+и did not add the directory: {:?}",
-            app.favorites.paths
+            app.favorites.entries
         );
 
         // `ы` is `s`: opens the sort menu.
@@ -3651,8 +3838,10 @@ mod tests {
         fs::create_dir_all(&bookmarked).unwrap();
 
         let mut app = app_for(&left, &left);
-        app.favorites.paths.clear();
-        app.favorites.paths.push(bookmarked.clone());
+        app.favorites.entries.clear();
+        app.favorites
+            .entries
+            .push(crate::favorites::Entry::Path(bookmarked.clone()));
         app.fav_cursor = 0;
         app.focus = Focus::Favorites;
 
@@ -4313,8 +4502,10 @@ mod tests {
         fs::write(left.join("a.txt"), "x").unwrap();
 
         let mut app = app_for(&left, &left);
-        app.favorites.paths.clear();
-        app.favorites.paths.push(bookmarked.clone());
+        app.favorites.entries.clear();
+        app.favorites
+            .entries
+            .push(crate::favorites::Entry::Path(bookmarked.clone()));
         app.fav_cursor = 0;
         app.focus = Focus::Favorites;
         app.panels[0].select_name("a.txt");
@@ -4326,7 +4517,7 @@ mod tests {
             app.prompt.is_none(),
             "a delete prompt is not a bookmark action"
         );
-        assert_eq!(app.favorites.paths.len(), 0, "bookmark was not removed");
+        assert_eq!(app.favorites.len(), 0, "bookmark was not removed");
         assert!(
             left.join("a.txt").exists(),
             "the panel file must be untouched"
@@ -4342,8 +4533,10 @@ mod tests {
         fs::create_dir_all(&bookmarked).unwrap();
 
         let mut app = app_for(&left, &left);
-        app.favorites.paths.clear();
-        app.favorites.paths.push(bookmarked.clone());
+        app.favorites.entries.clear();
+        app.favorites
+            .entries
+            .push(crate::favorites::Entry::Path(bookmarked.clone()));
         app.fav_cursor = 0;
         app.focus = Focus::Favorites;
 
@@ -4358,11 +4551,13 @@ mod tests {
     fn arrows_move_inside_favourites() {
         let tmp = tempfile::tempdir().unwrap();
         let mut app = app_for(tmp.path(), tmp.path());
-        app.favorites.paths.clear();
+        app.favorites.entries.clear();
         for name in ["one", "two", "three"] {
             let path = tmp.path().join(name);
             fs::create_dir_all(&path).unwrap();
-            app.favorites.paths.push(path);
+            app.favorites
+                .entries
+                .push(crate::favorites::Entry::Path(path));
         }
         app.fav_cursor = 0;
         app.focus = Focus::Favorites;
@@ -4390,6 +4585,237 @@ mod tests {
             app.settings
                 .action_for(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT)),
             Some(Action::OpenFolderThere)
+        );
+    }
+
+    // ---- favorites: separators, files, reordering, browsing ----
+
+    fn favourites_app(tmp: &Path) -> App {
+        let mut app = app_for(tmp, tmp);
+        app.favorites.entries.clear();
+        app.focus = Focus::Favorites;
+        app
+    }
+
+    #[test]
+    fn arrows_browse_and_reveal_the_folder_without_leaving_the_sidebar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = tmp.path().join("first");
+        let second = tmp.path().join("second");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        fs::write(second.join("inner.txt"), "x").unwrap();
+
+        let mut app = favourites_app(tmp.path());
+        for path in [&first, &second] {
+            app.favorites
+                .entries
+                .push(crate::favorites::Entry::Path(path.clone()));
+        }
+        app.fav_cursor = 0;
+
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        wait_for_loads(&mut app);
+
+        assert_eq!(
+            app.focus,
+            Focus::Favorites,
+            "browsing must stay in the list"
+        );
+        assert_eq!(app.fav_cursor, 1);
+        assert_eq!(
+            app.panels[0].cwd, second,
+            "the panel must follow the cursor"
+        );
+        assert!(
+            app.panels[0]
+                .entries
+                .iter()
+                .any(|entry| entry.name == "inner.txt"),
+            "the revealed folder must be loaded"
+        );
+    }
+
+    #[test]
+    fn right_arrow_opens_the_bookmark_just_like_enter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bookmarked = tmp.path().join("bookmarked");
+        fs::create_dir_all(&bookmarked).unwrap();
+
+        let mut app = favourites_app(tmp.path());
+        app.favorites
+            .entries
+            .push(crate::favorites::Entry::Path(bookmarked.clone()));
+        app.fav_cursor = 0;
+
+        press(&mut app, KeyCode::Right, KeyModifiers::NONE);
+        wait_for_loads(&mut app);
+
+        assert_eq!(app.panels[0].cwd, bookmarked);
+        assert_eq!(app.focus, Focus::Panels, "opening leaves the sidebar");
+    }
+
+    #[test]
+    fn a_bookmarked_file_reveals_itself_and_opens_on_enter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder = tmp.path().join("docs");
+        fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("note.md");
+        fs::write(&file, "hello").unwrap();
+
+        let mut app = favourites_app(tmp.path());
+        app.favorites
+            .entries
+            .push(crate::favorites::Entry::Path(file.clone()));
+        app.fav_cursor = 0;
+        app.active = 0;
+
+        // Browsing to a file shows its folder with the cursor on it.
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        // (a single row cannot move; reveal through Enter instead)
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        wait_for_loads(&mut app);
+
+        assert_eq!(app.panels[0].cwd, folder);
+        assert_eq!(
+            app.panels[0]
+                .current_entry()
+                .map(|entry| entry.name.as_str()),
+            Some("note.md")
+        );
+    }
+
+    #[test]
+    fn ctrl_b_bookmarks_the_cursor_file_not_only_the_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder = tmp.path().join("docs");
+        fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("note.md");
+        fs::write(&file, "hello").unwrap();
+
+        let mut app = app_for(&folder, &folder);
+        app.favorites.entries.clear();
+        app.panels[0].select_name("note.md");
+        press(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL);
+
+        assert_eq!(app.favorites.len(), 1);
+        assert_eq!(app.favorites.path_at(0), Some(file.as_path()));
+    }
+
+    #[test]
+    fn page_keys_reorder_the_sidebar_and_survive_a_reload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = favourites_app(tmp.path());
+        for name in ["a", "b", "c"] {
+            let path = tmp.path().join(name);
+            fs::create_dir_all(&path).unwrap();
+            app.favorites
+                .entries
+                .push(crate::favorites::Entry::Path(path));
+        }
+        app.favorites.set_file(tmp.path().join("favorites.toml"));
+        app.fav_cursor = 1;
+
+        press(&mut app, KeyCode::PageUp, KeyModifiers::NONE);
+        assert_eq!(app.fav_cursor, 0);
+        assert_eq!(app.favorites.entries[0].label(), "b");
+
+        press(&mut app, KeyCode::PageDown, KeyModifiers::NONE);
+        press(&mut app, KeyCode::PageDown, KeyModifiers::NONE);
+        assert_eq!(app.fav_cursor, 2);
+        assert_eq!(app.favorites.entries[2].label(), "b");
+
+        // The order is what gets saved.
+        app.persist_favorites();
+        let reloaded = crate::favorites::Favorites::load_from_dir(tmp.path());
+        assert_eq!(reloaded.entries, app.favorites.entries);
+    }
+
+    #[test]
+    fn s_adds_a_named_separator_after_the_cursor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = favourites_app(tmp.path());
+        for name in ["work", "music"] {
+            let path = tmp.path().join(name);
+            fs::create_dir_all(&path).unwrap();
+            app.favorites
+                .entries
+                .push(crate::favorites::Entry::Path(path));
+        }
+        app.favorites.set_file(tmp.path().join("favorites.toml"));
+        app.fav_cursor = 0;
+
+        press(&mut app, KeyCode::Char('S'), KeyModifiers::NONE);
+        assert!(matches!(app.prompt, Some(Prompt::Separator { .. })));
+        for ch in "Personal".chars() {
+            press(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+        assert_eq!(
+            app.favorites.entries[1],
+            crate::favorites::Entry::Separator("Personal".to_string())
+        );
+        let reloaded = crate::favorites::Favorites::load_from_dir(tmp.path());
+        assert_eq!(reloaded.entries, app.favorites.entries);
+    }
+
+    #[test]
+    fn arrows_skip_a_separator() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = favourites_app(tmp.path());
+        app.favorites
+            .entries
+            .push(crate::favorites::Entry::Path(tmp.path().to_path_buf()));
+        app.favorites
+            .entries
+            .push(crate::favorites::Entry::Separator("Group".to_string()));
+        app.favorites
+            .entries
+            .push(crate::favorites::Entry::Path(tmp.path().to_path_buf()));
+        app.fav_cursor = 0;
+
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(app.fav_cursor, 2, "the separator is not a target");
+    }
+
+    #[test]
+    fn the_context_menu_offers_favorites_for_entries_too() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A real entry is needed: an empty folder only has `..`.
+        fs::create_dir(tmp.path().join("somedir")).unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+        app.show_favorites = false;
+        app.settings = crate::settings::Settings::defaults();
+        let backend = ratatui::backend::TestBackend::new(120, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+
+        // Row 1, not row 0: row 0 is the synthetic `..`, which has no actions.
+        let body = app.panels[0].body_area;
+        app.on_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            body.x + 2,
+            body.y + 1,
+        ));
+
+        let menu = app.context_menu.as_ref().expect("no menu");
+        assert_eq!(
+            menu.index,
+            Some(1),
+            "the click must land on a real entry, not on .."
+        );
+        assert!(menu.items.contains(&MenuItem::AddFavorite));
+        // Folder and "open in the other panel" read differently now.
+        assert!(menu.items.contains(&MenuItem::OpenFolderInOther));
+        let labels: Vec<&str> = menu.items.iter().map(|item| item.label()).collect();
+        let unique: std::collections::BTreeSet<&&str> = labels.iter().collect();
+        assert_eq!(
+            labels.len(),
+            unique.len(),
+            "duplicate menu labels: {labels:?}"
         );
     }
 }

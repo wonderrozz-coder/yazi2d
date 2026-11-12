@@ -1039,7 +1039,7 @@ fn draw_favorites(frame: &mut Frame, app: &mut App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ))
         .title_bottom(
-            Line::from(" Ctrl+B add ")
+            Line::from(" Ctrl+B add · S separator ")
                 .right_aligned()
                 .style(Style::default().fg(Color::DarkGray)),
         );
@@ -1050,41 +1050,74 @@ fn draw_favorites(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    if app.favorites.paths.is_empty() {
+    if app.favorites.is_empty() {
         frame.render_widget(
-            Paragraph::new("No favorites yet.\n\nPress Ctrl+B to add\nthe current folder.")
-                .style(Style::default().fg(Color::DarkGray))
-                .wrap(Wrap { trim: true }),
+            Paragraph::new(
+                "No favorites yet.\n\nCtrl+B bookmarks the\ncursor folder or file,\nS adds a separator.",
+            )
+            .style(Style::default().fg(Color::DarkGray))
+            .wrap(Wrap { trim: true }),
             inner,
         );
+        app.favorites_area = inner;
+        app.fav_offset = 0;
         return;
     }
 
     let width = inner.width as usize;
+    let icons = app.settings.icons;
+    let active_cwd = app.panels[app.active].cwd.clone();
+
     let items: Vec<ListItem> = app
         .favorites
-        .paths
+        .entries()
         .iter()
-        .map(|path| {
-            let name = path
-                .file_name()
-                .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_else(|| path.display().to_string());
-            let is_current = path == &app.panels[app.active].cwd;
-            let marker = if is_current { "● " } else { "  " };
-            let name = truncate_right(&name, width.saturating_sub(2));
-            let style = if is_current {
-                Style::default()
-                    .fg(Color::LightYellow)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
+        .map(|entry| match entry {
+            crate::favorites::Entry::Separator(title) => {
+                // A caption, not a row: dim, with a rule so groups read apart.
+                let line = Line::from(vec![Span::styled(
+                    truncate_right(&format!("── {title} "), width),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )]);
+                ListItem::new(line)
+            }
+            crate::favorites::Entry::Path(path) => {
+                let is_dir = path.is_dir();
+                let is_current = *path == active_cwd;
+                let name = entry.label();
 
-            ListItem::new(Line::from(vec![
-                Span::styled(marker, Style::default().fg(Color::LightYellow)),
-                Span::styled(pad_right(&name, width.saturating_sub(2)), style),
-            ]))
+                let icon = crate::icons::resolve(&name, path, is_dir, false);
+                let (glyph, glyph_color) = if icons {
+                    (icon.glyph, crate::icons::color(icon.color))
+                } else if is_dir {
+                    ('▸', Color::Cyan)
+                } else {
+                    ('·', Color::Gray)
+                };
+
+                let marker = if is_current { "●" } else { " " };
+                let name = truncate_right(&name, width.saturating_sub(4));
+                let style = if is_current {
+                    Style::default()
+                        .fg(Color::LightYellow)
+                        .add_modifier(Modifier::BOLD)
+                } else if is_dir {
+                    Style::default().fg(Color::Gray)
+                } else {
+                    Style::default().fg(Color::LightCyan)
+                };
+
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!("{marker} "),
+                        Style::default().fg(Color::LightYellow),
+                    ),
+                    Span::styled(format!("{glyph} "), Style::default().fg(glyph_color)),
+                    Span::styled(pad_right(&name, width.saturating_sub(4)), style),
+                ]))
+            }
         })
         .collect();
 
@@ -1095,15 +1128,13 @@ fn draw_favorites(frame: &mut Frame, app: &mut App, area: Rect) {
             .add_modifier(Modifier::BOLD),
     );
 
-    let cursor = app
-        .fav_cursor
-        .min(app.favorites.paths.len().saturating_sub(1));
+    let cursor = app.fav_cursor.min(app.favorites.len().saturating_sub(1));
     let mut state = ListState::default().with_selected(Some(cursor));
     frame.render_stateful_widget(list, inner, &mut state);
     // Remember where the rows are and which row is first, so a click in the
     // sidebar selects the bookmark the user actually pointed at.
     app.favorites_area = inner;
-    app.fav_offset = 0;
+    app.fav_offset = state.offset();
 }
 
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
@@ -1424,14 +1455,24 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     );
 
     let hints = if app.focus == Focus::Favorites {
-        vec![
+        // The sidebar has its own map: the arrows browse (the panel follows the
+        // cursor), PageUp/PageDown reorder the list, Enter commits.
+        let mut hints = vec![
             Hint {
                 key: "↑↓".to_string(),
-                label: "move",
+                label: "browse",
             },
             Hint {
-                key: "Enter".to_string(),
-                label: "go",
+                key: "PgUp/PgDn".to_string(),
+                label: "move row",
+            },
+            Hint {
+                key: "Enter/→".to_string(),
+                label: "open",
+            },
+            Hint {
+                key: "S".to_string(),
+                label: "separator",
             },
             Hint {
                 key: "Del".to_string(),
@@ -1441,11 +1482,17 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 key: "Ctrl+B".to_string(),
                 label: "add",
             },
-            Hint {
-                key: "Esc".to_string(),
-                label: "back",
-            },
-        ]
+        ];
+        // The exit key is whatever the user bound, not a hard-coded Esc.
+        for shortcut in app.settings.shortcuts() {
+            if shortcut.action == Action::FocusFavorites {
+                hints.push(Hint {
+                    key: chip_key(&shortcut.spec),
+                    label: "back",
+                });
+            }
+        }
+        hints
     } else {
         hints_for(app, app.held_modifiers)
     };
@@ -2111,6 +2158,7 @@ fn draw_search(frame: &mut Frame, area: Rect, search: &mut crate::app::SearchWin
 fn draw_prompt(frame: &mut Frame, area: Rect, prompt: &Prompt) {
     let (title, preferred_width, preferred_height) = match prompt {
         Prompt::Mkdir { .. } => (" New folder ", 62, 3),
+        Prompt::Separator { .. } => (" New separator ", 62, 3),
         Prompt::Rename { .. } => (" Rename ", 62, 3),
         Prompt::BulkRename { .. } => (" Bulk rename ", 72, 5),
         Prompt::Delete {
@@ -2148,7 +2196,7 @@ fn draw_prompt(frame: &mut Frame, area: Rect, prompt: &Prompt) {
     frame.render_widget(block, rect);
 
     match prompt {
-        Prompt::Mkdir { buffer } | Prompt::Rename { buffer, .. } => {
+        Prompt::Mkdir { buffer } | Prompt::Rename { buffer, .. } | Prompt::Separator { buffer } => {
             let line = Line::from(vec![
                 Span::styled("> ", Style::default().fg(Color::Yellow)),
                 Span::styled(buffer.clone(), Style::default().fg(Color::White)),
@@ -2638,7 +2686,7 @@ mod tests {
         fs::write(left.join("alpha.txt"), "hello").unwrap();
 
         let mut app = App::new(vec![left, right.clone()]);
-        app.favorites.paths.clear();
+        app.favorites.entries.clear();
         app.favorites.add(right);
 
         let text = render(&mut app, 120, 30);
