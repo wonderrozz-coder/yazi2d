@@ -6,10 +6,11 @@ A fast dual-pane terminal file manager. A spiritual fork of
 [Yazi](https://github.com/sxyazi/yazi): Yazi's speed and clean TUI, with a
 deliberately simplified Total Commander workflow.
 
-> **Status:** working MVP `0.5.2`. Two independent panels, a path bar on each,
+> **Status:** working MVP `0.6.0`. Two independent panels, a path bar on each,
 > persistent favorites, copy/move between panels, quick preview, thumbnail grid,
 > background directory loading, diagnostics log, sorting, per-type colours,
-> bulk rename, rebindable keys and trackpad support.
+> bulk rename, rebindable keys, full mouse support and recursive search.
+> Windows binaries, including a Windows 7 build, are in `dist/windows`.
 
 ```
 ┌ Favorites ─────────────┐┌ Left ──────────────────────┐┌ Right · preview ───────────┐
@@ -24,9 +25,35 @@ deliberately simplified Total Commander workflow.
  Yazi2D · Tab switch · § favs · Ctrl+E settings · Ctrl+Q preview · Ctrl+T thumbs · s sort · F5/c copy · ? help
 ```
 
+## Screenshots
+
+Every screenshot is taken in [Ghostty](https://ghostty.org), the terminal where
+the truecolor previews and thumbnails look best.
+
+List view with a folder preview on the right:
+
+![List view with image thumbnails](docs/screenshots/screenshot-2026-11-12_17-59-34-ghostty.png)
+
+Text preview of a file selected in the left panel:
+
+![Text preview](docs/screenshots/screenshot-2026-11-12_18-00-13-ghostty.png)
+
+Thumbnail grid and file preview in one window:
+
+![Thumbnail grid](docs/screenshots/screenshot-2026-11-12_17-58-46-ghostty.png)
+
+Favorites sidebar with a folder tree:
+
+![Favorites](docs/screenshots/screenshot-2026-11-12_17-58-00-ghostty.png)
+
 ## Features
 
 - **Two panels** with independent working directories, cursor and selection.
+- **Mouse everywhere**: click a row to move the cursor, double click to open,
+  click the **path bar to copy the path**, right click for a context menu
+  (open, copy path/name, select, rename, delete, new folder, find).
+- **Recursive search** on `Alt+F7` with `*`/`?` masks, a live result list and
+  `Tab` to open the hit in the other panel.
 - **Path bar** at the top of each panel (left-truncated, the tail is always visible).
 - **Favorites sidebar** — bookmarks that survive restarts.
 - **Copy/move between panels** (`F5`/`F6` or `c`/`m`), recursive, symlink-aware, confirmed before running.
@@ -41,7 +68,12 @@ deliberately simplified Total Commander workflow.
 - **Layout-independent shortcuts**: they work with the Russian keyboard layout.
 - **Background directory loading** — no freezes on slow or cloud folders.
 - **Diagnostics log** with timings and `WARN` lines for slow paths.
+- **Clipboard**: `Ctrl+L` copies the path, `Alt+I` the name, `Ctrl+Shift+C`
+  the selected paths — through `pbcopy`/`wl-copy`/`xclip`/`clip`, with OSC 52
+  as a fallback for terminals without a helper.
 - **macOS app bundle** with a custom icon (`packaging/macos/build-app.sh`).
+- **Windows binaries**: `dist/windows/yazi2d-x86_64-windows.exe` (10/11) and
+  `dist/windows/yazi2d-x86_64-win7.exe` (7/8/8.1).
 
 ## Install
 
@@ -85,6 +117,47 @@ Pass `--no-copy` to build into `dist/` without installing.
 
 The icon is generated from `packaging/icon-source.png`; regenerate it with
 `python3 packaging/render-icon.py` (no dependencies, pure stdlib).
+
+### Windows
+
+Ready-to-run binaries live in `dist/windows/`:
+
+| File | Windows |
+|---|---|
+| `yazi2d-x86_64-windows.exe` | 10 / 11 |
+| `yazi2d-x86_64-win7.exe` | 7 / 8 / 8.1 |
+
+Run it from **Windows Terminal**, **Ghostty** or **ConEmu** — a plain
+`cmd.exe` window works too, but only those terminals draw the truecolor image
+previews and the thumbnail grid correctly. Windows Terminal is preinstalled on
+Windows 11 and installable from the Microsoft Store on Windows 10.
+
+Rebuild them on Linux (Arch example):
+
+```sh
+sudo pacman -S mingw-w64-gcc zip
+rustup target add x86_64-pc-windows-gnu
+rustup +nightly component add rust-src
+
+./packaging/windows/build-windows.sh          # both binaries
+WIN7=0 ./packaging/windows/build-windows.sh   # Windows 10/11 only
+```
+
+Both files are self-contained: no Visual C++ runtime, no DLLs, no installer.
+
+> **Windows 7.** Rust dropped Windows 7 support, but the
+> `x86_64-win7-windows-gnu` target family keeps building for it. Because
+> rustup ships no prebuilt `std` for those targets, the script compiles the
+> standard library from source (`-Z build-std`), which is why the Windows 7
+> build needs a nightly toolchain. The resulting EXE imports only
+> `kernel32`, `user32`, `advapi32`, `ole32`, `shell32` and `msvcrt` — all
+> present since Windows 7.
+
+> **Ghostty on Windows.** Ghostty is currently macOS/Linux only, with no
+> official Windows build, so it cannot be bundled into the Windows zip. The
+> project is tracked in [vendor/ghostty/README.md](vendor/ghostty/README.md);
+> once a build exists, `WITH_GHOSTTY=1 ./packaging/windows/build-windows.sh`
+> packs it next to `yazi2d.exe`.
 
 > If the repository lives in a synced folder (Nextcloud/Dropbox), keep build
 > artifacts out of it: `export CARGO_TARGET_DIR="$HOME/.cache/yazi2d-target"`.
@@ -237,10 +310,12 @@ two-panel model). No Yazi source is included.
 [Yazi](https://github.com/sxyazi/yazi): скорость и лаконичный TUI от Yazi,
 модель работы — упрощённый Total Commander.
 
-> **Статус:** рабочий MVP `0.5.2`. Две независимые панели, строка текущего пути,
+> **Статус:** рабочий MVP `0.6.0`. Две независимые панели, строка текущего пути,
 > избранное, копирование и перемещение между панелями, быстрый просмотр,
 > режим миниатюр, фоновая загрузка каталогов, файловый лог, сортировка, цвета
-> по типам, массовое переименование, переназначаемые клавиши и трекпад.
+> по типам, массовое переименование, переназначаемые клавиши, полноценная мышь
+> и рекурсивный поиск. В `dist/windows` лежат готовые сборки под Windows,
+> включая Windows 7.
 
 ```
 ┌ Favorites ─────────────┐┌ Left ──────────────────────┐┌ Right · preview ───────────┐
@@ -255,10 +330,40 @@ two-panel model). No Yazi source is included.
  Yazi2D · Tab switch · § favs · Ctrl+E settings · Ctrl+Q preview · Ctrl+T thumbs · s sort · F5/c copy · ? help
 ```
 
+## Скриншоты
+
+Снято в [Ghostty](https://ghostty.org) — терминале, где truecolor-превью и
+миниатюры выглядят так, как задумано.
+
+Список и сетка миниатюр папки в соседней панели:
+
+![Список и миниатюры](docs/screenshots/screenshot-2026-11-12_17-59-34-ghostty.png)
+
+Просмотр текста выбранного файла:
+
+![Просмотр текста](docs/screenshots/screenshot-2026-11-12_18-00-13-ghostty.png)
+
+Режим миниатюр и превью в одном окне:
+
+![Режим миниатюр](docs/screenshots/screenshot-2026-11-12_17-58-46-ghostty.png)
+
+Избранное и список файлов:
+
+![Избранное](docs/screenshots/screenshot-2026-11-12_17-58-00-ghostty.png)
+
 ## Возможности
 
 - **Две панели** с независимыми текущими каталогами, курсором и выделением.
 - **Строка пути** в верхней части каждой панели (обрезается слева, хвост всегда виден).
+- **Мышь**: клик по строке ставит курсор, двойной клик открывает, клик по
+  **строке пути копирует путь**, правая кнопка открывает контекстное меню
+  (открыть, копировать путь/имя, выделить, переименовать, удалить, создать
+  папку, найти).
+- **Рекурсивный поиск** по `Alt+F7`: маски `*`/`?`, живой список результатов,
+  `Tab` — открыть найденное в другой панели.
+- **Буфер обмена**: `Ctrl+L` — путь, `Alt+I` — имя, `Ctrl+Shift+C` — пути
+  выделенных файлов; через `pbcopy`/`wl-copy`/`xclip`/`clip` с OSC 52 как
+  резервным способом для терминалов без утилиты.
 - **Избранное** — боковая панель с закладками; сохраняется между запусками.
 - **Копирование и перемещение между панелями** (`F5`/`F6` или `c`/`m`),
   рекурсивно, с поддержкой симлинков и подтверждением перед запуском.
@@ -274,6 +379,8 @@ two-panel model). No Yazi source is included.
 - **Фоновая загрузка каталогов** — без зависаний на медленных и облачных папках.
 - **Диагностический лог** с таймингами и `WARN` для медленных путей.
 - **Приложение для macOS** с иконкой (`packaging/macos/build-app.sh`).
+- **Бинарники для Windows**: `dist/windows/yazi2d-x86_64-windows.exe` (10/11)
+  и `dist/windows/yazi2d-x86_64-win7.exe` (7/8/8.1).
 
 ## Установка и запуск
 
@@ -317,6 +424,46 @@ Ghostty → kitty → WezTerm → iTerm2 → Terminal.app (крайний слу
 
 Иконка генерируется из `packaging/icon-source.png`; перерисовать её можно
 командой `python3 packaging/render-icon.py` (без зависимостей, только stdlib).
+
+### Windows
+
+Готовые бинарники — в `dist/windows/`:
+
+| Файл | Windows |
+|---|---|
+| `yazi2d-x86_64-windows.exe` | 10 / 11 |
+| `yazi2d-x86_64-win7.exe` | 7 / 8 / 8.1 |
+
+Запускать лучше в **Windows Terminal**, **Ghostty** или **ConEmu**: обычное
+окно `cmd.exe` тоже работает, но только эти терминалы правильно рисуют
+truecolor-превью картинок и сетку миниатюр. Windows Terminal есть в Windows 11
+из коробки, для Windows 10 ставится из Microsoft Store.
+
+Пересобрать можно на Linux (пример для Arch):
+
+```sh
+sudo pacman -S mingw-w64-gcc zip
+rustup target add x86_64-pc-windows-gnu
+rustup +nightly component add rust-src
+
+./packaging/windows/build-windows.sh          # оба бинарника
+WIN7=0 ./packaging/windows/build-windows.sh   # только Windows 10/11
+```
+
+Оба файла самодостаточны: ни Visual C++ Runtime, ни DLL, ни установщика.
+
+> **Windows 7.** Rust прекратил поддержку Windows 7, но семейство целей
+> `x86_64-win7-windows-gnu` продолжает собираться. Готового `std` для этих
+> целей rustup не поставляет, поэтому скрипт компилирует стандартную
+> библиотеку из исходников (`-Z build-std`) — отсюда требование к nightly.
+> Итоговый EXE импортирует только `kernel32`, `user32`, `advapi32`, `ole32`,
+> `shell32` и `msvcrt`, а они есть с Windows 7.
+
+> **Ghostty на Windows.** Ghostty сейчас существует только для macOS и Linux,
+> официальной сборки под Windows нет, поэтому упаковать его в Windows-архив
+> нельзя. Вопрос отслеживается в [vendor/ghostty/README.md](vendor/ghostty/README.md);
+> когда сборка появится, `WITH_GHOSTTY=1 ./packaging/windows/build-windows.sh`
+> положит Ghostty рядом с `yazi2d.exe`.
 
 > Проект может лежать в синхронизируемой папке (Nextcloud/Dropbox). Чтобы не
 > синхронизировать гигабайты артефактов, вынесите каталог сборки:

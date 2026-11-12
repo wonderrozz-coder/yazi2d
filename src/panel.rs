@@ -6,6 +6,8 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Instant, SystemTime};
 
+use ratatui::layout::Rect;
+
 use crate::logging;
 
 /// Directory loads slower than this are logged as `WARN`.
@@ -121,6 +123,16 @@ pub struct Panel {
     pub sort_reverse: bool,
     /// True while background stat workers are still filling in sizes/dates.
     pub enriching: bool,
+    /// Screen rectangle of the whole panel, borders included. Written by the
+    /// renderer and used to route mouse clicks.
+    pub screen_area: Rect,
+    /// Screen rectangle of the path bar row (the first inner row).
+    pub path_area: Rect,
+    /// Screen rectangle of the list/tile/preview body.
+    pub body_area: Rect,
+    /// Tile size of the thumbnail grid, so a click maps back to an entry.
+    pub tile_width: u16,
+    pub tile_height: u16,
 }
 
 /// Work queue and result channel handed to the stat worker.
@@ -156,7 +168,48 @@ impl Panel {
             sort_key: SortKey::Name,
             sort_reverse: false,
             enriching: false,
+            screen_area: Rect::new(0, 0, 0, 0),
+            path_area: Rect::new(0, 0, 0, 0),
+            body_area: Rect::new(0, 0, 0, 0),
+            tile_width: 0,
+            tile_height: 0,
         }
+    }
+
+    /// Entry index under a screen point, if the point is inside the body.
+    ///
+    /// The mapping depends on the mode: one entry per row in list mode, one
+    /// entry per tile in the thumbnail grid, and none at all in preview mode
+    /// (a preview is read-only, a click there only focuses the panel).
+    pub fn index_at(&self, x: u16, y: u16) -> Option<usize> {
+        if self.mode == PanelMode::Preview || !self.body_area.contains((x, y).into()) {
+            return None;
+        }
+
+        let row = (y - self.body_area.y) as usize;
+        let index = match self.mode {
+            PanelMode::List => self.offset + row,
+            PanelMode::Thumbnails => {
+                if self.tile_width == 0 || self.tile_height == 0 {
+                    return None;
+                }
+                let cols = self.grid_cols.max(1);
+                let column = ((x - self.body_area.x) / self.tile_width) as usize;
+                let grid_row = (y - self.body_area.y) as usize / self.tile_height as usize;
+                if column >= cols {
+                    return None;
+                }
+                (self.offset + grid_row) * cols + column.min(cols - 1)
+            }
+            PanelMode::Preview => return None,
+        };
+
+        (index < self.entries.len()).then_some(index)
+    }
+
+    /// Does a screen point fall on the path bar?
+    pub fn path_bar_at(&self, x: u16, y: u16) -> bool {
+        self.path_area.contains((x, y).into())
     }
 
     pub fn set_mode(&mut self, mode: PanelMode) {
@@ -530,8 +583,16 @@ impl Panel {
 
     /// Space/Insert: toggle the current entry and advance like Total Commander.
     pub fn toggle_selection(&mut self) {
-        if let Some(entry) = self.entries.get(self.cursor) {
+        let cursor = self.cursor;
+        self.toggle_at(cursor);
+        self.move_grid_or_cursor(1);
+    }
+
+    /// Toggle the selection of one row without moving the cursor.
+    pub fn toggle_at(&mut self, index: usize) {
+        if let Some(entry) = self.entries.get(index) {
             if entry.is_parent {
+                self.selected.clear();
                 return;
             }
             let path = entry.path.clone();
@@ -539,7 +600,6 @@ impl Panel {
                 self.selected.insert(path);
             }
         }
-        self.move_grid_or_cursor(1);
     }
 
     /// Selected entries in display order, or the cursor entry when nothing is selected.
@@ -585,7 +645,7 @@ impl Panel {
         self.offset = self.offset.min(max_offset);
     }
 
-    fn ensure_mode_visible(&mut self) {
+    pub fn ensure_mode_visible(&mut self) {
         match self.mode {
             PanelMode::Thumbnails => self.ensure_grid_visible(),
             _ => self.ensure_visible(),

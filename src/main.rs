@@ -1,4 +1,5 @@
 mod app;
+mod clipboard;
 mod colors;
 mod favorites;
 mod icons;
@@ -6,6 +7,7 @@ mod keys;
 mod logging;
 mod panel;
 mod preview;
+mod search;
 mod settings;
 mod transfer;
 mod ui;
@@ -17,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, KeyboardEnhancementFlags,
-    MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -154,21 +156,13 @@ fn run(
                     _ => {}
                 },
                 Event::Resize(_, _) => app.dirty = true,
-                // Trackpad two-finger scrolling moves the list. Horizontal
-                // scroll events are dropped: macOS emits them inside mostly
-                // vertical gestures, and they used to cause random navigation.
-                // A pointer tap arrives as a click; two quick taps open the
-                // entry under the cursor.
-                Event::Mouse(mouse) => match mouse.kind {
-                    MouseEventKind::ScrollUp => app.on_scroll(-1),
-                    MouseEventKind::ScrollDown => app.on_scroll(1),
-                    // macOS turns a two-finger tap into a right click, and a
-                    // physical tap can be left or right: treat any press the
-                    // same so the gesture works on every device.
-                    MouseEventKind::Down(_) => app.on_pointer_tap(),
-                    MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => {}
-                    _ => {}
-                },
+                // Trackpad scrolling moves the list, and the pointer is fully
+                // routed now: a click selects a row, a double click opens it, a
+                // click on the path bar copies the path, and a right click opens
+                // the context menu. `on_mouse` handles all of it; a terminal
+                // that reports only bare presses still falls back to the
+                // two-finger double tap.
+                Event::Mouse(mouse) => app.on_mouse(mouse),
                 _ => {}
             }
         }
@@ -199,8 +193,12 @@ fn print_help() {
          \x20 Ctrl+A          select everything\n\
          \x20 Ctrl+G          bulk rename ({{name}} {{ext}} {{n}} or %e=ext)\n\
          \x20 s / Ctrl+S      sort menu (name/size/type/date, r reverse)\n\
-         \x20 Ctrl+K          colour menu for file types\n
-\x20 Ctrl+E          settings: key bindings and trackpad\n\
+         \x20 Ctrl+K          colour menu for file types\n\
+         \x20 Ctrl+E          settings: key bindings and trackpad\n\
+         \x20 Alt+F7          find files recursively (Shift: other panel)\n\
+         \x20 Ctrl+L          copy the current path to the clipboard\n\
+         \x20 Alt+I           copy the cursor name to the clipboard\n\
+         \x20 Ctrl+Shift+C    copy the selected paths\n\
          \x20 F9 + Left/Right open cursor folder in that panel\n\
          \x20 F9 + Up/Down    thumbnail grid on / off\n\
          \x20 Ctrl+Q / Ctrl+P quick preview in the OTHER panel\n\

@@ -50,7 +50,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let left_loading = app.panels[1].loading;
     let right_loading = app.panels[0].loading;
     let hidden = app.hidden;
-    let colors = &app.colors;
+    let colors = app.colors;
 
     if show_favorites {
         let cols = Layout::default()
@@ -73,7 +73,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             &mut app.preview_cache,
             &mut app.image_cache,
             hidden,
-            colors,
+            &colors,
         );
         draw_panel(
             frame,
@@ -86,7 +86,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             &mut app.preview_cache,
             &mut app.image_cache,
             hidden,
-            colors,
+            &colors,
         );
     } else {
         let cols = Layout::default()
@@ -104,7 +104,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             &mut app.preview_cache,
             &mut app.image_cache,
             hidden,
-            colors,
+            &colors,
         );
         draw_panel(
             frame,
@@ -117,7 +117,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             &mut app.preview_cache,
             &mut app.image_cache,
             hidden,
-            colors,
+            &colors,
         );
     }
 
@@ -138,6 +138,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     if let Some(prompt) = &app.prompt {
         draw_prompt(frame, area, prompt);
+    }
+    if let Some(menu) = &mut app.context_menu {
+        draw_context_menu(frame, area, menu);
+    }
+    if let Some(search) = &mut app.search {
+        draw_search(frame, area, search);
     }
 }
 
@@ -179,6 +185,7 @@ fn draw_panel(
                 .add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(area);
+    panel.screen_area = area;
     frame.render_widget(block, area);
 
     if inner.height == 0 || inner.width == 0 {
@@ -193,6 +200,11 @@ fn draw_panel(
             Constraint::Min(0),
         ])
         .split(inner);
+
+    // Remember the rows so a mouse click can be mapped back to the path bar or
+    // to a specific entry.
+    panel.path_area = rows[0];
+    panel.body_area = rows[2];
 
     // The path bar is the first row of every panel.
     let path = panel.cwd.display().to_string();
@@ -563,6 +575,8 @@ fn draw_thumbnails(
     let rows = (area.height / tile_height).max(1) as usize;
     panel.grid_cols = cols;
     panel.grid_rows = rows;
+    panel.tile_width = tile_width;
+    panel.tile_height = tile_height;
     panel.page_size = cols * rows;
     panel.ensure_grid_visible();
 
@@ -876,7 +890,7 @@ fn center_vertically(area: Rect, height: u16) -> Rect {
     }
 }
 
-fn draw_favorites(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_favorites(frame: &mut Frame, app: &mut App, area: Rect) {
     let active = app.focus == Focus::Favorites;
     let border_color = if active {
         Color::Yellow
@@ -956,6 +970,10 @@ fn draw_favorites(frame: &mut Frame, app: &App, area: Rect) {
         .min(app.favorites.paths.len().saturating_sub(1));
     let mut state = ListState::default().with_selected(Some(cursor));
     frame.render_stateful_widget(list, inner, &mut state);
+    // Remember where the rows are and which row is first, so a click in the
+    // sidebar selects the bookmark the user actually pointed at.
+    app.favorites_area = inner;
+    app.fav_offset = 0;
 }
 
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
@@ -1043,11 +1061,11 @@ fn modifier_hint(modifiers: crossterm::event::KeyModifiers) -> Option<&'static s
     if modifiers.contains(M::CONTROL) {
         return Some(
             " Ctrl · B add fav · D focus favs · F show/hide favs · Q/P preview other · T thumbs \
-             · O open there · A all · G rename · K colours · S sort · R refresh · H hidden · E settings",
+             · O open there · A all · G rename · K colours · S sort · R refresh · H hidden · L copy path · Shift+C copy selection · E settings",
         );
     }
     if modifiers.contains(M::ALT) {
-        return Some(" Option · ← / → open the cursor folder in that panel");
+        return Some(" Option · ← / → open the cursor folder in that panel · F7 find files");
     }
     if modifiers.contains(M::SHIFT) {
         return Some(" Shift · ← / → open the cursor folder in that panel · Tab focus favorites");
@@ -1072,7 +1090,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 " Yazi2D · operation in progress — navigation stays available"
             }
             Focus::Panels => {
-                " Yazi2D · Tab switch · § favs · Ctrl+E settings · Ctrl+Q preview · Ctrl+T thumbs · Shift+←/→ open there · s sort · F5/c copy · F6/m move · F8/d delete · ? help"
+                " Yazi2D · Tab switch · § favs · Ctrl+E settings · Ctrl+Q preview · Ctrl+T thumbs · Alt+F7 find · Shift+←/→ open there · s sort · F5/c copy · F6/m move · F8/d delete · ? help"
             }
         }
     };
@@ -1157,7 +1175,20 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         help_line("  Ctrl+B / a", "add current dir to favorites", key),
         help_line("  Ctrl+F", "show / hide the favorites sidebar", key),
         help_line("  Ctrl+R", "refresh both panels", key),
+        help_line("  Alt+F7", "find files recursively (Tab: open there)", key),
+        help_line("  Ctrl+L · Alt+I", "copy the path / the name", key),
+        help_line("  Ctrl+Shift+C", "copy the selected paths", key),
         help_line("  Ctrl+H / .", "toggle hidden files", key),
+        Line::from(Span::styled("MOUSE", header)),
+        help_line("  click a row", "focus the panel and move the cursor", key),
+        help_line("  double click", "open a folder, or a file in its app", key),
+        help_line("  click the path bar", "copy the folder path", key),
+        help_line(
+            "  right click",
+            "menu: copy, rename, delete, new folder…",
+            key,
+        ),
+        help_line("  wheel", "scroll the list", key),
         help_line("  Esc while loading", "cancel the directory load", key),
         Line::from(Span::styled(
             "  ? / F1 close help      q / Ctrl+C quit",
@@ -1359,6 +1390,218 @@ fn draw_settings_menu(frame: &mut Frame, area: Rect, app: &crate::app::App) {
     }
 
     draw_menu_overlay(frame, area, " Settings ", 62, lines);
+}
+
+/// Right-click menu anchored at the pointer.
+///
+/// The rectangle is computed from the number of items and clamped to the
+/// screen, so a menu opened near the bottom or right edge stays visible. The
+/// rectangle is stored back into the menu so the click handler can map a row
+/// back to an item.
+fn draw_context_menu(frame: &mut Frame, area: Rect, menu: &mut crate::app::ContextMenu) {
+    let width = menu
+        .items
+        .iter()
+        .map(|item| item.label().len())
+        .max()
+        .unwrap_or(10) as u16
+        + 6;
+    let width = width.min(area.width.saturating_sub(2)).max(16);
+    let height = (menu.items.len() as u16 + 2).min(area.height);
+    if width == 0 || height == 0 {
+        return;
+    }
+
+    // Open below-right of the pointer, flipping when there is no room.
+    let x = if menu.x + width + 1 > area.right() {
+        area.right().saturating_sub(width + 1)
+    } else {
+        menu.x
+    };
+    let y = if menu.y + height + 1 > area.bottom() {
+        menu.y.saturating_sub(height)
+    } else {
+        menu.y
+    };
+    let rect = Rect {
+        x: x.max(area.x),
+        y: y.max(area.y),
+        width,
+        height,
+    };
+    menu.rect = rect;
+
+    frame.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(Span::styled(
+            " Actions ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(Color::Rgb(18, 18, 24)));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let lines: Vec<Line> = menu
+        .items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let selected = index == menu.cursor;
+            let marker = if selected { "▶ " } else { "  " };
+            let style = if selected {
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            Line::from(vec![
+                Span::styled(marker, Style::default().fg(Color::Cyan)),
+                Span::styled(
+                    truncate_right(item.label(), inner.width as usize - 2),
+                    style,
+                ),
+            ])
+        })
+        .take(inner.height as usize)
+        .collect();
+
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// `Alt+F7` search window: query on top, hits below.
+fn draw_search(frame: &mut Frame, area: Rect, search: &mut crate::app::SearchWindow) {
+    let width = area.width.saturating_sub(8).clamp(40, 96);
+    let height = area.height.saturating_sub(2).max(8);
+    if width == 0 || height == 0 {
+        return;
+    }
+    let rect = centered(width, height, area);
+    frame.render_widget(Clear, rect);
+
+    let state = if search.running {
+        format!("searching… {} entries", search.scanned)
+    } else if search.hits.is_empty() {
+        "no results yet · Enter starts the search".to_string()
+    } else {
+        format!(
+            "{} result(s) in {} entries{}",
+            search.hits.len(),
+            search.scanned,
+            if search.truncated {
+                " (limit reached)"
+            } else {
+                ""
+            }
+        )
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(Span::styled(
+            format!(" Find in {} ", search.root.display()),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(
+            Line::from(format!(
+                " Enter open · Tab open there · F5 search · Esc close · {state} "
+            ))
+            .style(Style::default().fg(Color::DarkGray)),
+        )
+        .style(Style::default().bg(Color::Rgb(18, 18, 24)));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let query_area = Rect { height: 1, ..inner };
+    let list_area = Rect {
+        y: inner.y + 2,
+        height: inner.height.saturating_sub(2),
+        ..inner
+    };
+    search.list_area = list_area;
+    search.ensure_visible();
+
+    let query = Line::from(vec![
+        Span::styled("> ", Style::default().fg(Color::Yellow)),
+        Span::styled(search.query.clone(), Style::default().fg(Color::White)),
+        Span::styled("▌", Style::default().fg(Color::Yellow)),
+    ]);
+    frame.render_widget(Paragraph::new(query), query_area);
+
+    if list_area.height == 0 {
+        return;
+    }
+
+    let page = list_area.height as usize;
+    let start = search.offset.min(search.hits.len());
+    let end = (start + page).min(search.hits.len());
+    let width = list_area.width as usize;
+
+    let lines: Vec<Line> = search.hits[start..end]
+        .iter()
+        .enumerate()
+        .map(|(relative, hit)| {
+            let index = start + relative;
+            let selected = index == search.cursor;
+            let marker = if selected { "▶ " } else { "  " };
+            let name = hit
+                .path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| hit.path.display().to_string());
+
+            // Show the folder relative to the search root, so hits from
+            // different subfolders stay distinguishable.
+            let parent = hit.path.parent().unwrap_or(search.root.as_path());
+            let folder = parent
+                .strip_prefix(&search.root)
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|_| parent.display().to_string());
+            let folder = if folder.is_empty() {
+                ".".to_string()
+            } else {
+                folder
+            };
+
+            let icon = if hit.is_dir { "▸ " } else { "  " };
+            let name_style = if selected {
+                Style::default()
+                    .fg(Color::LightYellow)
+                    .add_modifier(Modifier::BOLD)
+            } else if hit.is_dir {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+
+            let used = marker.len() + icon.len() + name.width();
+            let room = width.saturating_sub(used + 2);
+            Line::from(vec![
+                Span::styled(marker, Style::default().fg(Color::Cyan)),
+                Span::styled(icon, name_style),
+                Span::styled(truncate_right(&name, width.saturating_sub(6)), name_style),
+                Span::styled(
+                    format!("   {}", truncate_right(&folder, room)),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ])
+        })
+        .collect();
+
+    frame.render_widget(Paragraph::new(lines), list_area);
 }
 
 fn draw_prompt(frame: &mut Frame, area: Rect, prompt: &Prompt) {

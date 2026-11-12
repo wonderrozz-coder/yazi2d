@@ -143,6 +143,7 @@ impl Preset {
 }
 
 /// Colour assignment for the current preset.
+#[derive(Clone, Copy)]
 pub struct Colors {
     preset: Preset,
 }

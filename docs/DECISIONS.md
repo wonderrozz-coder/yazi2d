@@ -763,3 +763,113 @@ and reviewed without nested heredoc quoting.
 **Consequences:** Double-clicking the app now opens a truecolor terminal when one
 is installed, so previews work. Users without any of those terminals still get a
 working app, with a hint about why images look flat.
+
+## ADR-037 — Mouse: hit-testing in the renderer, decisions in `App`
+
+**Status:** accepted (2026-11-12, `0.6.0`)
+
+**Context:** Mouse capture was already enabled for trackpad scrolling and the
+two-finger double tap, but clicks carried no meaning: the app only knew *that* a
+pointer was pressed, never *where*. Mapping a `(column, row)` to an entry needs
+the layout, and the layout only exists while a frame is being drawn.
+
+**Decision:** The renderer records the screen rectangles it used — the whole
+panel, the path-bar row, the list body, the tile size of the thumbnail grid, and
+the favorites list — into `Panel`/`App`. `Panel::index_at(x, y)` then converts a
+point into an entry index for the active mode; `App::on_mouse` makes the
+decision. Layout is written every frame, so a resize can never leave a stale
+rectangle behind.
+
+Gestures:
+
+* left click — focus that panel, put the cursor on the row;
+* double left click — open (folder in place, file in its application);
+* left click on the path bar — copy the folder path;
+* right click — context menu for the entry, or for the folder on the path bar;
+* wheel — unchanged scrolling.
+
+A double click is detected on the *press* with a 400 ms window and requires the
+same `(panel, row)` target, so clicking two different rows never opens anything.
+`MouseEventKind::Moved`/`Drag` are dropped before touching `dirty`: capture
+reports every pointer move, and repainting for those would burn CPU while the
+pointer merely rests over the window.
+
+**Consequences:** The mouse is fully usable and no key binding lost its meaning.
+The rectangles are the only coupling between `ui` and `app`, and they are plain
+integers, so the tests can lay out a frame and then synthesise clicks.
+
+## ADR-038 — Clipboard through helpers, with OSC 52 as the fallback
+
+**Status:** accepted (2026-11-12, `0.6.0`)
+
+**Context:** Copying a path is the single most requested mouse interaction, but
+a TUI owns no window and therefore no clipboard. Options were a clipboard crate
+that pulls a platform dependency tree, OSC 52 only, or platform helpers.
+
+**Decision:** `src/clipboard.rs` tries, in order: `YAZI2D_CLIPBOARD` (a custom
+program reading stdin, used by tests and for overrides), the platform helpers
+(`pbcopy`; `wl-copy` then `xclip` then `xsel`; `clip.exe` then PowerShell), and
+finally OSC 52. Helpers are preferred because they work in a plain `conhost`
+window; OSC 52 is emitted last because terminals without support ignore it
+silently.
+
+A helper is waited for up to 400 ms: `wl-copy` and `xclip` stay alive on purpose
+to serve the selection, so a helper still running after that grace period is
+reaped on a worker thread instead of being killed — killing it would empty the
+clipboard.
+
+**Consequences:** No new dependency, `cargo build` still produces a single
+binary, and copying works on macOS, Wayland, X11 and Windows. The cost is that
+the helper name is part of the status message (`Path copied (wl-copy): …`), which
+makes a broken clipboard obvious instead of silent.
+
+## ADR-039 — Search on a worker thread, streamed in batches
+
+**Status:** accepted (2026-11-12, `0.6.0`)
+
+**Context:** A recursive search can touch hundreds of thousands of entries. Doing
+it on the UI thread would freeze the panels, and building the full result list
+before showing anything would make the window feel broken.
+
+**Decision:** `src/search.rs` walks the tree on a dedicated thread and sends
+`SearchMsg` batches of up to 24 hits over an `mpsc` channel; `App::poll_search`
+drains them from `tick`. The walk is a plain DFS with an explicit stack (no
+recursion, no depth-limit stack overflow), never follows symlinked directories,
+and stops at 1000 hits with a `truncated` flag. Matching is a case-insensitive
+substring, or a wildcard mask when the query contains `*`/`?`.
+
+The query is editable: typing clears the previous results, `Enter` starts the
+search and, once results exist, opens the cursor hit — folder in place, file by
+opening its parent with the cursor on the file. `Tab` opens the hit in the other
+panel.
+
+**Consequences:** Searching a huge folder keeps the UI responsive and shows
+results as they arrive. The 1000-hit cap keeps memory bounded; the status line
+says when it was reached, so the user can refine the query instead of trusting a
+silently short list.
+
+## ADR-040 — Windows: two targets, `-Z build-std` only for Windows 7
+
+**Status:** accepted (2026-11-12, `0.6.0`)
+
+**Context:** Windows 7 support was requested alongside 10/11. Rust dropped
+Windows 7 as a tier-1 platform; the `*-win7-windows-gnu` target family still
+builds for it, but rustup ships no prebuilt `std`, and the GNU linking step needs
+MinGW-w64 import libraries.
+
+**Decision:** One script, two artefacts:
+
+* `x86_64-pc-windows-gnu` on a stable toolchain → Windows 10/11;
+* `x86_64-win7-windows-gnu` with `+nightly -Z build-std=std,panic_abort` →
+  Windows 7/8/8.1, with `-L native=<windows_x86_64_gnu crate>/lib` because that
+  target imports `windows.0.48.5` from the crate source.
+
+Both are static: no MSVC runtime, no DLLs. The produced EXEs were checked with
+`objdump -p`: the win7 build imports only `kernel32`, `user32`, `advapi32`,
+`ole32`, `shell32` and `msvcrt`, all present since Windows 7.
+
+**Consequences:** Users on Windows 7 are not cut off, while the common build
+stays on stable. The cost is one nightly-only build in the release process, and
+the win7 build has to recompile `std` (about two minutes here). Ghostty cannot
+be bundled yet: it has no official Windows build, so `vendor/ghostty/` is a drop
+point the packaging script reads when it exists.

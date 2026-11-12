@@ -3,13 +3,17 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, ModifierKeyCode};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, ModifierKeyCode, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::layout::Rect;
 
 use crate::colors::Colors;
 use crate::favorites::Favorites;
 use crate::logging;
 use crate::panel::{LoadKind, LoadResult, Panel, PanelMode, SortKey, StatsUpdate};
 use crate::preview::{ImageCache, PreviewCache};
+use crate::search::{self, SearchMsg};
 use crate::settings::{Action, KeySpec, Settings};
 use crate::transfer::{self, Job, JobKind, JobMsg};
 
@@ -55,9 +59,17 @@ pub struct App {
     pub favorites: Favorites,
     pub show_favorites: bool,
     pub fav_cursor: usize,
+    /// Screen rectangle of the favorites list body (borders excluded).
+    pub favorites_area: Rect,
+    /// First favorites row currently drawn, so clicks map to the right bookmark.
+    pub fav_offset: usize,
     pub hidden: bool,
     pub prompt: Option<Prompt>,
     pub help: bool,
+    /// Right-click menu over an entry, or over a path bar.
+    pub context_menu: Option<ContextMenu>,
+    /// `Alt+F7` recursive search window.
+    pub search: Option<SearchWindow>,
     pub job: Option<Job>,
     /// At most one pending background directory load per panel.
     pub loads: [Option<Receiver<LoadResult>>; 2],
@@ -95,6 +107,144 @@ pub struct App {
     pub leader: Option<Instant>,
     /// Timestamp of the last pointer tap, for double-tap detection.
     pub last_tap: Option<Instant>,
+    /// Where the last tap landed: panel index and row index. A second tap on a
+    /// different row starts a new gesture instead of opening anything.
+    pub last_tap_target: Option<(usize, usize)>,
+}
+
+/// One row of the right-click menu.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MenuItem {
+    Open,
+    OpenInOther,
+    CopyPath,
+    CopyName,
+    ToggleSelect,
+    CopySelection,
+    ClearSelection,
+    Rename,
+    Delete,
+    Mkdir,
+    AddFavorite,
+    Thumbnails,
+    Search,
+}
+
+impl MenuItem {
+    pub fn label(self) -> &'static str {
+        match self {
+            MenuItem::Open => "Open",
+            MenuItem::OpenInOther => "Open in the other panel",
+            MenuItem::CopyPath => "Copy full path",
+            MenuItem::CopyName => "Copy name",
+            MenuItem::ToggleSelect => "Select / deselect",
+            MenuItem::CopySelection => "Copy selected paths",
+            MenuItem::ClearSelection => "Clear selection",
+            MenuItem::Rename => "Rename",
+            MenuItem::Delete => "Delete",
+            MenuItem::Mkdir => "New folder",
+            MenuItem::AddFavorite => "Add folder to favorites",
+            MenuItem::Thumbnails => "Thumbnails on / off",
+            MenuItem::Search => "Find (Alt+F7)",
+        }
+    }
+}
+
+/// A right-click menu anchored at the pointer.
+#[derive(Clone, Debug)]
+pub struct ContextMenu {
+    pub panel: usize,
+    /// Entry the menu was opened on; `None` for a right-click on the path bar.
+    pub index: Option<usize>,
+    pub items: Vec<MenuItem>,
+    pub cursor: usize,
+    pub x: u16,
+    pub y: u16,
+    /// Screen rectangle, written by the renderer so clicks can be routed.
+    pub rect: Rect,
+}
+
+impl ContextMenu {
+    /// Row index under a screen point, if any.
+    pub fn index_at(&self, x: u16, y: u16) -> Option<usize> {
+        // The first row inside the border is item 0.
+        let first = self.rect.y + 1;
+        if x <= self.rect.x || x >= self.rect.right().saturating_sub(1) {
+            return None;
+        }
+        if y < first || y >= self.rect.bottom().saturating_sub(1) {
+            return None;
+        }
+        let index = (y - first) as usize;
+        (index < self.items.len()).then_some(index)
+    }
+}
+
+/// State of the `Alt+F7` recursive search.
+#[derive(Debug)]
+pub struct SearchWindow {
+    /// Folder the search started from; the panel the hits open into.
+    pub root: PathBuf,
+    pub panel: usize,
+    pub query: String,
+    pub hits: Vec<search::Hit>,
+    pub cursor: usize,
+    pub offset: usize,
+    /// Entries the worker has looked at so far.
+    pub scanned: usize,
+    /// The worker stopped at the result cap.
+    pub truncated: bool,
+    pub running: bool,
+    pub receiver: Option<Receiver<SearchMsg>>,
+    /// Screen rectangle of the list body, written by the renderer.
+    pub list_area: Rect,
+}
+
+impl SearchWindow {
+    fn new(root: PathBuf, panel: usize) -> Self {
+        Self {
+            root,
+            panel,
+            query: String::new(),
+            hits: Vec::new(),
+            cursor: 0,
+            offset: 0,
+            scanned: 0,
+            truncated: false,
+            running: false,
+            receiver: None,
+            list_area: Rect::new(0, 0, 0, 0),
+        }
+    }
+
+    /// Rows the window can show at once (one hit per row).
+    fn page(&self) -> usize {
+        self.list_area.height.max(1) as usize
+    }
+
+    fn move_cursor(&mut self, delta: i32) {
+        if self.hits.is_empty() {
+            return;
+        }
+        let last = self.hits.len() as i32 - 1;
+        self.cursor = (self.cursor as i32 + delta).clamp(0, last) as usize;
+        self.ensure_visible();
+    }
+
+    pub fn ensure_visible(&mut self) {
+        let page = self.page();
+        if self.cursor < self.offset {
+            self.offset = self.cursor;
+        } else if self.cursor >= self.offset + page {
+            self.offset = self.cursor + 1 - page;
+        }
+        let max_offset = self.hits.len().saturating_sub(page);
+        self.offset = self.offset.min(max_offset);
+    }
+
+    fn current(&self) -> Option<&search::Hit> {
+        self.hits.get(self.cursor)
+    }
 }
 
 impl App {
@@ -151,9 +301,13 @@ impl App {
             favorites: Favorites::load_or_default(),
             show_favorites: true,
             fav_cursor: 0,
+            favorites_area: Rect::new(0, 0, 0, 0),
+            fav_offset: 0,
             hidden,
             prompt: None,
             help: false,
+            context_menu: None,
+            search: None,
             job: None,
             loads: [None, None],
             stat_jobs: [None, None],
@@ -174,6 +328,7 @@ impl App {
             held_keys: Vec::new(),
             leader: None,
             last_tap: None,
+            last_tap_target: None,
         }
     }
 
@@ -193,6 +348,7 @@ impl App {
     pub fn tick(&mut self) {
         self.poll_loads();
         self.poll_stats();
+        self.poll_search();
         self.sync_preview_scroll();
         // Background preview/image loads complete after a frame or two; repaint
         // when something new showed up.
@@ -470,6 +626,16 @@ impl App {
             return;
         }
 
+        if self.context_menu.is_some() {
+            self.handle_context_menu_key(key);
+            return;
+        }
+
+        if self.search.is_some() {
+            self.handle_search_key(key);
+            return;
+        }
+
         if key.code == KeyCode::Char('q') && !key.modifiers.contains(KeyModifiers::CONTROL) {
             self.should_quit = true;
             return;
@@ -551,6 +717,22 @@ impl App {
             return;
         }
 
+        // `Alt+Shift+F7` opens the search in the other panel, `Alt+F7` in the
+        // active one; `Meta`/`Super` is accepted too because some terminals
+        // deliver the Option key that way.
+        if key.code == KeyCode::F(7)
+            && key
+                .modifiers
+                .intersects(KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::META)
+        {
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                self.begin_search_in(1 - self.active);
+            } else {
+                self.begin_search();
+            }
+            return;
+        }
+
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Left => {
@@ -618,6 +800,20 @@ impl App {
                 }
                 KeyCode::Char('e') => {
                     self.open_settings();
+                    return;
+                }
+                KeyCode::Char('l') => {
+                    self.copy_current_path();
+                    return;
+                }
+                KeyCode::Char('i') => {
+                    self.copy_current_name();
+                    return;
+                }
+                // Ctrl+Shift+C keeps the terminal's own Ctrl+C for interrupts
+                // while still copying the selection's paths.
+                KeyCode::Char('C') => {
+                    self.copy_selection_paths();
                     return;
                 }
                 KeyCode::Char('g') => {
@@ -777,14 +973,22 @@ impl App {
         }
     }
 
-    /// Handle a pointer tap (keyboard-reporting terminals send taps as clicks).
+    /// Handle a pointer tap that carries no position.
     ///
-    /// A double tap with two fingers is the gesture for "open the entry under
-    /// the cursor": folders are entered, files are opened in the system app.
-    /// Single taps do nothing, so a stray click never navigates.
+    /// Kept for terminals that report bare presses without coordinates (and for
+    /// the tests of the double-tap window); a real click goes through
+    /// [`App::on_mouse`], which knows which row was hit.
+    #[allow(dead_code)]
     pub fn on_pointer_tap(&mut self) {
         self.dirty = true;
-        if self.help || self.prompt.is_some() || self.sort_menu || self.theme_menu {
+        if self.help
+            || self.prompt.is_some()
+            || self.sort_menu
+            || self.theme_menu
+            || self.settings_menu
+            || self.context_menu.is_some()
+            || self.search.is_some()
+        {
             return;
         }
         if self.focus == Focus::Panels && self.active().loading {
@@ -802,8 +1006,387 @@ impl App {
         }
 
         match self.focus {
-            Focus::Favorites => self.open_favorite(),
-            Focus::Panels => self.open_current_entry(),
+            Focus::Favorites => {
+                self.open_favorite();
+            }
+            Focus::Panels => {
+                // A tap knows nothing about position, so it can only open the
+                // entry under the cursor; a click carries its target instead.
+                self.open_current_entry();
+            }
+        }
+    }
+
+    /// Route a mouse event.
+    ///
+    /// Terminals that report positions (every modern one with mouse capture)
+    /// arrive here; a terminal that only reports bare presses falls back to
+    /// `on_pointer_tap`, which keeps the two-finger double tap working.
+    ///
+    /// * left click on a row or a tile — focus that panel and move the cursor
+    /// * double left click — open the entry (folder in place, file in its app)
+    /// * left click on the path bar — copy the full path to the clipboard
+    /// * right click — a context menu for the entry or for the folder
+    /// * wheel — scroll, as before
+    pub fn on_mouse(&mut self, event: MouseEvent) {
+        match event.kind {
+            MouseEventKind::ScrollUp => {
+                self.on_scroll(-1);
+                return;
+            }
+            MouseEventKind::ScrollDown => {
+                self.on_scroll(1);
+                return;
+            }
+            // Horizontal scrolling is dropped: macOS emits it inside mostly
+            // vertical trackpad gestures and it used to cause random jumps.
+            MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => return,
+            // Mouse capture also reports every motion; repainting for those
+            // would burn CPU while the pointer merely rests over the window.
+            MouseEventKind::Moved | MouseEventKind::Drag(_) => return,
+            _ => {}
+        }
+
+        self.dirty = true;
+
+        // A menu or the search window owns the pointer while it is open.
+        if self.context_menu.is_some() {
+            self.on_context_menu_mouse(event);
+            return;
+        }
+        if self.search.is_some() {
+            self.on_search_mouse(event);
+            return;
+        }
+        if self.help
+            || self.prompt.is_some()
+            || self.sort_menu
+            || self.theme_menu
+            || self.settings_menu
+        {
+            return;
+        }
+
+        if let MouseEventKind::Down(button) = event.kind {
+            self.handle_click(button, event.column, event.row);
+        }
+    }
+
+    fn handle_click(&mut self, button: MouseButton, x: u16, y: u16) {
+        // Favorites sidebar.
+        if self.show_favorites && self.favorites_area.contains((x, y).into()) {
+            self.focus = Focus::Favorites;
+            let row = y.saturating_sub(self.favorites_area.y) as usize;
+            let index = self.fav_offset + row;
+            if index < self.favorites.paths.len() {
+                self.fav_cursor = index;
+                let target = (usize::MAX, index);
+                let doubled = self.register_tap(target);
+                if doubled {
+                    self.open_favorite();
+                }
+            }
+            return;
+        }
+
+        // Which panel was clicked? The path bar and the body are the targets.
+        let Some(panel) = self.panel_at(x, y) else {
+            return;
+        };
+        self.focus = Focus::Panels;
+        self.active = panel;
+
+        // The path bar copies the current path on a left click and offers the
+        // folder actions on a right click.
+        if self.panels[panel].path_bar_at(x, y) {
+            self.last_tap = None;
+            self.last_tap_target = None;
+            match button {
+                MouseButton::Left => {
+                    if self.panels[panel].loading {
+                        self.status = "The folder is still loading".to_string();
+                        return;
+                    }
+                    let path = self.panels[panel].cwd.display().to_string();
+                    self.copy_text(&path, "Path copied");
+                }
+                MouseButton::Right => self.open_context_menu(panel, None, x, y),
+                _ => {}
+            }
+            return;
+        }
+
+        if !self.panels[panel].body_area.contains((x, y).into()) {
+            return;
+        }
+        let Some(index) = self.panels[panel].index_at(x, y) else {
+            return;
+        };
+        match button {
+            MouseButton::Left => {
+                // The entry under the pointer becomes the cursor; a second
+                // click on the same entry opens it (folder in place, file in
+                // its default application).
+                self.panels[panel].cursor = index;
+                self.panels[panel].ensure_mode_visible();
+                self.sync_preview_scroll();
+
+                if self.register_tap((panel, index)) {
+                    self.open_clicked(panel, index);
+                }
+            }
+            MouseButton::Right => self.open_context_menu(panel, Some(index), x, y),
+            _ => {}
+        }
+    }
+
+    /// Remember a click and report whether it completes a double click.
+    ///
+    /// Clicking a different row resets the gesture, so clicking twice on two
+    /// different entries never opens anything by accident.
+    fn register_tap(&mut self, target: (usize, usize)) -> bool {
+        let now = Instant::now();
+        let repeated = self.last_tap_target == Some(target)
+            && self
+                .last_tap
+                .is_some_and(|last| now.saturating_duration_since(last) <= DOUBLE_TAP_WINDOW);
+
+        if repeated {
+            self.last_tap = None;
+            self.last_tap_target = None;
+        } else {
+            self.last_tap = Some(now);
+            self.last_tap_target = Some(target);
+        }
+        repeated
+    }
+
+    /// Open the entry that was just double clicked.
+    fn open_clicked(&mut self, panel: usize, index: usize) {
+        if self.panels[panel].mode == PanelMode::Preview {
+            self.status = "Preview is read-only: Esc returns to the list".to_string();
+            return;
+        }
+
+        let previous = self.active;
+        self.active = panel;
+        self.panels[panel].cursor = index;
+        self.open_current_entry();
+        self.active = previous;
+    }
+
+    /// Index of the panel whose rectangle contains the point.
+    fn panel_at(&self, x: u16, y: u16) -> Option<usize> {
+        (0..self.panels.len()).find(|&index| self.panels[index].screen_area.contains((x, y).into()))
+    }
+
+    /// Copy text to the system clipboard and report the outcome.
+    fn copy_text(&mut self, text: &str, subject: &str) {
+        match crate::clipboard::copy_text(text) {
+            Ok(how) => self.status = format!("{subject} ({how}): {text}"),
+            Err(error) => self.status = format!("Clipboard unavailable: {error}"),
+        }
+    }
+
+    /// Copy the active panel's folder path.
+    fn copy_current_path(&mut self) {
+        let text = self.active().cwd.display().to_string();
+        self.copy_text(&text, "Path copied");
+    }
+
+    /// Copy the cursor entry's full path (or its name with `Alt+I`).
+    fn copy_current_name(&mut self) {
+        let Some(entry) = self.active().current_entry().cloned() else {
+            return;
+        };
+        self.copy_text(&entry.name, "Name copied");
+    }
+
+    /// `Ctrl+Shift+C`: copy the full path of every selected entry.
+    fn copy_selection_paths(&mut self) {
+        let paths = self.active().selection_or_current();
+        if paths.is_empty() {
+            self.status = "Nothing selected".to_string();
+            return;
+        }
+        let text = paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.copy_text(&text, &format!("Copied {} path(s)", paths.len()));
+    }
+
+    /// Right click: build the menu for an entry, or for the folder itself when
+    /// `index` is `None` (the path bar).
+    fn open_context_menu(&mut self, panel: usize, index: Option<usize>, x: u16, y: u16) {
+        let mut items = Vec::new();
+
+        match index {
+            Some(index) => {
+                let Some(entry) = self.panels[panel].entries.get(index).cloned() else {
+                    return;
+                };
+                self.panels[panel].cursor = index;
+                self.sync_preview_scroll();
+
+                if !entry.is_parent {
+                    items.push(MenuItem::Open);
+                    if entry.is_dir {
+                        items.push(MenuItem::OpenInOther);
+                    }
+                }
+                items.push(MenuItem::CopyPath);
+                items.push(MenuItem::CopyName);
+                items.push(MenuItem::ToggleSelect);
+                if !self.panels[panel].selected.is_empty() {
+                    items.push(MenuItem::CopySelection);
+                    items.push(MenuItem::ClearSelection);
+                }
+                if !entry.is_parent {
+                    items.push(MenuItem::Rename);
+                    items.push(MenuItem::Delete);
+                }
+            }
+            None => {
+                items.push(MenuItem::CopyPath);
+                items.push(MenuItem::Mkdir);
+                items.push(MenuItem::AddFavorite);
+                items.push(MenuItem::Thumbnails);
+                items.push(MenuItem::Search);
+            }
+        }
+
+        self.focus = Focus::Panels;
+        self.active = panel;
+        self.context_menu = Some(ContextMenu {
+            panel,
+            index,
+            items,
+            cursor: 0,
+            x,
+            y,
+            rect: Rect::new(x, y, 0, 0),
+        });
+        self.status = "↑↓ choose · Enter run · Esc close".to_string();
+    }
+
+    fn close_context_menu(&mut self) {
+        self.context_menu = None;
+        self.status.clear();
+    }
+
+    fn handle_context_menu_key(&mut self, key: KeyEvent) {
+        let Some(menu) = self.context_menu.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                menu.cursor = menu.cursor.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                menu.cursor = (menu.cursor + 1).min(menu.items.len().saturating_sub(1));
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                let item = menu.items.get(menu.cursor).copied();
+                let panel = menu.panel;
+                let index = menu.index;
+                self.context_menu = None;
+                if let Some(item) = item {
+                    self.run_menu_item(item, panel, index);
+                }
+            }
+            KeyCode::Esc | KeyCode::Char('q') => self.close_context_menu(),
+            _ => {}
+        }
+    }
+
+    fn on_context_menu_mouse(&mut self, event: MouseEvent) {
+        let Some(menu) = &self.context_menu else {
+            return;
+        };
+        let Some(index) = menu.index_at(event.column, event.row) else {
+            if matches!(event.kind, MouseEventKind::Down(_))
+                && !menu.rect.contains((event.column, event.row).into())
+            {
+                self.close_context_menu();
+            }
+            return;
+        };
+
+        match event.kind {
+            MouseEventKind::Down(_) => {
+                if let Some(menu) = self.context_menu.as_mut() {
+                    menu.cursor = index;
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                let item = self
+                    .context_menu
+                    .as_ref()
+                    .and_then(|menu| menu.items.get(index).copied());
+                let (panel, target) = (menu.panel, menu.index);
+                self.context_menu = None;
+                if let Some(item) = item {
+                    self.run_menu_item(item, panel, target);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn run_menu_item(&mut self, item: MenuItem, panel: usize, index: Option<usize>) {
+        self.active = panel;
+        self.focus = Focus::Panels;
+
+        match item {
+            MenuItem::Open => {
+                let index = index.unwrap_or(self.panels[panel].cursor);
+                self.panels[panel].cursor = index;
+                self.active = panel;
+                self.open_current_entry();
+            }
+            MenuItem::OpenInOther => {
+                let index = index.unwrap_or(self.panels[panel].cursor);
+                self.panels[panel].cursor = index;
+                self.open_entry_in_panel(1 - panel);
+            }
+            MenuItem::CopyPath => {
+                let Some(index) = index else {
+                    return;
+                };
+                let Some(entry) = self.panels[panel].entries.get(index) else {
+                    return;
+                };
+                let text = entry.path.display().to_string();
+                self.copy_text(&text, "Path copied");
+            }
+            MenuItem::CopyName => {
+                let Some(index) = index else {
+                    return;
+                };
+                let Some(entry) = self.panels[panel].entries.get(index) else {
+                    return;
+                };
+                let text = entry.name.clone();
+                self.copy_text(&text, "Name copied");
+            }
+            MenuItem::ToggleSelect => {
+                if let Some(index) = index {
+                    self.panels[panel].toggle_at(index);
+                }
+            }
+            MenuItem::ClearSelection => {
+                self.panels[panel].selected.clear();
+                self.status = "Selection cleared".to_string();
+            }
+            MenuItem::CopySelection => self.copy_selection_paths(),
+            MenuItem::Rename => self.begin_rename(),
+            MenuItem::Delete => self.begin_delete(),
+            MenuItem::Mkdir => self.begin_mkdir(),
+            MenuItem::AddFavorite => self.add_favorite(),
+            MenuItem::Thumbnails => self.toggle_thumbnails_in(panel),
+            MenuItem::Search => self.begin_search_in(panel),
         }
     }
 
@@ -1636,6 +2219,227 @@ impl App {
         };
     }
 
+    /// `Alt+F7`: search recursively from the active panel's folder.
+    fn begin_search(&mut self) {
+        self.begin_search_in(self.active);
+    }
+
+    /// `Alt+F7` (or `Alt+Shift+F7` for the other panel): open the search window.
+    fn begin_search_in(&mut self, panel: usize) {
+        if self.panels[panel].loading {
+            self.status = "Folder is still loading — wait or press Esc".to_string();
+            return;
+        }
+        self.focus = Focus::Panels;
+        self.active = panel;
+        let root = self.panels[panel].cwd.clone();
+        self.search = Some(SearchWindow::new(root, panel));
+        self.status = "Find: type a name or a mask (*.rs) · Enter start · Esc close".to_string();
+    }
+
+    fn close_search(&mut self) {
+        self.search = None;
+        self.status.clear();
+    }
+
+    /// Re-run the search from the beginning with the current query.
+    fn start_search(&mut self) {
+        let Some(window) = self.search.as_mut() else {
+            return;
+        };
+        let query = window.query.trim().to_string();
+        if query.is_empty() {
+            self.status = "Type what to look for".to_string();
+            return;
+        }
+
+        let root = window.root.clone();
+        let hidden = self.hidden;
+        window.hits.clear();
+        window.cursor = 0;
+        window.offset = 0;
+        window.scanned = 0;
+        window.truncated = false;
+        window.running = true;
+        window.receiver = Some(search::spawn(root.clone(), query.clone(), hidden));
+        self.status = format!("Searching {query:?} in {}…", root.display());
+    }
+
+    /// Drain results from the search worker.
+    fn poll_search(&mut self) {
+        let Some(window) = self.search.as_mut() else {
+            return;
+        };
+        let mut changed = false;
+        let mut done = false;
+
+        if let Some(receiver) = window.receiver.as_ref() {
+            while let Ok(message) = receiver.try_recv() {
+                window.scanned = message.scanned;
+                window.truncated = message.truncated;
+                window.hits.extend(message.hits);
+                if message.done {
+                    done = true;
+                }
+                changed = true;
+            }
+        }
+
+        if done {
+            window.running = false;
+            window.receiver = None;
+            let count = window.hits.len();
+            let scanned = window.scanned;
+            let truncated = window.truncated;
+            self.status = if truncated {
+                format!(
+                    "Found {count}+ in {scanned} entries (limit {}) — refine the query",
+                    search::MAX_RESULTS
+                )
+            } else {
+                format!("Found {count} in {scanned} entries")
+            };
+        }
+
+        if changed {
+            self.dirty = true;
+        }
+    }
+
+    fn handle_search_key(&mut self, key: KeyEvent) {
+        let Some(window) = self.search.as_mut() else {
+            return;
+        };
+
+        match key.code {
+            KeyCode::Esc => self.close_search(),
+            KeyCode::Enter => {
+                if window.running {
+                    return;
+                }
+                // Enter starts the search while typing and opens the hit once
+                // results are already in.
+                if window.hits.is_empty() {
+                    self.start_search();
+                } else {
+                    self.open_search_hit();
+                }
+            }
+            KeyCode::F(5) => self.start_search(),
+            KeyCode::Up => window.move_cursor(-1),
+            KeyCode::Down => window.move_cursor(1),
+            KeyCode::PageUp => {
+                let page = window.page() as i32;
+                window.move_cursor(-page);
+            }
+            KeyCode::PageDown => {
+                let page = window.page() as i32;
+                window.move_cursor(page);
+            }
+            KeyCode::Home => window.move_cursor(-(window.hits.len() as i32)),
+            KeyCode::End => window.move_cursor(window.hits.len() as i32),
+            KeyCode::Tab => {
+                // Tab opens the hit in the OTHER panel.
+                let other = 1 - window.panel;
+                self.open_search_hit_in(other);
+            }
+            KeyCode::Backspace => {
+                window.query.pop();
+                window.hits.clear();
+                window.cursor = 0;
+                window.offset = 0;
+            }
+            KeyCode::Char(c)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                window.query.push(c);
+                // Results belong to the previous query, so drop them.
+                window.hits.clear();
+                window.cursor = 0;
+                window.offset = 0;
+                window.scanned = 0;
+                window.truncated = false;
+            }
+            _ => {}
+        }
+    }
+
+    /// Enter in the search window: reveal the hit in its panel.
+    fn open_search_hit(&mut self) {
+        let Some(panel) = self.search.as_ref().map(|window| window.panel) else {
+            return;
+        };
+        self.open_search_hit_in(panel);
+    }
+
+    fn open_search_hit_in(&mut self, panel: usize) {
+        let Some(hit) = self
+            .search
+            .as_ref()
+            .and_then(|window| window.current().cloned())
+        else {
+            self.status = "No result to open".to_string();
+            return;
+        };
+
+        self.search = None;
+        self.focus = Focus::Panels;
+        self.active = panel;
+
+        if !hit.is_dir {
+            // Reveal the containing folder with the cursor on the file.
+            let parent = hit
+                .path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| hit.path.clone());
+            let name = hit
+                .path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string());
+            self.start_load(panel, parent, name, LoadKind::Navigate);
+            return;
+        }
+
+        // A folder opens in place, so its contents are immediately visible.
+        let name = hit
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string());
+        let parent = hit.path.parent().map(Path::to_path_buf);
+        if let (Some(parent), Some(name)) = (parent, name) {
+            if parent == self.panels[panel].cwd {
+                self.panels[panel].select_name(&name);
+                return;
+            }
+        }
+        self.start_load(panel, hit.path, None, LoadKind::Navigate);
+    }
+
+    fn on_search_mouse(&mut self, event: MouseEvent) {
+        let MouseEventKind::Down(button) = event.kind else {
+            return;
+        };
+        let Some(window) = self.search.as_mut() else {
+            return;
+        };
+
+        if !window.list_area.contains((event.column, event.row).into()) {
+            return;
+        }
+
+        let row = event.row.saturating_sub(window.list_area.y) as usize;
+        let index = window.offset + row;
+        if index < window.hits.len() {
+            window.cursor = index;
+            if button == MouseButton::Left {
+                self.open_search_hit();
+            }
+        }
+    }
+
     /// Ctrl+Q / Ctrl+P: quick-view the **other** panel (Total Commander style).
     ///
     /// The active panel keeps its list and cursor, so moving the cursor drives
@@ -1663,17 +2467,23 @@ impl App {
     }
 
     fn toggle_thumbnails(&mut self) {
-        if self.active().mode == PanelMode::Thumbnails {
-            self.active_mut().set_mode(PanelMode::List);
+        self.toggle_thumbnails_in(self.active);
+    }
+
+    /// Flip the list/thumbnail mode of one panel (used by the context menu).
+    fn toggle_thumbnails_in(&mut self, panel: usize) {
+        if self.panels[panel].mode == PanelMode::Thumbnails {
+            self.panels[panel].set_mode(PanelMode::List);
             self.status = "List view".to_string();
             return;
         }
 
-        if self.active().mode == PanelMode::Preview {
-            self.active_mut().leave_preview();
+        if self.panels[panel].mode == PanelMode::Preview {
+            self.panels[panel].leave_preview();
         }
         self.focus = Focus::Panels;
-        self.active_mut().set_mode(PanelMode::Thumbnails);
+        self.active = panel;
+        self.panels[panel].set_mode(PanelMode::Thumbnails);
         self.status = "Thumbnails: arrows move, Enter open, Ctrl+T back to list".to_string();
     }
 
@@ -2809,5 +3619,312 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(!left.join("gone.txt").exists());
+    }
+
+    // ---- mouse, context menu and search ----
+
+    /// Lay out a two-panel frame so the panels have real screen rectangles.
+    /// Mouse handling depends on them; without a frame every rectangle is zero.
+    fn layout(app: &mut App, width: u16, height: u16) -> ratatui::backend::TestBackend {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| crate::ui::draw(frame, app)).unwrap();
+        terminal.backend().clone()
+    }
+
+    fn mouse(kind: MouseEventKind, x: u16, y: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn clicking_the_path_bar_copies_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("clip.txt");
+        let script = dir.path().join("fake-clip");
+        fs::write(&script, format!("#!/bin/sh\ncat > {}\n", out.display())).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&script).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script, perms).unwrap();
+        }
+
+        let mut app = app_for(dir.path(), dir.path());
+        app.show_favorites = false;
+        layout(&mut app, 120, 30);
+
+        let path_area = app.panels[0].path_area;
+        assert!(path_area.height > 0, "the path bar was not laid out");
+
+        // `YAZI2D_CLIPBOARD` is process-wide, so the test drives the helper
+        // directly instead of going through the environment.
+        let copied = crate::clipboard::copy_with(
+            Some(script.display().to_string().as_str()),
+            &app.panels[0].cwd.display().to_string(),
+        );
+        assert!(copied.is_ok(), "helper failed: {copied:?}");
+        assert_eq!(
+            fs::read_to_string(&out).unwrap(),
+            app.panels[0].cwd.display().to_string()
+        );
+
+        // A real click must report success in the status line, not panic.
+        app.on_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            path_area.x + 1,
+            path_area.y,
+        ));
+        assert!(
+            app.status.starts_with("Path copied") || app.status.starts_with("Clipboard"),
+            "unexpected status: {}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn a_click_on_a_row_moves_the_cursor_and_focuses_that_panel() {
+        let tmp = tempfile::tempdir().unwrap();
+        let left = tmp.path().join("left");
+        let right = tmp.path().join("right");
+        fs::create_dir_all(&left).unwrap();
+        fs::create_dir_all(&right).unwrap();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            fs::write(left.join(name), "x").unwrap();
+            fs::write(right.join(name), "x").unwrap();
+        }
+
+        let mut app = app_for(&left, &right);
+        app.show_favorites = false;
+        layout(&mut app, 120, 30);
+
+        let body = app.panels[1].body_area;
+        assert!(body.height > 2, "the panel body was not laid out");
+
+        // Row 2 of the right panel: `..` is row 0, so this is its first entry.
+        app.on_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            body.x + 2,
+            body.y + 1,
+        ));
+
+        assert_eq!(app.active, 1, "the clicked panel must become active");
+        assert_eq!(app.focus, Focus::Panels);
+        assert_eq!(app.panels[1].cursor, 1);
+    }
+
+    #[test]
+    fn right_click_opens_a_menu_and_copy_path_runs_on_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let left = tmp.path().join("left");
+        let right = tmp.path().join("right");
+        fs::create_dir_all(&left).unwrap();
+        fs::create_dir_all(&right).unwrap();
+        fs::write(left.join("a.txt"), "x").unwrap();
+
+        let mut app = app_for(&left, &right);
+        app.show_favorites = false;
+        layout(&mut app, 120, 30);
+        app.panels[0].select_name("a.txt");
+
+        let body = app.panels[0].body_area;
+        let row = (app.panels[0].cursor - app.panels[0].offset) as u16;
+        app.on_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            body.x + 2,
+            body.y + row,
+        ));
+
+        let menu = app
+            .context_menu
+            .as_ref()
+            .expect("no menu after right click");
+        assert!(menu.items.contains(&MenuItem::CopyPath));
+        assert!(menu.items.contains(&MenuItem::Rename));
+        assert_eq!(menu.index, Some(app.panels[0].cursor));
+
+        // Escape closes it without running anything.
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.context_menu.is_none());
+    }
+
+    #[test]
+    fn right_click_on_the_path_bar_offers_folder_actions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+        app.show_favorites = false;
+        layout(&mut app, 120, 30);
+
+        let path_area = app.panels[1].path_area;
+        app.on_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            path_area.x + 1,
+            path_area.y,
+        ));
+
+        let menu = app.context_menu.as_ref().expect("no menu");
+        assert_eq!(menu.index, None);
+        assert!(menu.items.contains(&MenuItem::Mkdir));
+        assert!(menu.items.contains(&MenuItem::Search));
+        assert!(!menu.items.contains(&MenuItem::Rename));
+    }
+
+    #[test]
+    fn double_click_on_a_folder_enters_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let left = tmp.path().join("left");
+        let child = left.join("child");
+        let right = tmp.path().join("right");
+        fs::create_dir_all(&child).unwrap();
+        fs::create_dir_all(&right).unwrap();
+
+        let mut app = app_for(&left, &right);
+        app.show_favorites = false;
+        layout(&mut app, 120, 30);
+        app.panels[0].select_name("child");
+
+        let body = app.panels[0].body_area;
+        let row = (app.panels[0].cursor - app.panels[0].offset) as u16;
+        let click = || {
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                body.x + 2,
+                body.y + row,
+            )
+        };
+
+        app.on_mouse(click());
+        assert_eq!(app.panels[0].cwd, left, "a single click must not navigate");
+
+        app.on_mouse(click());
+        wait_for_loads(&mut app);
+        assert_eq!(app.panels[0].cwd, child, "a double click must enter");
+    }
+
+    #[test]
+    fn clicking_two_different_rows_never_opens_anything() {
+        let tmp = tempfile::tempdir().unwrap();
+        let left = tmp.path().join("left");
+        let child = left.join("child");
+        let right = tmp.path().join("right");
+        fs::create_dir_all(&child).unwrap();
+        fs::create_dir_all(&right).unwrap();
+        fs::write(left.join("file.txt"), "x").unwrap();
+
+        let mut app = app_for(&left, &right);
+        app.show_favorites = false;
+        layout(&mut app, 120, 30);
+
+        let body = app.panels[0].body_area;
+        let child_row = app.panels[0]
+            .entries
+            .iter()
+            .position(|entry| entry.name == "child")
+            .unwrap();
+        let file_row = app.panels[0]
+            .entries
+            .iter()
+            .position(|entry| entry.name == "file.txt")
+            .unwrap();
+
+        app.on_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            body.x + 2,
+            body.y + child_row as u16,
+        ));
+        app.on_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            body.x + 2,
+            body.y + file_row as u16,
+        ));
+        wait_for_loads(&mut app);
+
+        assert_eq!(app.panels[0].cwd, left);
+    }
+
+    #[test]
+    fn alt_f7_opens_the_search_window_and_enter_reveals_a_hit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let left = tmp.path().join("left");
+        let right = tmp.path().join("right");
+        let nested = left.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir_all(&right).unwrap();
+        fs::write(nested.join("needle.txt"), "x").unwrap();
+        fs::write(left.join("other.md"), "x").unwrap();
+
+        let mut app = app_for(&left, &right);
+        press(&mut app, KeyCode::F(7), KeyModifiers::ALT);
+        assert!(app.search.is_some(), "Alt+F7 must open the search");
+
+        for ch in "needle".chars() {
+            press(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+        // Wait for the worker to finish.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            app.tick();
+            if app.search.as_ref().is_some_and(|window| !window.running) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let hits = app.search.as_ref().unwrap().hits.len();
+        assert_eq!(hits, 1, "expected exactly one hit");
+
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        wait_for_loads(&mut app);
+
+        assert!(app.search.is_none(), "the search window must close");
+        assert_eq!(app.panels[0].cwd, nested, "the hit's folder must open");
+        assert_eq!(
+            app.panels[0]
+                .current_entry()
+                .map(|entry| entry.name.as_str()),
+            Some("needle.txt")
+        );
+    }
+
+    #[test]
+    fn esc_closes_the_search_without_navigating() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+
+        press(&mut app, KeyCode::F(7), KeyModifiers::ALT);
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+
+        assert!(app.search.is_none());
+        assert_eq!(app.panels[0].cwd, tmp.path());
+    }
+
+    #[test]
+    fn ctrl_shift_c_copies_the_selected_paths_without_quitting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+        fs::write(tmp.path().join("a.txt"), "x").unwrap();
+        app.panels[0].reload(false).unwrap();
+
+        press(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
+        // Ctrl+Shift+C is distinguishable from Ctrl+C only under the kitty
+        // keyboard protocol, where the terminal reports an uppercase `C`.
+        press(
+            &mut app,
+            KeyCode::Char('C'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+
+        assert!(!app.should_quit, "Ctrl+Shift+C must not quit");
+        assert!(
+            app.status.starts_with("Copied") || app.status.starts_with("Clipboard"),
+            "unexpected status: {}",
+            app.status
+        );
     }
 }
