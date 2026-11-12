@@ -84,6 +84,8 @@ pub struct App {
     pub settings_cursor: usize,
     /// True while the settings menu waits for a key to bind.
     pub rebinding: bool,
+    /// Which of the two slots of `settings_cursor` is being edited.
+    pub settings_slot: usize,
     /// User settings: bindings and trackpad direction.
     pub settings: Settings,
     /// Colour-theme menu overlay.
@@ -337,6 +339,7 @@ impl App {
             settings_menu: false,
             settings_cursor: 0,
             rebinding: false,
+            settings_slot: 0,
             settings: Settings::load(),
             theme_menu: false,
             colors: Colors::new(),
@@ -714,6 +717,12 @@ impl App {
         }
 
         if self.settings_menu {
+            // `F1` still opens help from here: it is the documented escape hatch
+            // and the only key that is never rebindable.
+            if key.code == KeyCode::F(1) {
+                self.help = true;
+                return;
+            }
             self.handle_settings_key(key);
             return;
         }
@@ -725,35 +734,6 @@ impl App {
 
         if self.search.is_some() {
             self.handle_search_key(key);
-            return;
-        }
-
-        if key.code == KeyCode::Char('q') && !key.modifiers.contains(KeyModifiers::CONTROL) {
-            self.should_quit = true;
-            return;
-        }
-
-        // A user override wins over the built-in handling below. Only actions
-        // that were explicitly rebound are consulted, so defaults keep their
-        // context-sensitive behaviour.
-        if let Some(action) = self.custom_binding(key) {
-            self.dispatch_action(action);
-            return;
-        }
-
-        if matches!(key.code, KeyCode::Char('?') | KeyCode::F(1)) {
-            self.help = true;
-            return;
-        }
-
-        // Shift+Tab (BackTab) is the primary way into and out of favorites.
-        // `§` is the dedicated single key for the same action (requested
-        // because double-Tab felt unreliable on macOS).
-        if matches!(key.code, KeyCode::BackTab)
-            || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT))
-            || matches!(key.code, KeyCode::Char('§'))
-        {
-            self.toggle_favorites_focus();
             return;
         }
 
@@ -769,9 +749,14 @@ impl App {
             }
         }
 
-        if key.code == KeyCode::F(9) {
+        // The F9 chord is only armed while F9 is not a regular binding. Rebind
+        // F9 to something (delete, for instance) and the chord steps aside.
+        if key.code == KeyCode::F(9)
+            && key.modifiers.is_empty()
+            && self.settings.action_for(key).is_none()
+        {
             self.leader = Some(Instant::now());
-            self.status = "F9 + ←/→ open there · F9 + ↑/↓ thumbnails · Esc cancels".to_string();
+            self.status = "F9 + ←/→ open the cursor folder in that panel".to_string();
             return;
         }
 
@@ -785,28 +770,10 @@ impl App {
                     self.open_entry_in_panel(1);
                     return;
                 }
-                KeyCode::Up | KeyCode::Down => {
-                    self.toggle_thumbnails();
-                    return;
-                }
-                KeyCode::Esc => {
-                    self.status = "F9 chord cancelled".to_string();
-                    return;
-                }
                 _ => {
                     self.status = "F9 chord cancelled".to_string();
                 }
             }
-        }
-
-        if key.code == KeyCode::Tab {
-            self.focus = Focus::Panels;
-            self.active ^= 1;
-            self.status = format!(
-                "Active panel: {}",
-                if self.active == 0 { "Left" } else { "Right" }
-            );
-            return;
         }
 
         // `Alt+Shift+F7` opens the search in the other panel, `Alt+F7` in the
@@ -825,113 +792,41 @@ impl App {
             return;
         }
 
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
-            match key.code {
-                KeyCode::Left => {
-                    self.preview_panel(0);
-                    return;
-                }
-                KeyCode::Right => {
-                    self.preview_panel(1);
-                    return;
-                }
-                KeyCode::Char('f') => {
-                    self.toggle_favorites_sidebar();
-                    return;
-                }
-                KeyCode::Char('d') => {
-                    self.focus_favorites();
-                    return;
-                }
-                KeyCode::Char('b') => {
-                    self.add_favorite();
-                    return;
-                }
-                KeyCode::Char('h') => {
-                    self.toggle_hidden();
-                    return;
-                }
-                KeyCode::Char('q') | KeyCode::Char('p') => {
-                    self.toggle_preview();
-                    return;
-                }
-                KeyCode::Char('o') => {
-                    self.open_entry_in_panel(1 - self.active);
-                    return;
-                }
-                KeyCode::Char('t') => {
-                    self.toggle_thumbnails();
-                    return;
-                }
-                KeyCode::Char('r') => {
-                    self.reload_panel_async(0);
-                    self.reload_panel_async(1);
-                    self.status = "Refreshing…".to_string();
-                    return;
-                }
-                KeyCode::Char('a') => {
-                    let count = self.active_mut().select_all();
-                    self.sync_preview_scroll();
-                    self.status = if count == 0 {
-                        "Nothing to select".to_string()
-                    } else {
-                        format!("Selected {count} item(s)")
-                    };
-                    return;
-                }
-                KeyCode::Char('s') => {
-                    self.sort_menu = true;
-                    self.status =
-                        "Sort: n name · s size · t type · d date · r reverse · Esc".into();
-                    return;
-                }
-                KeyCode::Char('k') => {
-                    self.theme_menu = true;
-                    self.status = "Colour themes: 1 default · 2 vivid · 3 mono · Esc".into();
-                    return;
-                }
-                KeyCode::Char('e') => {
-                    self.open_settings();
-                    return;
-                }
-                KeyCode::Char('l') => {
-                    self.copy_current_path();
-                    return;
-                }
-                KeyCode::Char('i') => {
-                    self.copy_current_name();
-                    return;
-                }
-                // Ctrl+Shift+C keeps the terminal's own Ctrl+C for interrupts
-                // while still copying the selection's paths.
-                KeyCode::Char('C') => {
-                    self.copy_selection_paths();
-                    return;
-                }
-                KeyCode::Char('g') => {
-                    self.begin_bulk_rename();
-                    return;
-                }
-                _ => {}
-            }
+        // `Ctrl+←/→` is an alias of "preview in that panel": some terminals
+        // deliver the modifier, some turn it into `Alt+←/→`, and the alias costs
+        // nothing. It is *not* a rebindable entry, so it cannot shadow anything.
+        if key.modifiers == KeyModifiers::CONTROL
+            && matches!(key.code, KeyCode::Left | KeyCode::Right)
+        {
+            self.preview_panel(if key.code == KeyCode::Left { 0 } else { 1 });
+            return;
         }
 
-        // Shift+←/→ opens the cursor folder in that panel; Command (Super)+←/→
-        // opens the quick preview there. Both are offered because terminals
-        // disagree about which modifier they deliver.
-        // Cross-panel actions are split between the two modifiers that
-        // actually reach the terminal:
-        //   Shift+←/→  open the cursor folder in the indicated panel
-        //   Alt+←/→    quick preview in the indicated panel
-        // Ctrl and Command are deliberately unused: macOS reserves Ctrl+arrows
-        // for Spaces and terminals (Ghostty, iTerm2) bind Command+arrows to
-        // line editing, so they never arrive here.
-        if let Some((target, preview)) = cross_panel_action(key) {
-            if preview {
-                self.preview_panel(target);
-            } else {
-                self.open_entry_in_panel(target);
-            }
+        // `?` and `F1` are the two keys that always work: F1 is never
+        // rebindable, `?` is the documented alias.
+        if matches!(key.code, KeyCode::Char('?') | KeyCode::F(1)) && key.modifiers.is_empty() {
+            self.help = true;
+            return;
+        }
+
+        // The settings menu has its own slot outside `Action::ALL` (it must stay
+        // reachable), so it is checked before the general dispatch.
+        if self
+            .settings
+            .stored_slots(Action::Settings)
+            .iter()
+            .flatten()
+            .any(|spec| spec.matches(key))
+        {
+            self.open_settings();
+            return;
+        }
+
+        // Everything that is a rebindable shortcut is dispatched from the single
+        // resolved list. Nothing below may hard-code one of those keys again:
+        // that is exactly how `q` kept quitting after it was rebound.
+        if let Some(action) = self.settings.action_for(key) {
+            self.dispatch_action(action);
             return;
         }
 
@@ -1110,7 +1005,11 @@ impl App {
             }
             KeyCode::Home | KeyCode::Char('g') => self.active_mut().go_top(),
             KeyCode::End | KeyCode::Char('G') => self.active_mut().go_bottom(),
-            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => self.enter_current(),
+            // Only Enter opens a file in an external application. `→`/`l` are
+            // listed here to enter a folder, but a file is never launched by a
+            // key that also means "move right".
+            KeyCode::Enter => self.enter_current(),
+            KeyCode::Right | KeyCode::Char('l') => self.enter_folder_only(),
             KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => self.go_parent(),
             KeyCode::Char(' ') | KeyCode::Insert => self.toggle_selection_and_measure(),
             KeyCode::Esc => self.clear_selection(),
@@ -1780,19 +1679,7 @@ impl App {
         }
     }
 
-    /// Only user-overridden bindings are matched here.
-    fn custom_binding(&self, key: KeyEvent) -> Option<Action> {
-        Action::ALL.into_iter().find(|action| {
-            self.settings.is_custom(*action)
-                && self
-                    .settings
-                    .keys_for(*action)
-                    .iter()
-                    .any(|spec| spec.matches(key))
-        })
-    }
-
-    /// Run an action chosen from a custom binding.
+    /// Run an action chosen by a key binding.
     fn dispatch_action(&mut self, action: Action) {
         match action {
             Action::Quit => self.should_quit = true,
@@ -1821,6 +1708,17 @@ impl App {
             Action::AddFavorite => self.add_favorite(),
             Action::FocusFavorites => self.toggle_favorites_focus(),
             Action::ToggleSidebar => self.toggle_favorites_sidebar(),
+            Action::CopyPath => self.copy_current_path(),
+            Action::CopyName => self.copy_current_name(),
+            Action::CopySelection => self.copy_selection_paths(),
+            Action::SwitchPanel => {
+                self.focus = Focus::Panels;
+                self.active ^= 1;
+                self.status = format!(
+                    "Active panel: {}",
+                    if self.active == 0 { "Left" } else { "Right" }
+                );
+            }
             Action::OpenHere => self.open_current_entry(),
             Action::OpenFolderThere => self.open_entry_in_panel(1 - self.active),
             Action::PreviewThere => self.preview_panel(1 - self.active),
@@ -1836,34 +1734,42 @@ impl App {
     fn open_settings(&mut self) {
         self.settings_menu = true;
         self.settings_cursor = 0;
+        self.settings_slot = 0;
         self.rebinding = false;
-        self.status = "Settings: ↑↓ move · Enter rebind · r reset · i invert trackpad · Esc close"
+        self.status = "Settings: ↑↓ action · ←→ slot · Enter assign · Del clear · r reset · i trackpad · Esc close"
             .to_string();
     }
 
+    /// The action currently under the settings cursor.
+    fn settings_action(&self) -> Action {
+        let actions = Action::menu_actions();
+        actions[self.settings_cursor.min(actions.len().saturating_sub(1))]
+    }
+
     fn handle_settings_key(&mut self, key: KeyEvent) {
-        // Rebinding swallows the next key, whatever it is.
+        // Assigning swallows the next key, whatever it is.
         if self.rebinding {
             if key.code == KeyCode::Esc {
                 self.rebinding = false;
                 self.status = "Rebind cancelled".to_string();
                 return;
             }
-            let action = Action::ALL[self.settings_cursor.min(Action::ALL.len() - 1)];
+            let action = self.settings_action();
+            let slot = self.settings_slot;
             let spec = KeySpec::from_event(key);
             self.rebinding = false;
-            if crate::settings::is_reserved(spec) {
-                self.status = format!(
-                    "{} is reserved by the app and cannot be rebound",
-                    spec.label()
-                );
-                return;
-            }
-            if self.settings.rebind(action, spec) {
-                self.persist_settings();
-                self.status = format!("{} is now {}", action.label(), spec.label());
-            } else {
-                self.status = format!("Cannot rebind {}", action.label());
+
+            match self.settings.assign(action, slot, spec) {
+                Ok(()) => {
+                    self.persist_settings();
+                    self.status = format!(
+                        "{}: slot {} is now {}",
+                        action.label(),
+                        slot + 1,
+                        spec.label()
+                    );
+                }
+                Err(reason) => self.status = format!("Cannot assign: {reason}"),
             }
             return;
         }
@@ -1871,10 +1777,16 @@ impl App {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
                 self.settings_cursor = self.settings_cursor.saturating_sub(1);
+                self.settings_slot = 0;
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.settings_cursor =
-                    (self.settings_cursor + 1).min(Action::ALL.len().saturating_sub(1));
+                let last = Action::menu_actions().len().saturating_sub(1);
+                self.settings_cursor = (self.settings_cursor + 1).min(last);
+                self.settings_slot = 0;
+            }
+            // The two slots are equal citizens: ←/→ picks which one to edit.
+            KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
+                self.settings_slot ^= 1;
             }
             KeyCode::Char('i') => {
                 self.settings.invert_scroll = !self.settings.invert_scroll;
@@ -1888,15 +1800,35 @@ impl App {
                     }
                 );
             }
+            KeyCode::Char('g') => {
+                self.settings.icons = !self.settings.icons;
+                self.persist_settings();
+                self.status = format!(
+                    "Nerd Font icons: {}",
+                    if self.settings.icons { "on" } else { "off" }
+                );
+            }
             KeyCode::Char('r') => {
-                let action = Action::ALL[self.settings_cursor.min(Action::ALL.len() - 1)];
+                let action = self.settings_action();
                 self.settings.reset(action);
                 self.persist_settings();
                 self.status = format!("{} reset to defaults", action.label());
             }
+            // Delete/Backspace empties the focused slot, which is how a second
+            // key that is not wanted is removed.
+            KeyCode::Delete | KeyCode::Backspace => {
+                let action = self.settings_action();
+                let slot = self.settings_slot;
+                self.settings.clear_slot(action, slot);
+                self.persist_settings();
+                self.status = format!("{}: slot {} cleared", action.label(), slot + 1);
+            }
             KeyCode::Enter | KeyCode::Char(' ') => {
                 self.rebinding = true;
-                self.status = "Press the new key combination, Esc to cancel".to_string();
+                self.status = format!(
+                    "Press the key for slot {} · Esc cancels",
+                    self.settings_slot + 1
+                );
             }
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.settings_menu = false;
@@ -1947,6 +1879,42 @@ impl App {
     }
 
     fn handle_favorites_key(&mut self, key: KeyEvent) {
+        // `Esc` deliberately does nothing here: the favorites panel is left with
+        // the key that opened it, so a stray Esc cannot hide it mid-browse.
+        if let Some(action) = self.settings.action_for(key) {
+            match action {
+                Action::FocusFavorites => {
+                    self.toggle_favorites_focus();
+                    return;
+                }
+                Action::AddFavorite => {
+                    self.add_favorite();
+                    return;
+                }
+                Action::ToggleSidebar => {
+                    self.toggle_favorites_sidebar();
+                    return;
+                }
+                Action::OpenHere => {
+                    self.open_favorite();
+                    return;
+                }
+                Action::Delete => {
+                    self.remove_favorite();
+                    return;
+                }
+                Action::Quit => {
+                    self.should_quit = true;
+                    return;
+                }
+                Action::Help => {
+                    self.help = true;
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
                 if self.fav_cursor > 0 {
@@ -1958,13 +1926,7 @@ impl App {
                     self.fav_cursor += 1;
                 }
             }
-            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => self.open_favorite(),
-            KeyCode::Delete | KeyCode::Char('d') => self.remove_favorite(),
-            KeyCode::Esc | KeyCode::Char('f') => {
-                self.show_favorites = false;
-                self.focus = Focus::Panels;
-                self.status = "Favorites hidden".to_string();
-            }
+            KeyCode::Enter | KeyCode::Char('l') => self.open_favorite(),
             _ => {}
         }
     }
@@ -2058,6 +2020,21 @@ impl App {
             Some(Prompt::Rename { buffer, target }) => self.do_rename(&buffer, &target),
             Some(Prompt::BulkRename { buffer, sources }) => self.do_bulk_rename(&buffer, &sources),
             _ => {}
+        }
+    }
+
+    /// `→`/`l`: enter a folder, but never launch a file in an external app.
+    fn enter_folder_only(&mut self) {
+        if self.active().mode == PanelMode::Preview {
+            self.status = "Preview is read-only: Esc returns to the list".to_string();
+            return;
+        }
+        match self.active().current_entry() {
+            Some(entry) if entry.is_dir => self.open_current_entry(),
+            Some(entry) => {
+                self.status = format!("{} is a file — press Enter to open it", entry.name);
+            }
+            None => {}
         }
     }
 
@@ -2851,40 +2828,6 @@ impl App {
     }
 }
 
-/// Which panel a cross-panel key targets, if any.
-///
-/// Returns `Some(0)` for "the left panel" and `Some(1)` for "the right panel".
-/// Both the arrow keys and the `b`/`f` letters are accepted: terminals that
-/// implement readline-style Alt bindings (Ghostty and iTerm2 by default) turn
-/// `Alt+←` into `ESC b` and `Alt+→` into `ESC f`, so the app never sees an
-/// arrow at all.
-fn cross_panel_action(key: KeyEvent) -> Option<(usize, bool)> {
-    let alt = key.modifiers.contains(KeyModifiers::ALT);
-    let shift = key.modifiers.contains(KeyModifiers::SHIFT)
-        && !key
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
-
-    // Which panel the arrow points at.
-    let target = match key.code {
-        KeyCode::Left => 0,
-        KeyCode::Right => 1,
-        // Ghostty and iTerm2 encode Alt+←/→ as ESC b / ESC f, so the arrow
-        // never arrives; accept the letters as the same gesture.
-        KeyCode::Char('b') if alt => 0,
-        KeyCode::Char('f') if alt => 1,
-        _ => return None,
-    };
-
-    if alt {
-        Some((target, true))
-    } else if shift {
-        Some((target, false))
-    } else {
-        None
-    }
-}
-
 /// Key modifier bits produced by a physical modifier key.
 fn bit_of(modifier: ModifierKeyCode) -> KeyModifiers {
     match modifier {
@@ -2918,8 +2861,7 @@ mod tests {
     fn app_for(left: &Path, right: &Path) -> App {
         let mut app = App::new(vec![left.to_path_buf(), right.to_path_buf()]);
         // Tests must never depend on the developer's real settings file.
-        app.settings.invert_scroll = true;
-        app.settings.bindings.clear();
+        app.settings = crate::settings::Settings::defaults();
         app
     }
 
@@ -3060,12 +3002,10 @@ mod tests {
         wait_for_loads(&mut app);
         assert_eq!(app.panels[1].cwd, child);
 
-        // F9 → Up toggles the thumbnail grid in the active panel.
+        // Any other key cancels the chord instead of doing something hidden.
         press(&mut app, KeyCode::F(9), KeyModifiers::NONE);
         press(&mut app, KeyCode::Up, KeyModifiers::NONE);
-        assert_eq!(app.panels[0].mode, PanelMode::Thumbnails);
-        press(&mut app, KeyCode::F(9), KeyModifiers::NONE);
-        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        assert!(app.leader.is_none());
         assert_eq!(app.panels[0].mode, PanelMode::List);
     }
 
@@ -3195,32 +3135,36 @@ mod tests {
 
     #[test]
     fn settings_can_record_alt_shift_and_super_bindings() {
-        let mut settings = crate::settings::Settings::load();
-        settings.bindings.clear();
+        let mut settings = crate::settings::Settings::defaults();
 
-        assert!(settings.rebind(
-            Action::Delete,
-            KeySpec::new(KeyCode::Char('d'), KeyModifiers::ALT)
-        ));
-        assert_eq!(
-            settings.keys_for(Action::Delete),
-            vec![KeySpec::new(KeyCode::Char('d'), KeyModifiers::ALT)]
-        );
-        assert_eq!(settings.keys_label(Action::Delete), "alt+d");
+        settings
+            .assign(
+                Action::Delete,
+                0,
+                KeySpec::new(KeyCode::Char('d'), KeyModifiers::ALT),
+            )
+            .unwrap();
+        assert_eq!(settings.keys_label(Action::Delete), "alt+d · delete");
 
         // Shift is preserved for keys where it is meaningful.
-        assert!(settings.rebind(
-            Action::Copy,
-            KeySpec::new(KeyCode::Right, KeyModifiers::SHIFT)
-        ));
-        assert_eq!(settings.keys_label(Action::Copy), "shift+right");
+        settings
+            .assign(
+                Action::Copy,
+                0,
+                KeySpec::new(KeyCode::Right, KeyModifiers::SHIFT),
+            )
+            .unwrap();
+        assert_eq!(settings.keys_label(Action::Copy), "shift+right · c");
 
         // Command is stored as super and matches both Super and Meta events.
-        assert!(settings.rebind(
-            Action::Mkdir,
-            KeySpec::new(KeyCode::Char('n'), KeyModifiers::SUPER)
-        ));
-        assert_eq!(settings.keys_label(Action::Mkdir), "super+n");
+        settings
+            .assign(
+                Action::Mkdir,
+                0,
+                KeySpec::new(KeyCode::Char('n'), KeyModifiers::SUPER),
+            )
+            .unwrap();
+        assert_eq!(settings.keys_label(Action::Mkdir), "super+n · n");
         assert!(KeySpec::new(KeyCode::Char('n'), KeyModifiers::SUPER)
             .matches(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::META)));
     }
@@ -3452,11 +3396,22 @@ mod tests {
         let mut app = app_for(tmp.path(), tmp.path());
         app.settings_menu = true;
 
-        // The settings action is not offered for rebinding at all.
-        assert!(!crate::settings::Action::ALL.contains(&Action::Settings));
+        // The settings *slot 1* is not offered for rebinding: it is the only
+        // way into the menu. Its second slot exists, and F1 also works.
+        assert!(app
+            .settings
+            .assign(Action::Settings, 0, KeySpec::f(2))
+            .is_err());
 
-        // Ctrl+E is reserved, so a rebind attempt leaves both intact.
-        assert!(!app.settings.rebind(Action::Copy, KeySpec::ctrl('e')));
+        // Ctrl+E belongs to settings, and reserved combos are refused outright.
+        assert!(app
+            .settings
+            .assign(Action::Copy, 0, KeySpec::ctrl('e'))
+            .is_err());
+        assert!(app
+            .settings
+            .assign(Action::Copy, 0, KeySpec::code(KeyCode::Esc))
+            .is_err());
         press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
         press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL);
         assert!(app.settings_menu, "Ctrl+E must still open settings");
@@ -3493,12 +3448,55 @@ mod tests {
 
         press(&mut app, KeyCode::Char('y'), KeyModifiers::CONTROL);
         assert!(!app.rebinding);
+        // Enter edits slot 1; slot 2 keeps its default.
         assert_eq!(
-            app.settings
-                .keys_for(crate::settings::Action::Copy)
-                .first()
-                .map(|spec| spec.label()),
-            Some("ctrl+y".to_string())
+            app.settings.stored_slots(crate::settings::Action::Copy),
+            [
+                Some(crate::settings::KeySpec::ctrl('y')),
+                Some(crate::settings::KeySpec::plain_char('c'))
+            ]
+        );
+    }
+
+    #[test]
+    fn the_settings_menu_edits_the_second_slot_too() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+        app.settings_menu = true;
+        app.settings_cursor = crate::settings::Action::menu_actions()
+            .iter()
+            .position(|action| *action == crate::settings::Action::Move)
+            .unwrap();
+
+        // → moves the cursor to slot 2, Enter assigns it.
+        press(&mut app, KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(app.settings_slot, 1);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char('y'), KeyModifiers::CONTROL);
+
+        assert_eq!(
+            app.settings.stored_slots(crate::settings::Action::Move),
+            [
+                Some(crate::settings::KeySpec::f(6)),
+                Some(crate::settings::KeySpec::ctrl('y'))
+            ]
+        );
+    }
+
+    #[test]
+    fn a_slot_can_be_cleared_from_the_settings_menu() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+        app.settings_menu = true;
+        app.settings_cursor = crate::settings::Action::menu_actions()
+            .iter()
+            .position(|action| *action == crate::settings::Action::Delete)
+            .unwrap();
+
+        press(&mut app, KeyCode::Delete, KeyModifiers::NONE);
+        assert_eq!(
+            app.settings.stored_slots(crate::settings::Action::Delete)[0],
+            None
         );
     }
 
@@ -3512,10 +3510,13 @@ mod tests {
         fs::write(left.join("a.txt"), "x").unwrap();
 
         let mut app = app_for(&left, &right);
-        app.settings.rebind(
-            crate::settings::Action::Delete,
-            crate::settings::KeySpec::f(9),
-        );
+        app.settings
+            .assign(
+                crate::settings::Action::Delete,
+                0,
+                crate::settings::KeySpec::f(9),
+            )
+            .unwrap();
         app.panels[0].select_name("a.txt");
 
         // F9 now arms the delete prompt instead of the F9 leader chord.
@@ -4138,8 +4139,8 @@ mod tests {
         app.panels[0].reload(false).unwrap();
 
         press(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
-        // Ctrl+Shift+C is distinguishable from Ctrl+C only under the kitty
-        // keyboard protocol, where the terminal reports an uppercase `C`.
+        // `Ctrl+Shift+C` is the copy path/name/selection chord; under the kitty
+        // protocol an uppercase `C` with Ctrl is exactly that.
         press(
             &mut app,
             KeyCode::Char('C'),

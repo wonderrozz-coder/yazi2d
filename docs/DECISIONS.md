@@ -870,9 +870,8 @@ Both are static: no MSVC runtime, no DLLs. The produced EXEs were checked with
 
 **Consequences:** Users on Windows 7 are not cut off, while the common build
 stays on stable. The cost is one nightly-only build in the release process, and
-the win7 build has to recompile `std` (about two minutes here). Ghostty cannot
-be bundled yet: it has no official Windows build, so `vendor/ghostty/` is a drop
-point the packaging script reads when it exists.
+the win7 build has to recompile `std` (about two minutes here). Ghostty cannot be
+bundled yet: it has no official Windows build.
 
 ## ADR-041 — Native image protocols instead of half-block "pixels"
 
@@ -972,3 +971,48 @@ a listing would reintroduce the multi-second freezes that ADR-015 removed.
 it, and the answer survives re-listing because the cache is keyed by path. The
 count distinguishes "20 folders" from "empty" at a glance, which is what makes
 the `Ext` column worth its width.
+
+## ADR-045 — Two editable slots, one resolved shortcut list
+
+**Status:** accepted (2026-11-12, `0.6.3`)
+
+**Context:** Key handling had grown three layers that disagreed. The settings
+menu edited one key per action, `Action::defaults()` often returned three or
+four, and `App::on_key` hard-coded a third set *before* the user overrides were
+consulted. The consequences were visible and reported:
+
+* rebinding `Q` to the quick preview and quitting to `Ctrl+Q` left `Q` still
+  quitting, because `if key.code == Char('q') { quit }` ran before
+  `custom_binding`;
+* `Delete` had three defaults (`F8`, `d`, `Del`) and only one was editable, so
+  two kept working with no way to change them;
+* the footer showed "copy" three times, once for every duplicate;
+* `F1` listed chords that did not exist (`F9 + ↑` toggles thumbnails) and missed
+  the ones that did;
+* `Ctrl+C` was a special case rather than an action, so it could not be rebound
+  together with the rest.
+
+**Decision:**
+
+1. **Two slots per action**, `key.<action>.1` / `.2`, both assigned from the
+   settings menu (`←→` picks the slot, `Enter` assigns, `Del` clears).
+2. **`Settings::shortcuts()` is the only source of truth.** Dispatch, footer and
+   help screen all render from it. `App::on_key` no longer hard-codes any
+   rebindable key; when a key is not in the list it simply does nothing.
+3. **Duplicate resolution lives in `settings::resolve`.** A user assignment
+   beats a built-in default, a bare letter loses to a control key on the same
+   combo, and the rest is resolved by a fixed action rank. Taking a key that
+   another action holds only by default is allowed — that default gives way;
+   taking a key the user chose for another action is refused with a message.
+4. **Only two keys are not rebindable:** `F1` (help, always available, even from
+   the settings menu) and the first slot of *Settings menu* (`Ctrl+E`, the way
+   into the menu). Everything else, including quit and the F9 chord, is a slot.
+5. **`Ctrl+C` is quit's second slot**, so `Ctrl+Q` can be freed for "quit" while
+   `Ctrl+C` stays the interrupt. A bare letter and a control key are ranked, so
+   `Ctrl+C` can never be stolen by a copy action.
+
+**Consequences:** Rebinding cannot leave a stale key behind, the footer shows one
+chip per action with all of its keys (`F5/C copy`), and the help screen is
+generated from the same list, so it cannot drift again. The cost is that a key
+which is currently assigned nowhere does nothing at all — there is no hidden
+fallback, which is exactly the point.

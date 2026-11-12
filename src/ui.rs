@@ -16,7 +16,7 @@ use crate::app::{App, Focus, Prompt};
 use crate::colors::FileGroup;
 use crate::panel::{Entry, Panel, PanelMode};
 use crate::preview::{is_image_path, ImageCache, PreviewCache, PreviewContent};
-use crate::settings::KeySpec;
+use crate::settings::{Action, KeySpec};
 use crossterm::event::KeyCode;
 
 const PATH_BG_ACTIVE: Color = Color::Rgb(0, 95, 135);
@@ -143,7 +143,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_footer(frame, app, chunks[2]);
 
     if app.help {
-        draw_help(frame, area);
+        draw_help(frame, area, app);
     }
     if app.sort_menu {
         draw_sort_menu(frame, area, &app.panels[app.active]);
@@ -1219,6 +1219,10 @@ fn short_label(action: crate::settings::Action) -> &'static str {
         A::AddFavorite => "add fav",
         A::FocusFavorites => "favorites",
         A::ToggleSidebar => "sidebar",
+        A::CopyPath => "copy path",
+        A::CopyName => "copy name",
+        A::CopySelection => "copy paths",
+        A::SwitchPanel => "switch",
         A::OpenHere => "open",
         A::OpenFolderThere => "open there",
         A::PreviewThere => "preview there",
@@ -1249,6 +1253,10 @@ fn footer_rank(action: crate::settings::Action) -> u8 {
         A::AddFavorite => 15,
         A::FocusFavorites => 16,
         A::ToggleSidebar => 17,
+        A::CopyPath => 21,
+        A::CopyName => 22,
+        A::CopySelection => 23,
+        A::SwitchPanel => 24,
         A::ColourMenu => 18,
         A::Settings => 19,
         A::Help => 20,
@@ -1260,66 +1268,84 @@ fn footer_rank(action: crate::settings::Action) -> u8 {
 
 /// Chips for the actions bound to exactly `modifiers`.
 ///
-/// Built from the live bindings, so a key rebound in the settings menu shows up
-/// here immediately and the footer never advertises something the app does not
-/// do. Modifiers are compared exactly: the default screen shows unmodified keys,
-/// and holding Ctrl replaces it with the Ctrl screen — that is the whole point
-/// of the separate hint screens.
+/// Reads [`crate::settings::Settings::shortcuts`] — the same resolved list the
+/// dispatcher uses — and shows **one chip per action**, listing all of its keys
+/// (`F5/C copy`, not `F5 copy` and `C copy`). That is what keeps the footer free
+/// of the "three copies of copy" effect and leaves room for other chords.
+///
+/// Modifiers are compared exactly: the default screen shows unmodified keys, and
+/// holding Ctrl replaces it with the Ctrl screen.
 fn hints_for(app: &App, modifiers: crossterm::event::KeyModifiers) -> Vec<Hint> {
     use crossterm::event::KeyModifiers as M;
 
-    let mut hints: Vec<(u8, Hint)> = app
-        .settings
-        .bindings()
-        .into_iter()
-        .filter(|(_, spec)| {
-            let wanted = spec.modifiers;
-            match modifiers {
-                M::NONE => wanted.is_empty(),
-                _ => wanted == modifiers,
+    let resolved = app.settings.shortcuts();
+    let mut order: Vec<(u8, crate::settings::Action)> = Vec::new();
+    let mut keys: std::collections::HashMap<crate::settings::Action, Vec<String>> =
+        std::collections::HashMap::new();
+
+    for shortcut in &resolved {
+        let wanted = shortcut.spec.modifiers;
+        let matches_screen = match modifiers {
+            M::NONE => wanted.is_empty(),
+            _ => wanted == modifiers,
+        };
+        if !matches_screen {
+            continue;
+        }
+        // `Ctrl+C` is the terminal's own interrupt and `Enter`/`Esc` only
+        // confirm a prompt: none of them is a panel command worth a chip.
+        if matches!(
+            shortcut.action,
+            crate::settings::Action::Quit
+                | crate::settings::Action::Confirm
+                | crate::settings::Action::Cancel
+        ) {
+            continue;
+        }
+
+        let entry = keys.entry(shortcut.action).or_default();
+        if !entry.iter().any(|key| *key == chip_key(&shortcut.spec)) {
+            entry.push(chip_key(&shortcut.spec));
+            if entry.len() == 1 {
+                order.push((footer_rank(shortcut.action), shortcut.action));
             }
-        })
-        .filter_map(|(action, spec)| {
-            // `Ctrl+C` is the terminal's own interrupt and `Enter`/`Esc` only
-            // confirm a prompt: none of them is a panel command, so the footer
-            // does not spend a chip on them.
-            if matches!(
-                action,
-                crate::settings::Action::Quit
-                    | crate::settings::Action::Confirm
-                    | crate::settings::Action::Cancel
-            ) {
-                return None;
-            }
-
-            Some((
-                footer_rank(action),
-                Hint {
-                    key: chip_key(&spec),
-                    label: short_label(action),
-                },
-            ))
-        })
-        .collect();
-
-    // A narrow footer must show the workhorses first, not `F6 move`. The rank
-    // follows a Total Commander user's day: copy, move, create, rename, delete…
-    hints.sort_by_key(|(rank, _)| *rank);
-    hints.dedup_by(|a, b| a.1.key == b.1.key);
-    let mut hints: Vec<Hint> = hints.into_iter().map(|(_, hint)| hint).collect();
-
-    // `Action::Settings` is deliberately absent from `Action::ALL`, because the
-    // settings menu must stay reachable, so its chip is added by hand.
-    if modifiers == M::CONTROL {
-        for spec in app.settings.keys_for(crate::settings::Action::Settings) {
-            hints.push(Hint {
-                key: chip_key(&spec),
-                label: short_label(crate::settings::Action::Settings),
-            });
         }
     }
 
-    // The `F9` chord and the two-finger tap have no `Action` of their own.
+    // `Action::Settings` is deliberately absent from `Action::ALL`, because the
+    // settings menu must stay reachable, so its chips are added by hand.
+    if modifiers == M::CONTROL {
+        let specs: Vec<KeySpec> = (0..2)
+            .filter_map(|slot| app.settings.stored_slots(crate::settings::Action::Settings)[slot])
+            .collect();
+        if !specs.is_empty() {
+            keys.insert(
+                crate::settings::Action::Settings,
+                specs.iter().map(chip_key).collect(),
+            );
+            order.push((
+                footer_rank(crate::settings::Action::Settings),
+                crate::settings::Action::Settings,
+            ));
+        }
+    }
+
+    // A narrow footer must show the workhorses first, not `F6 move`.
+    order.sort_by_key(|(rank, action)| (*rank, action.id()));
+
+    let mut hints: Vec<Hint> = order
+        .into_iter()
+        .filter_map(|(_, action)| {
+            let keys = keys.remove(&action)?;
+            Some(Hint {
+                key: keys.join("/"),
+                label: short_label(action),
+            })
+        })
+        .collect();
+
+    // The `F9` chord has no `Action` of its own: it is documented as
+    // `F9` + ←/→ only, so a single chip is enough.
     if modifiers == M::NONE {
         if let Some((index, _)) = hints
             .iter()
@@ -1454,8 +1480,8 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn draw_help(frame: &mut Frame, area: Rect) {
-    let width = area.width.saturating_sub(4).min(76);
+fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
+    let width = area.width.saturating_sub(4).min(80);
     let height = area.height.saturating_sub(2);
     if width == 0 || height == 0 {
         return;
@@ -1480,78 +1506,159 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         ))
         .style(Style::default().bg(Color::Rgb(18, 18, 24)));
 
-    let lines = vec![
+    // Every rebindable entry is generated from the live bindings, so F1 always
+    // agrees with the settings menu and with the footer. Only the fixed keys
+    // (navigation, Tab, prompt keys) are written out by hand.
+    let live = |action: crate::settings::Action| {
+        let label = app.settings.keys_label(action);
+        if label.is_empty() {
+            "—".to_string()
+        } else {
+            label.replace("backtab", "Shift+Tab")
+        }
+    };
+
+    let mut lines = vec![
         Line::from(Span::styled("NAVIGATION", header)),
-        help_line("  ↑↓ / jk", "move cursor / scroll preview", key),
-        help_line("  PgUp / PgDn", "page up / down", key),
-        help_line("  Home/End · g/G", "top / bottom", key),
-        help_line("  Enter / l", "open folder, or file in its app", key),
-        help_line("  Backspace / h", "parent directory", key),
-        help_line("  Space / Insert", "select and move down", key),
+        help_line("  ↑↓ · PgUp/PgDn · Home/End", "move / page / jump", key),
+        help_line("  Tab", "switch active panel", key),
+        help_line("  Backspace", "parent directory", key),
         help_line("  Esc", "clear selection / close preview", key),
         Line::from(Span::styled("FILE OPERATIONS", header)),
-        help_line("  F5/c · F6/m", "copy / move to the other panel", key),
-        help_line("  F7/n · F2/r", "create directory / rename", key),
-        help_line("  F8 / d / Del", "delete (Enter or y confirms)", key),
-        help_line("  Ctrl+A", "select everything", key),
-        help_line("  Ctrl+G", "bulk rename with a pattern", key),
-        Line::from(Span::styled("SORT & COLOURS", header)),
-        help_line("  s / Ctrl+S", "sort menu (name/size/type/date)", key),
-        help_line("  Ctrl+K", "colour menu for file types", key),
-        help_line("  Ctrl+E", "settings: keys and trackpad", key),
-        Line::from(Span::styled("VIEW & CROSS-PANEL", header)),
-        help_line("  Ctrl+Q / Ctrl+P", "quick preview in the OTHER panel", key),
-        help_line("  Ctrl+T", "thumbnail grid in the active panel", key),
-        help_line("  Ctrl+O", "open cursor folder in the other panel", key),
-        help_line("  F9 + ← / F9 + →", "open cursor folder in that panel", key),
-        help_line("  F9 + ↑ / F9 + ↓", "thumbnail grid on / off", key),
         help_line(
-            "  Shift+←/→ · Alt+←/→",
+            &format!("  {}", live(Action::Copy)),
+            "copy to the other panel",
+            key,
+        ),
+        help_line(
+            &format!("  {}", live(Action::Move)),
+            "move to the other panel",
+            key,
+        ),
+        help_line(&format!("  {}", live(Action::Mkdir)), "create folder", key),
+        help_line(&format!("  {}", live(Action::Rename)), "rename", key),
+        help_line(
+            &format!("  {}", live(Action::Delete)),
+            "delete (Enter or y confirms)",
+            key,
+        ),
+        help_line(
+            &format!("  {}", live(Action::OpenHere)),
+            "open folder, or file in its app",
+            key,
+        ),
+        help_line(&format!("  {}", live(Action::SelectAll)), "select all", key),
+        help_line(
+            &format!("  {}", live(Action::BulkRename)),
+            "bulk rename",
+            key,
+        ),
+        Line::from(Span::styled("VIEW & PANELS", header)),
+        help_line(
+            &format!("  {}", live(Action::TogglePreview)),
+            "quick preview in the OTHER panel",
+            key,
+        ),
+        help_line(
+            &format!("  {}", live(Action::ToggleThumbnails)),
+            "thumbnail grid",
+            key,
+        ),
+        help_line(
+            &format!("  {}", live(Action::OpenInOther)),
+            "open cursor folder in the other panel",
+            key,
+        ),
+        help_line(
+            &format!("  {}", live(Action::OpenFolderThere)),
             "open cursor folder in that panel",
             key,
         ),
-        help_line("  Cmd+←/→ · Ctrl+←/→", "quick preview in that panel", key),
-        Line::from(Span::styled("PANELS & FAVORITES", header)),
-        help_line("  Tab", "switch active panel", key),
         help_line(
-            "  § · Shift+Tab · Ctrl+D",
+            &format!("  {}", live(Action::PreviewThere)),
+            "quick preview in that panel",
+            key,
+        ),
+        help_line(
+            &format!("  {}", live(Action::SortMenu)),
+            "sort menu (name/size/type/date)",
+            key,
+        ),
+        help_line(
+            &format!("  {}", live(Action::ToggleHidden)),
+            "hidden files",
+            key,
+        ),
+        Line::from(Span::styled("FAVORITES & MISC", header)),
+        help_line(
+            &format!("  {}", live(Action::FocusFavorites)),
             "focus favorites / back to panels",
             key,
         ),
-        help_line("  Ctrl+B / a", "add current dir to favorites", key),
-        help_line("  Ctrl+F", "show / hide the favorites sidebar", key),
-        help_line("  Ctrl+R", "refresh both panels", key),
-        help_line("  Alt+F7", "find files recursively (Tab: open there)", key),
-        help_line("  Ctrl+L · Alt+I", "copy the path / the name", key),
-        help_line("  Ctrl+Shift+C", "copy the selected paths", key),
-        help_line("  Ctrl+H / .", "toggle hidden files", key),
+        help_line(
+            &format!("  {}", live(Action::AddFavorite)),
+            "add current dir to favorites",
+            key,
+        ),
+        help_line(
+            &format!("  {}", live(Action::ToggleSidebar)),
+            "show / hide the sidebar",
+            key,
+        ),
+        help_line(
+            &format!("  {}", live(Action::Refresh)),
+            "refresh panels",
+            key,
+        ),
+        help_line(
+            &format!("  {}", live(Action::ColourMenu)),
+            "colour menu for file types",
+            key,
+        ),
+        help_line(
+            &format!("  {}", live(Action::CopyPath)),
+            "copy the path",
+            key,
+        ),
+        help_line(
+            &format!("  {}", live(Action::CopyName)),
+            "copy the name",
+            key,
+        ),
+        help_line(
+            &format!("  {}", live(Action::Settings)),
+            "settings: slots, icons, trackpad",
+            key,
+        ),
+        help_line(
+            "  Alt+F7",
+            "find files (Shift: search the other panel)",
+            key,
+        ),
         Line::from(Span::styled("MOUSE", header)),
         help_line("  click a row", "focus the panel and move the cursor", key),
         help_line("  double click", "open a folder, or a file in its app", key),
         help_line("  click the path bar", "copy the folder path", key),
-        help_line(
-            "  right click",
-            "menu: copy, rename, delete, new folder…",
-            key,
-        ),
+        help_line("  right click", "menu: open, copy, rename, delete…", key),
         help_line("  wheel", "scroll the list", key),
-        help_line("  Esc while loading", "cancel the directory load", key),
         Line::from(Span::styled(
-            "  ? / F1 close help      q / Ctrl+C quit",
+            format!("  {} close help", live(Action::Help)),
             Style::default().fg(Color::Gray),
         )),
     ];
 
+    // Only whole sections fit; dropping a trailing half-line is worse than
+    // dropping a line, so the list is simply cut.
     let visible: Vec<Line> = lines
-        .into_iter()
+        .drain(..)
         .take(rect.height.saturating_sub(2) as usize)
         .collect();
     frame.render_widget(Paragraph::new(visible).block(block), rect);
 }
 
-fn help_line<'a>(keys: &'a str, description: &'a str, key_style: Style) -> Line<'a> {
+fn help_line(keys: &str, description: &str, key_style: Style) -> Line<'static> {
     Line::from(vec![
-        Span::styled(keys, key_style),
+        Span::styled(keys.to_string(), key_style),
         Span::styled(format!("  {description}"), Style::default().fg(Color::Gray)),
     ])
 }
@@ -1676,9 +1783,13 @@ fn draw_settings_menu(frame: &mut Frame, area: Rect, app: &crate::app::App) {
     let key = Style::default().fg(Color::LightYellow);
     let custom = Style::default().fg(Color::LightGreen);
     let muted = Style::default().fg(Color::DarkGray);
+    let focused_slot = Style::default()
+        .fg(Color::Black)
+        .bg(Color::LightYellow)
+        .add_modifier(Modifier::BOLD);
 
     let mut lines = vec![
-        Line::from(Span::styled("TRACKPAD", header)),
+        Line::from(Span::styled("TRACKPAD & DISPLAY", header)),
         Line::from(vec![
             Span::styled("  i  ", key),
             Span::styled(
@@ -1690,52 +1801,92 @@ fn draw_settings_menu(frame: &mut Frame, area: Rect, app: &crate::app::App) {
                 Style::default().fg(Color::Gray),
             ),
         ]),
+        Line::from(vec![
+            Span::styled("  g  ", key),
+            Span::styled(
+                if app.settings.icons {
+                    "Nerd Font icons  ●"
+                } else {
+                    "ASCII markers (no Nerd Font)"
+                },
+                Style::default().fg(Color::Gray),
+            ),
+        ]),
         Line::from(""),
-        Line::from(Span::styled("KEY BINDINGS", header)),
+        Line::from(Span::styled(
+            "KEY BINDINGS · ←→ picks the slot being edited",
+            header,
+        )),
+        Line::from(Span::styled(
+            format!("    {:<24}{:<15}{}", "action", "slot 1", "slot 2"),
+            muted,
+        )),
     ];
 
-    for (index, action) in crate::settings::Action::ALL.iter().enumerate() {
+    let actions = crate::settings::Action::menu_actions();
+    for (index, action) in actions.iter().enumerate() {
         let selected = index == app.settings_cursor;
         let marker = if selected { "▶" } else { " " };
-        let keys = app.settings.keys_label(*action);
-        let keys_style = if app.settings.is_custom(*action) {
-            custom
-        } else {
-            key
-        };
 
-        let label_style = if selected {
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
-
-        lines.push(Line::from(vec![
+        let slots = app.settings.stored_slots(*action);
+        let mut spans = vec![
             Span::styled(format!(" {marker} "), Style::default().fg(Color::Cyan)),
-            Span::styled(format!("{:<24}", action.label()), label_style),
-            Span::styled(format!("{keys:<16}"), keys_style),
-        ]));
+            Span::styled(
+                format!("{:<24}", action.label()),
+                if selected {
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Gray)
+                },
+            ),
+        ];
+
+        // Both slots are shown and both are editable; the one under the cursor
+        // slot marker is highlighted so it is obvious which Enter will change.
+        for (slot, entry) in slots.iter().enumerate() {
+            let focused = selected && slot == app.settings_slot;
+            let label = entry
+                .map(|spec| spec.label())
+                .unwrap_or_else(|| "—".to_string());
+            let style = if focused {
+                focused_slot
+            } else if app.settings.is_custom(*action) {
+                custom
+            } else {
+                key
+            };
+            spans.push(Span::styled(format!("{:<15}", label), style));
+        }
+        lines.push(Line::from(spans));
     }
 
     lines.push(Line::from(""));
     if app.rebinding {
         lines.push(Line::from(Span::styled(
-            "  Press the new key combination…  Esc cancels",
+            format!(
+                "  Press the key for slot {}…  Esc cancels",
+                app.settings_slot + 1
+            ),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )));
     } else {
         lines.push(help_line(
-            "  Enter · r · i · Esc",
-            "rebind · reset · invert trackpad · close",
+            "  ↑↓ · ←→ · Enter",
+            "action · slot · assign that slot",
+            muted,
+        ));
+        lines.push(help_line(
+            "  Del · r · i/g · Esc",
+            "clear slot · reset action · trackpad/icons · close",
             muted,
         ));
     }
 
-    draw_menu_overlay(frame, area, " Settings ", 62, lines);
+    draw_menu_overlay(frame, area, " Settings ", 72, lines);
 }
 
 /// Right-click menu anchored at the pointer.
@@ -2502,9 +2653,15 @@ mod tests {
 
         let text = render(&mut app, 100, 34);
         assert!(text.contains("Keyboard shortcuts"));
-        assert!(text.contains("Ctrl+B"));
-        assert!(text.contains("Ctrl+Q"));
-        assert!(text.contains("Alt+"));
+        // The help screen prints live labels, so chips read `ctrl+b`.
+        assert!(text.contains("ctrl+b"), "favorite chord missing: {text}");
+        assert!(text.contains("ctrl+q"), "preview chord missing: {text}");
+        assert!(
+            text.contains("alt+right"),
+            "cross-panel chord missing: {text}"
+        );
+        // The removed undocumented chord must be gone.
+        assert!(!text.contains("F9 + ↑"), "stale F9 chord is still listed");
     }
 
     #[test]
@@ -2640,7 +2797,10 @@ mod tests {
 
         app.held_modifiers = crossterm::event::KeyModifiers::CONTROL;
         let line = footer_line(&mut app, 240, 30);
-        assert!(line.contains("favorites"), "Ctrl+B chip missing: {line:?}");
+        assert!(
+            line.contains("fav"),
+            "the Ctrl screen must still show the favorite chords: {line:?}"
+        );
         assert!(line.contains("settings"), "Ctrl+E chip missing: {line:?}");
         assert!(line.contains("preview"), "Ctrl+Q chip missing: {line:?}");
         // Function keys without Ctrl belong to the default screen.
@@ -2660,7 +2820,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut app = default_app(tmp.path());
         app.settings
-            .rebind(crate::settings::Action::Copy, KeySpec::f(9));
+            .assign(crate::settings::Action::Copy, 0, KeySpec::f(9))
+            .unwrap();
 
         let line = footer_line(&mut app, 160, 30);
         assert!(line.contains("F9"), "rebound key missing: {line:?}");
@@ -2715,5 +2876,42 @@ mod tests {
         let row = row_with(&text, 140, "Media");
         assert!(row.contains("3.0M"), "measured size missing: {row:?}");
         assert!(!row.contains("<DIR>"), "placeholder survived: {row:?}");
+    }
+
+    #[test]
+    fn the_footer_shows_one_chip_per_action_with_all_its_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = default_app(tmp.path());
+
+        let line = footer_line(&mut app, 240, 30);
+        // `F5` and `c` are the two slots of copy; they share one chip.
+        assert!(
+            line.contains("F5/C"),
+            "copy must merge both slots into one chip: {line:?}"
+        );
+        assert_eq!(
+            line.matches("copy").count(),
+            1,
+            "copy appears more than once: {line:?}"
+        );
+        assert_eq!(
+            line.matches("delete").count(),
+            1,
+            "delete appears more than once: {line:?}"
+        );
+        assert!(line.contains("F8/Del"), "delete chip merged: {line:?}");
+    }
+
+    #[test]
+    fn the_help_screen_has_no_undocumented_chords() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = default_app(tmp.path());
+        app.help = true;
+
+        let text = render(&mut app, 100, 40);
+        assert!(text.contains("copy to the other panel"), "{text}");
+        // The F9 Up/Down chord was never in the settings menu and is gone.
+        assert!(!text.contains("F9 + ↑"), "stale chord still listed: {text}");
+        assert!(!text.contains("Cmd+"), "alias that never worked is listed");
     }
 }

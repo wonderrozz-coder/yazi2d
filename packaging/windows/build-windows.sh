@@ -17,7 +17,6 @@
 # Usage:
 #   packaging/windows/build-windows.sh                 # both builds
 #   WIN7=0 packaging/windows/build-windows.sh          # modern build only
-#   WITH_GHOSTTY=1 packaging/windows/build-windows.sh  # also zip Ghostty
 #
 # Environment:
 #   CARGO      cargo binary      (default: cargo)
@@ -34,7 +33,6 @@ CARGO="${CARGO:-cargo}"
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 OUT="${OUT:-$ROOT/dist/windows}"
 WIN7="${WIN7:-1}"
-WITH_GHOSTTY="${WITH_GHOSTTY:-0}"
 
 mkdir -p "$OUT"
 
@@ -97,32 +95,6 @@ if [ "$WIN7" = "1" ]; then
     warn "the Windows 7 build needs nightly with the rust-src component"
     status=1
   fi
-fi
-
-# A zip that bundles Ghostty is the friendliest download: Ghostty is the
-# terminal the app is developed in, and on Windows it needs no configuration
-# for the truecolor previews. Ghostty has no official Windows build yet, so a
-# `vendor/ghostty/` folder is copied when the project provides one.
-if [ "$WITH_GHOSTTY" = "1" ]; then
-  for binary in "$OUT"/yazi2d-*.exe; do
-    [ -e "$binary" ] || continue
-    name="$(basename "$binary" .exe)"
-    archive="$OUT/$name.zip"
-    rm -f "$archive"
-    tmp="$(mktemp -d)"
-    cp "$binary" "$tmp/yazi2d.exe"
-    if [ -d "$ROOT/vendor/ghostty" ]; then
-      cp -R "$ROOT/vendor/ghostty" "$tmp/ghostty"
-    else
-      warn "vendor/ghostty is missing; the zip contains only the binary"
-    fi
-    if command -v zip >/dev/null 2>&1; then
-      (cd "$tmp" && zip -qr "$archive" .) && say "wrote $archive"
-    else
-      warn "zip is not installed; unpacked files are in $tmp"
-    fi
-    rm -rf "$tmp"
-  done
 fi
 
 exit "$status"

@@ -169,10 +169,7 @@ Both files are self-contained: no Visual C++ runtime, no DLLs, no installer.
 > present since Windows 7.
 
 > **Ghostty on Windows.** Ghostty is currently macOS/Linux only, with no
-> official Windows build, so it cannot be bundled into the Windows zip. The
-> project is tracked in [vendor/ghostty/README.md](vendor/ghostty/README.md);
-> once a build exists, `WITH_GHOSTTY=1 ./packaging/windows/build-windows.sh`
-> packs it next to `yazi2d.exe`.
+> official Windows build, so it cannot be bundled into the Windows zip yet.
 
 > If the repository lives in a synced folder (Nextcloud/Dropbox), keep build
 > artifacts out of it: `export CARGO_TARGET_DIR="$HOME/.cache/yazi2d-target"`.
@@ -298,9 +295,17 @@ Settings: `$YAZI2D_CONFIG_DIR/settings.toml`.
 invert_scroll = true
 icons = true            # Nerd Font glyphs in the listing
 max_thumb_bytes = 4194304
-key.copy = "ctrl+y"
-key.delete = "f9"
+
+# Two slots per action, both editable in the settings menu (Ctrl+E).
+# An empty string frees a key without replacing it.
+key.copy.1 = "f5"
+key.copy.2 = "c"
+key.quit.1 = ""         # q is free now…
+key.toggle_preview.1 = "q"   # …and preview took it
 ```
+
+Only actions that differ from the defaults are written, so the file stays short
+and new defaults reach existing users.
 
 ## Logging
 
@@ -523,9 +528,7 @@ WIN7=0 ./packaging/windows/build-windows.sh   # только Windows 10/11
 
 > **Ghostty на Windows.** Ghostty сейчас существует только для macOS и Linux,
 > официальной сборки под Windows нет, поэтому упаковать его в Windows-архив
-> нельзя. Вопрос отслеживается в [vendor/ghostty/README.md](vendor/ghostty/README.md);
-> когда сборка появится, `WITH_GHOSTTY=1 ./packaging/windows/build-windows.sh`
-> положит Ghostty рядом с `yazi2d.exe`.
+> пока нельзя.
 
 > Проект может лежать в синхронизируемой папке (Nextcloud/Dropbox). Чтобы не
 > синхронизировать гигабайты артефактов, вынесите каталог сборки:
@@ -604,6 +607,31 @@ protocol: Ghostty, kitty, WezTerm, foot, iTerm2).
 > до приложения, поэтому они не используются. Ghostty кодирует `Option+←/→` как
 > `Esc b`/`Esc f`; Yazi2D принимает и `Option+b`/`Option+f`, так что работает без
 > правки конфига терминала.
+
+## Настройка клавиш
+
+Файл `$YAZI2D_CONFIG_DIR/settings.toml`, меню — `Ctrl+E`.
+
+```toml
+invert_scroll = true
+icons = true            # глифы Nerd Font в списке
+max_thumb_bytes = 4194304
+
+# Два слота на действие, оба назначаются в меню (Ctrl+E).
+# Пустая строка освобождает клавишу.
+key.copy.1 = "f5"
+key.copy.2 = "c"
+key.quit.1 = ""         # q теперь свободна…
+key.toggle_preview.1 = "q"   # …и её занял просмотр
+```
+
+В файл попадают только действия, отличающиеся от значений по умолчанию, поэтому
+он остаётся коротким, а новые умолчания доходят до тех, кто ничего не менял.
+
+В меню: `↑↓` — действие, `←→` — слот, `Enter` — назначить, `Del` — очистить
+слот, `r` — сброс действия, `i` — трекпад, `g` — иконки. Всегда работают только
+`F1` (справка) и первый слот «Settings menu» (`Ctrl+E`): без них меню было бы
+недоступно.
 
 ## Быстрый просмотр и миниатюры
 

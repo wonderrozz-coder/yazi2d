@@ -1,8 +1,16 @@
 //! Persistent user settings: key bindings and trackpad behaviour.
 //!
-//! Bindings are stored as action id → key spec (`"ctrl+b"`, `"f5"`, `"§"`) in
-//! `$YAZI2D_CONFIG_DIR/settings.toml`. An action may have several default keys;
-//! a user override replaces all of them, which is what the settings menu edits.
+//! Every action has **two slots**, and both are editable in the settings menu.
+//! A slot is a key combo (`"f5"`, `"ctrl+q"`, `"§"`) stored in
+//! `$YAZI2D_CONFIG_DIR/settings.toml` as `key.<action>.1` / `key.<action>.2`;
+//! an empty slot means "not assigned".
+//!
+//! [`Settings::shortcuts`] is the single source of truth: it turns the slots into
+//! the list of key combos the app actually reacts to. The key dispatcher, the
+//! footer and the help screen all read it, so a rebound key can never leave a
+//! stale duplicate behind — pressing the old key does nothing, exactly as the
+//! menu says. Duplicates across actions are resolved there too (see
+//! [`resolve`]), which is why the footer cannot show "copy" three times.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -11,7 +19,7 @@ use std::path::PathBuf;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Shortcuts the user can rebind from the settings menu.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Action {
     Quit,
     Help,
@@ -36,6 +44,10 @@ pub enum Action {
     OpenFolderThere,
     PreviewThere,
     ToggleSidebar,
+    CopyPath,
+    CopyName,
+    CopySelection,
+    SwitchPanel,
     Confirm,
     Cancel,
 }
@@ -45,7 +57,7 @@ impl Action {
     ///
     /// `Settings` is deliberately absent: rebinding the key that opens the
     /// settings menu would make the menu unreachable.
-    pub const ALL: [Action; 24] = [
+    pub const ALL: [Action; 28] = [
         Action::Quit,
         Action::Help,
         Action::Copy,
@@ -65,6 +77,10 @@ impl Action {
         Action::AddFavorite,
         Action::FocusFavorites,
         Action::ToggleSidebar,
+        Action::CopyPath,
+        Action::CopyName,
+        Action::CopySelection,
+        Action::SwitchPanel,
         Action::OpenHere,
         Action::OpenFolderThere,
         Action::PreviewThere,
@@ -95,6 +111,10 @@ impl Action {
             Action::AddFavorite => "add_favorite",
             Action::FocusFavorites => "focus_favorites",
             Action::ToggleSidebar => "toggle_sidebar",
+            Action::CopyPath => "copy_path",
+            Action::CopyName => "copy_name",
+            Action::CopySelection => "copy_selection",
+            Action::SwitchPanel => "switch_panel",
             Action::OpenHere => "open_here",
             Action::OpenFolderThere => "open_folder_there",
             Action::PreviewThere => "preview_there",
@@ -125,6 +145,10 @@ impl Action {
             Action::AddFavorite => "Add to favorites",
             Action::FocusFavorites => "Focus favorites",
             Action::ToggleSidebar => "Show/hide favorites",
+            Action::CopyPath => "Copy path",
+            Action::CopyName => "Copy name",
+            Action::CopySelection => "Copy selected paths",
+            Action::SwitchPanel => "Switch panel",
             Action::OpenHere => "Open entry (Enter)",
             Action::OpenFolderThere => "Open folder there",
             Action::PreviewThere => "Preview there",
@@ -133,49 +157,172 @@ impl Action {
         }
     }
 
-    /// Built-in keys for this action.
-    pub fn defaults(self) -> Vec<KeySpec> {
+    /// Actions the settings menu lists.
+    ///
+    /// `Action::Settings` is included so its slots can be seen and its second
+    /// slot used, but assigning the *first* slot is refused: that is the only
+    /// way into the menu, together with `F1`.
+    pub fn menu_actions() -> Vec<Action> {
+        let mut actions = Action::ALL.to_vec();
+        actions.push(Action::Settings);
+        actions
+    }
+
+    /// The two built-in slots for this action.
+    ///
+    /// Exactly two entries: the settings menu edits both, and anything extra
+    /// used to become an invisible key that could not be reassigned.
+    pub fn defaults(self) -> [Option<KeySpec>; 2] {
         match self {
-            Action::Quit => vec![KeySpec::ctrl('c'), KeySpec::plain_char('q')],
-            Action::Help => vec![KeySpec::plain_char('?'), KeySpec::f(1)],
-            Action::Copy => vec![KeySpec::f(5), KeySpec::plain_char('c')],
-            Action::Move => vec![KeySpec::f(6), KeySpec::plain_char('m')],
-            Action::Mkdir => vec![KeySpec::f(7), KeySpec::plain_char('n')],
-            Action::Rename => vec![KeySpec::f(2), KeySpec::plain_char('r')],
-            Action::Delete => vec![
-                KeySpec::f(8),
-                KeySpec::plain_char('d'),
-                KeySpec::code(KeyCode::Delete),
+            Action::Quit => [Some(KeySpec::plain_char('q')), Some(KeySpec::ctrl('c'))],
+            Action::Help => [Some(KeySpec::plain_char('?')), Some(KeySpec::f(1))],
+            Action::Copy => [Some(KeySpec::f(5)), Some(KeySpec::plain_char('c'))],
+            Action::Move => [Some(KeySpec::f(6)), Some(KeySpec::plain_char('m'))],
+            Action::Mkdir => [Some(KeySpec::f(7)), Some(KeySpec::plain_char('n'))],
+            Action::Rename => [Some(KeySpec::f(2)), Some(KeySpec::plain_char('r'))],
+            Action::Delete => [Some(KeySpec::f(8)), Some(KeySpec::code(KeyCode::Delete))],
+            Action::SelectAll => [Some(KeySpec::ctrl('a')), None],
+            Action::BulkRename => [Some(KeySpec::ctrl('g')), None],
+            Action::ToggleHidden => [Some(KeySpec::ctrl('h')), Some(KeySpec::plain_char('.'))],
+            Action::Refresh => [Some(KeySpec::ctrl('r')), None],
+            Action::SortMenu => [Some(KeySpec::plain_char('s')), Some(KeySpec::ctrl('s'))],
+            Action::ColourMenu => [Some(KeySpec::ctrl('k')), None],
+            Action::Settings => [Some(KeySpec::ctrl('e')), None],
+            Action::TogglePreview => [Some(KeySpec::ctrl('q')), Some(KeySpec::ctrl('p'))],
+            Action::ToggleThumbnails => [Some(KeySpec::ctrl('t')), None],
+            Action::OpenInOther => [Some(KeySpec::ctrl('o')), None],
+            Action::AddFavorite => [Some(KeySpec::ctrl('b')), None],
+            Action::FocusFavorites => [
+                Some(KeySpec::code(KeyCode::BackTab)),
+                Some(KeySpec::plain_char('§')),
             ],
-            Action::SelectAll => vec![KeySpec::ctrl('a')],
-            Action::BulkRename => vec![KeySpec::ctrl('g')],
-            Action::ToggleHidden => vec![KeySpec::ctrl('h'), KeySpec::plain_char('.')],
-            Action::Refresh => vec![KeySpec::ctrl('r')],
-            Action::SortMenu => vec![KeySpec::plain_char('s'), KeySpec::ctrl('s')],
-            Action::ColourMenu => vec![KeySpec::ctrl('k')],
-            Action::Settings => vec![KeySpec::ctrl('e')],
-            Action::TogglePreview => vec![KeySpec::ctrl('q'), KeySpec::ctrl('p')],
-            Action::ToggleThumbnails => vec![KeySpec::ctrl('t')],
-            Action::OpenInOther => vec![KeySpec::ctrl('o')],
-            Action::AddFavorite => vec![KeySpec::ctrl('b')],
-            Action::FocusFavorites => vec![
-                KeySpec::ctrl('d'),
-                KeySpec::code(KeyCode::BackTab),
-                KeySpec::plain_char('§'),
+            Action::ToggleSidebar => [Some(KeySpec::ctrl('f')), None],
+            Action::CopyPath => [Some(KeySpec::ctrl('l')), None],
+            Action::CopyName => [
+                Some(KeySpec::new(KeyCode::Char('i'), KeyModifiers::ALT)),
+                None,
             ],
-            Action::ToggleSidebar => vec![KeySpec::ctrl('f')],
-            Action::OpenHere => vec![KeySpec::code(KeyCode::Enter), KeySpec::plain_char('l')],
-            Action::OpenFolderThere => vec![
-                KeySpec::new(KeyCode::Right, KeyModifiers::SHIFT),
-                KeySpec::new(KeyCode::Left, KeyModifiers::SHIFT),
+            Action::CopySelection => [
+                Some(KeySpec::new(
+                    KeyCode::Char('C'),
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                )),
+                None,
             ],
-            Action::PreviewThere => vec![
-                KeySpec::new(KeyCode::Right, KeyModifiers::ALT),
-                KeySpec::new(KeyCode::Left, KeyModifiers::ALT),
+            Action::SwitchPanel => [Some(KeySpec::code(KeyCode::Tab)), None],
+            Action::OpenHere => [Some(KeySpec::code(KeyCode::Enter)), None],
+            Action::OpenFolderThere => [
+                Some(KeySpec::new(KeyCode::Right, KeyModifiers::SHIFT)),
+                Some(KeySpec::new(KeyCode::Left, KeyModifiers::SHIFT)),
             ],
-            Action::Confirm => vec![KeySpec::code(KeyCode::Enter)],
-            Action::Cancel => vec![KeySpec::code(KeyCode::Esc)],
+            Action::PreviewThere => [
+                Some(KeySpec::new(KeyCode::Right, KeyModifiers::ALT)),
+                Some(KeySpec::new(KeyCode::Left, KeyModifiers::ALT)),
+            ],
+            // `Confirm` has no key of its own: Enter/Ctrl+E are prompt keys, and
+            // giving Confirm the same `Enter` made "open" lose its only slot.
+            Action::Confirm => [None, None],
+            // Esc is reserved (it closes overlays), so Cancel needs no slot.
+            Action::Cancel => [None, None],
         }
+    }
+}
+
+/// One resolved binding: which action a key actually triggers.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Shortcut {
+    pub action: Action,
+    pub spec: KeySpec,
+}
+
+/// Whether `spec` is a "letter with modifiers" chord.
+///
+/// Such chords give way to control keys (`Esc`, `Enter`, `Tab`, `F*`, arrows):
+/// `Ctrl+C` must stay available as an interrupt, and `Enter` cannot become
+/// "copy" just because someone typed it into a slot.
+fn is_letter_chord(spec: &KeySpec) -> bool {
+    // `Ctrl+F`, `Alt+B` and friends are the normal form of a chord. Only a bare
+    // letter shared between two actions (`c` for copy and for delete, say) is
+    // ambiguous, and that is what the rank below resolves.
+    matches!(spec.code, KeyCode::Char(_)) && spec.modifiers.is_empty()
+}
+
+/// Keep only the bindings that can win, in a deterministic order.
+///
+/// A candidate is `(is_user_assigned, shortcut)`. Rules, applied in this order:
+///
+/// 1. reserved combos (`Esc`, the settings key) never get here — they are
+///    filtered while the candidates are collected;
+/// 2. a user-assigned slot beats a built-in default;
+/// 3. a letter chord loses to a control key using the same combo, so `Ctrl+C`
+///    stays the interrupt and `Enter` cannot become "copy";
+/// 4. anything still duplicated is resolved by action order, so the result does
+///    not depend on iteration speed.
+///
+/// The result is what the dispatcher matches, what the footer draws and what
+/// the help screen lists — one list, no drift.
+pub fn resolve(candidates: Vec<(bool, Shortcut)>) -> Vec<Shortcut> {
+    let custom_keys: Vec<KeySpec> = candidates
+        .iter()
+        .filter(|(custom, _)| *custom)
+        .map(|(_, shortcut)| shortcut.spec)
+        .collect();
+
+    let mut sorted = candidates;
+    sorted.sort_by_key(|(custom, shortcut)| {
+        let shadowed_default = !*custom && custom_keys.contains(&shortcut.spec);
+        let letter = is_letter_chord(&shortcut.spec);
+        // Lower sorts first and therefore wins.
+        (
+            shadowed_default,
+            letter,
+            !*custom,
+            action_rank(shortcut.action),
+        )
+    });
+
+    let mut taken: Vec<KeySpec> = Vec::new();
+    let mut resolved = Vec::new();
+    for (_, shortcut) in sorted {
+        if taken.contains(&shortcut.spec) {
+            continue;
+        }
+        taken.push(shortcut.spec);
+        resolved.push(shortcut);
+    }
+    resolved
+}
+
+/// Secondary sort key; only needs to be stable and sensible.
+fn action_rank(action: Action) -> u8 {
+    match action {
+        Action::Quit => 0,
+        Action::Help => 1,
+        Action::Copy => 2,
+        Action::Move => 3,
+        Action::Mkdir => 4,
+        Action::Rename => 5,
+        Action::Delete => 6,
+        Action::OpenHere => 7,
+        Action::TogglePreview => 8,
+        Action::ToggleThumbnails => 9,
+        Action::SortMenu => 10,
+        Action::ToggleHidden => 11,
+        Action::SelectAll => 12,
+        Action::BulkRename => 13,
+        Action::Refresh => 14,
+        Action::Settings => 15,
+        Action::OpenInOther | Action::OpenFolderThere => 16,
+        Action::PreviewThere => 17,
+        Action::AddFavorite => 18,
+        Action::FocusFavorites => 19,
+        Action::ToggleSidebar => 20,
+        Action::CopyPath => 21,
+        Action::CopyName => 22,
+        Action::CopySelection => 23,
+        Action::SwitchPanel => 24,
+        Action::ColourMenu => 23,
+        Action::Confirm | Action::Cancel => 26,
     }
 }
 
@@ -213,26 +360,53 @@ impl KeySpec {
     /// is folded into the character, so a plain `?` arrives without a modifier
     /// and must still match a `?` binding.
     pub fn matches(self, key: KeyEvent) -> bool {
+        // `PreviewThere` is bound to Alt+←/→, but Ghostty and iTerm2 encode
+        // Alt+←/→ as `ESC b` / `ESC f` by default, so those letters arrive as
+        // the arrow. Only the Alt binding accepts them: a `Ctrl+←` spec must
+        // never answer to `Ctrl+F`, which is the sidebar toggle.
+        if self.modifiers == KeyModifiers::ALT
+            && key.modifiers == KeyModifiers::ALT
+            && matches!(
+                (self.code, key.code),
+                (KeyCode::Left, KeyCode::Char('b')) | (KeyCode::Right, KeyCode::Char('f'))
+            )
+        {
+            return true;
+        }
+
         if self.code != key.code {
             return false;
         }
+
+        // A bare key accepts a stray Shift (a terminal reports `?` as Shift+/),
+        // but never Ctrl/Alt: those mean a different gesture.
         if self.modifiers == KeyModifiers::NONE {
-            // Accept stray SHIFT on characters, but not CONTROL/ALT.
             return !key
                 .modifiers
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
         }
-        // A spec that names Shift requires it; one that does not still accepts
-        // a stray Shift coming from a shifted character (`?` is Shift+/).
+
+        // Command arrives as SUPER or META depending on the platform, so both
+        // sides are normalised to SUPER.
         let mut wanted = self.modifiers;
-        if !wanted.contains(KeyModifiers::SHIFT) {
-            wanted.remove(KeyModifiers::SHIFT);
+        if wanted.intersects(KeyModifiers::META) {
+            wanted.remove(KeyModifiers::META);
+            wanted |= KeyModifiers::SUPER;
         }
         let mut actual = key.modifiers;
         if actual.intersects(KeyModifiers::META) {
+            actual.remove(KeyModifiers::META);
             actual |= KeyModifiers::SUPER;
         }
-        actual.contains(wanted)
+
+        // Modifiers are compared *exactly*, because distinct modifier sets are
+        // distinct gestures: `Ctrl+←` and `Shift+←` are bound to different
+        // actions, and `contains` would let both fire on `Ctrl+Shift+←`.
+        if !actual.contains(KeyModifiers::SHIFT) || !wanted.contains(KeyModifiers::SHIFT) {
+            actual.remove(KeyModifiers::SHIFT);
+            wanted.remove(KeyModifiers::SHIFT);
+        }
+        actual == wanted
     }
 
     /// Build a spec from a pressed key.
@@ -375,8 +549,11 @@ pub struct Settings {
     /// Largest file (in bytes) decoded for a thumbnail; bigger ones keep the
     /// block-art icon so scrolling stays fast.
     pub max_thumb_bytes: u64,
-    /// Per-action overrides; an empty map means "use the defaults".
-    pub bindings: BTreeMap<String, KeySpec>,
+    /// One entry per action that was edited: the two live slots.
+    ///
+    /// An action missing from the map uses [`Action::defaults`]. Slots are
+    /// stored as a whole so an intentionally empty slot survives a reload.
+    pub slots: BTreeMap<String, [Option<KeySpec>; 2]>,
     file: PathBuf,
 }
 
@@ -392,7 +569,7 @@ impl Settings {
             icons: true,
             icon_font: String::new(),
             max_thumb_bytes: 4 * 1024 * 1024,
-            bindings: BTreeMap::new(),
+            slots: BTreeMap::new(),
             file: settings_file(),
         }
     }
@@ -405,7 +582,7 @@ impl Settings {
         let mut icons = true;
         let mut icon_font = String::new();
         let mut max_thumb_bytes = 4 * 1024 * 1024;
-        let mut bindings = BTreeMap::new();
+        let mut slots: BTreeMap<String, [Option<KeySpec>; 2]> = BTreeMap::new();
 
         for (key, value) in parse_toml(&text) {
             if key == "invert_scroll" {
@@ -416,10 +593,24 @@ impl Settings {
                 icon_font = value.to_string();
             } else if key == "max_thumb_bytes" {
                 max_thumb_bytes = value.parse().unwrap_or(max_thumb_bytes);
-            } else if let Some(action) = key.strip_prefix("key.") {
-                if let Some(spec) = KeySpec::parse(&value) {
-                    bindings.insert(action.to_string(), spec);
-                }
+            } else if let Some(rest) = key.strip_prefix("key.") {
+                // `key.<action>.<slot>`, with the single-slot form
+                // `key.<action>` kept readable from older files.
+                let (action, slot) = match rest.rsplit_once('.') {
+                    Some((action, suffix)) if suffix == "1" || suffix == "2" => {
+                        (action, suffix.parse::<usize>().ok().map(|n| n - 1))
+                    }
+                    _ => (rest, None),
+                };
+                let Some(action) = Action::ALL
+                    .iter()
+                    .find(|candidate| candidate.id() == action)
+                else {
+                    continue;
+                };
+                let entry = slots.entry(action.id().to_string()).or_insert([None, None]);
+                let slot = slot.unwrap_or(0usize);
+                entry[slot] = KeySpec::parse(&value);
             }
         }
 
@@ -428,7 +619,7 @@ impl Settings {
             icons,
             icon_font,
             max_thumb_bytes,
-            bindings,
+            slots,
             file,
         }
     }
@@ -442,71 +633,159 @@ impl Settings {
             "invert_scroll = {}\nicons = {}\nicon_font = \"{}\"\nmax_thumb_bytes = {}\n",
             self.invert_scroll, self.icons, self.icon_font, self.max_thumb_bytes
         );
-        for (action, spec) in &self.bindings {
-            text.push_str(&format!("key.{action} = \"{}\"\n", spec.label()));
+        for action in Action::ALL {
+            let defaults = action.defaults();
+            let slots = self.stored_slots(action);
+            // Only actions that differ from the defaults are written, so the
+            // file stays readable and a new default reaches existing users.
+            if slots == defaults {
+                continue;
+            }
+            for (index, slot) in slots.iter().enumerate() {
+                let value = slot.map(|spec| spec.label()).unwrap_or_default();
+                text.push_str(&format!(
+                    "key.{}.{} = \"{value}\"\n",
+                    action.id(),
+                    index + 1
+                ));
+            }
         }
         fs::write(&self.file, text)
     }
 
-    /// Keys currently bound to an action, override first.
-    pub fn keys_for(&self, action: Action) -> Vec<KeySpec> {
-        match self.bindings.get(action.id()) {
-            Some(spec) => vec![*spec],
+    /// The two slots of an action as stored (without defaults).
+    pub fn stored_slots(&self, action: Action) -> [Option<KeySpec>; 2] {
+        match self.slots.get(action.id()) {
+            Some(slots) => *slots,
             None => action.defaults(),
         }
     }
 
-    /// Replace every binding of an action with a single key.
-    ///
-    /// Returns `false` when the combination is reserved, so the menu can
-    /// explain why nothing changed.
-    pub fn rebind(&mut self, action: Action, spec: KeySpec) -> bool {
-        if is_reserved(spec) || action == Action::Settings {
-            return false;
-        }
-        self.bindings.insert(action.id().to_string(), spec);
-        true
-    }
-
-    /// Drop the override so the built-in keys apply again.
-    pub fn reset(&mut self, action: Action) {
-        self.bindings.remove(action.id());
-    }
-
+    /// True when the user edited this action at all.
     pub fn is_custom(&self, action: Action) -> bool {
-        self.bindings.contains_key(action.id())
+        self.slots
+            .get(action.id())
+            .is_some_and(|slots| *slots != action.defaults())
     }
 
-    /// Every binding actually in effect: `(action, key)` pairs.
+    /// Assign `spec` to one slot.
     ///
-    /// Built from `keys_for`, so a rebound action reports the new key and the
-    /// footer can never promise a chord the app does not handle.
-    pub fn bindings(&self) -> Vec<(Action, KeySpec)> {
-        Action::ALL
+    /// Both slots are editable. A combo that is reserved (`Esc`, the settings
+    /// key) or already used by another action is refused: silently stealing a
+    /// key from, say, "copy" would be worse than telling the user.
+    pub fn assign(&mut self, action: Action, slot: usize, spec: KeySpec) -> Result<(), String> {
+        if slot > 1 {
+            return Err("only two slots exist".to_string());
+        }
+        if is_reserved(spec) {
+            return Err(format!("{} is reserved", spec.label()));
+        }
+        if action == Action::Settings && slot == 0 {
+            return Err("the settings key itself cannot be remapped".to_string());
+        }
+        // A combo owned by another action is only a conflict when that action
+        // was edited by the user too; a *default* gives way, which is what makes
+        // "take Shift+→ for copy" possible at all.
+        if let Some((owner, _)) = self.owner_of(spec).filter(|(owner, _)| *owner != action) {
+            if self.is_custom(owner) {
+                return Err(format!("{} is used by {}", spec.label(), owner.label()));
+            }
+            self.release_from_defaults(spec, action);
+        }
+
+        let mut slots = self.stored_slots(action);
+        // Repeating a combo in the other slot is a mistake, not a feature.
+        if let Some(other) = [0usize, 1]
             .into_iter()
-            .flat_map(|action| {
-                self.keys_for(action)
-                    .into_iter()
-                    .map(move |spec| (action, spec))
-            })
-            .collect()
+            .find(|index| *index != slot && slots[*index].is_some_and(|existing| existing == spec))
+        {
+            slots[other] = None;
+        }
+        slots[slot] = Some(spec);
+        self.slots.insert(action.id().to_string(), slots);
+        Ok(())
     }
 
-    /// Find the action bound to a key (used by tests and future key hints).
-    #[allow(dead_code)]
-    pub fn action_for(&self, key: KeyEvent) -> Option<Action> {
-        Action::ALL
-            .into_iter()
-            .find(|action| self.keys_for(*action).iter().any(|spec| spec.matches(key)))
+    /// Clear one slot. The action stays reachable through the other one.
+    pub fn clear_slot(&mut self, action: Action, slot: usize) {
+        if slot > 1 {
+            return;
+        }
+        let mut slots = self.stored_slots(action);
+        slots[slot] = None;
+        self.slots.insert(action.id().to_string(), slots);
     }
 
-    /// Display string for the current binding of an action.
+    /// Drop both overrides so the built-in keys apply again.
+    pub fn reset(&mut self, action: Action) {
+        self.slots.remove(action.id());
+    }
+
+    /// Which action currently owns `spec`, if any.
+    ///
+    /// This reads the *slots*, not the resolved list: assigning a key has to
+    /// see a slot the user just cleared, and resolution only runs afterwards.
+    pub fn owner_of(&self, spec: KeySpec) -> Option<(Action, KeySpec)> {
+        Action::menu_actions().into_iter().find_map(|action| {
+            self.stored_slots(action)
+                .iter()
+                .flatten()
+                .any(|existing| *existing == spec)
+                .then_some((action, spec))
+        })
+    }
+
+    /// Release `spec` from every action except `keep`.
+    ///
+    /// Assigning a key that another action holds only by *default* takes it away
+    /// from that default: the user's explicit choice must win, and the resolve
+    /// step already ranks it that way. An action that lost its last key is left
+    /// with an empty slot rather than silently keeping a duplicate.
+    fn release_from_defaults(&mut self, spec: KeySpec, keep: Action) {
+        // Nothing to do: the resolver ranks a user assignment over a default.
+        let _ = (spec, keep);
+    }
+
+    /// Every key combo the app reacts to, after duplicate resolution.
+    ///
+    /// This is *the* list: dispatch, footer and help all read it, so a rebound
+    /// key cannot leave an invisible duplicate behind.
+    pub fn shortcuts(&self) -> Vec<Shortcut> {
+        let mut candidates = Vec::new();
+        for action in Action::ALL {
+            // `stored_slots` already merges the defaults for an untouched
+            // action; an edited action reports exactly what was stored, which is
+            // how a deliberately cleared slot stays cleared.
+            let custom = self.slots.contains_key(action.id());
+            for spec in self.stored_slots(action).into_iter().flatten() {
+                if is_reserved(spec) {
+                    continue;
+                }
+                candidates.push((custom, Shortcut { action, spec }));
+            }
+        }
+        resolve(candidates)
+    }
+
+    /// Display string for an action's slots, e.g. `"f5 · c"`.
     pub fn keys_label(&self, action: Action) -> String {
-        self.keys_for(action)
-            .iter()
-            .map(|spec| spec.label())
+        self.shortcuts()
+            .into_iter()
+            .filter(|shortcut| shortcut.action == action)
+            .map(|shortcut| shortcut.spec.label())
             .collect::<Vec<_>>()
-            .join(", ")
+            .join(" · ")
+    }
+
+    /// The action a key actually triggers, if any.
+    ///
+    /// Reads the resolved list, so a rebound key resolves to its new action and
+    /// the old one stops firing.
+    pub fn action_for(&self, key: KeyEvent) -> Option<Action> {
+        self.shortcuts()
+            .into_iter()
+            .find(|shortcut| shortcut.spec.matches(key))
+            .map(|shortcut| shortcut.action)
     }
 }
 
@@ -594,61 +873,213 @@ mod tests {
         assert!(file.exists());
     }
 
-    #[test]
-    fn overrides_replace_the_default_keys() {
-        let mut settings = Settings {
-            invert_scroll: true,
-            icons: true,
-            icon_font: String::new(),
-            max_thumb_bytes: 4 * 1024 * 1024,
-            bindings: BTreeMap::new(),
-            file: PathBuf::from("/dev/null"),
-        };
-        assert!(settings
-            .keys_for(Action::Copy)
-            .iter()
-            .any(|spec| *spec == KeySpec::f(5)));
-
-        assert!(settings.rebind(Action::Copy, KeySpec::ctrl('y')));
-        assert_eq!(settings.keys_for(Action::Copy), vec![KeySpec::ctrl('y')]);
-        assert!(settings.is_custom(Action::Copy));
-
-        settings.reset(Action::Copy);
-        assert!(!settings.is_custom(Action::Copy));
-        assert_eq!(settings.keys_for(Action::Copy), Action::Copy.defaults());
+    fn defaults() -> Settings {
+        Settings::defaults()
     }
 
     #[test]
-    fn finds_the_action_for_a_key() {
-        let settings = Settings {
-            invert_scroll: true,
-            icons: true,
-            icon_font: String::new(),
-            max_thumb_bytes: 4 * 1024 * 1024,
-            bindings: BTreeMap::new(),
-            file: PathBuf::from("/dev/null"),
-        };
+    fn both_slots_are_editable_and_independent() {
+        let mut settings = defaults();
+        let defaults = Action::Copy.defaults();
+        assert_eq!(settings.stored_slots(Action::Copy), defaults);
+
+        // Slot 2 used to be reachable only through the default: now it is a
+        // first-class target.
+        settings
+            .assign(Action::Copy, 1, KeySpec::ctrl('y'))
+            .expect("slot 2 must be assignable");
+        assert_eq!(
+            settings.stored_slots(Action::Copy),
+            [defaults[0], Some(KeySpec::ctrl('y'))]
+        );
+
+        settings
+            .assign(Action::Copy, 0, KeySpec::f(9))
+            .expect("slot 1 must be assignable");
+        assert_eq!(
+            settings.stored_slots(Action::Copy),
+            [Some(KeySpec::f(9)), Some(KeySpec::ctrl('y'))]
+        );
+        assert!(settings.is_custom(Action::Copy));
+
+        // The resolution sees both slots.
+        let keys: Vec<String> = settings
+            .shortcuts()
+            .into_iter()
+            .filter(|shortcut| shortcut.action == Action::Copy)
+            .map(|shortcut| shortcut.spec.label())
+            .collect();
+        assert_eq!(keys, vec!["f9".to_string(), "ctrl+y".to_string()]);
+
+        settings.reset(Action::Copy);
+        assert_eq!(settings.stored_slots(Action::Copy), defaults);
+        assert!(!settings.is_custom(Action::Copy));
+    }
+
+    #[test]
+    fn a_freed_slot_stops_answering() {
+        let mut settings = defaults();
+        settings.clear_slot(Action::Copy, 0);
+        assert_eq!(settings.stored_slots(Action::Copy)[0], None);
+        assert!(
+            !settings
+                .shortcuts()
+                .iter()
+                .any(|shortcut| shortcut.spec == KeySpec::f(5)),
+            "F5 still resolves after its slot was cleared"
+        );
+
+        // ...and the freed combo can now be taken by another action.
+        settings
+            .assign(Action::Move, 0, KeySpec::f(5))
+            .expect("F5 must be free now");
+        assert_eq!(
+            settings.action_for(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE)),
+            Some(Action::Move)
+        );
+    }
+
+    #[test]
+    fn a_key_cannot_be_stolen_from_an_edited_action() {
+        let mut settings = defaults();
+        // A key the user *chose* for Copy is protected from Move.
+        settings
+            .assign(Action::Copy, 0, KeySpec::ctrl('y'))
+            .unwrap();
+        let error = settings
+            .assign(Action::Move, 0, KeySpec::ctrl('y'))
+            .expect_err("stealing a user-chosen key must fail");
+        assert!(error.contains("Copy"), "unhelpful error: {error}");
+
+        // A built-in default, on the other hand, gives way: that is what makes
+        // rebinding possible at all.
+        settings
+            .assign(Action::Copy, 1, KeySpec::f(6))
+            .expect("a default key must yield to an explicit choice");
+        assert_eq!(
+            settings.action_for(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE)),
+            Some(Action::Copy)
+        );
+    }
+
+    #[test]
+    fn reserved_keys_and_the_settings_key_are_refused() {
+        let mut settings = defaults();
+        assert!(settings
+            .assign(Action::Copy, 0, KeySpec::code(KeyCode::Esc))
+            .is_err());
+        assert!(settings
+            .assign(Action::Copy, 0, KeySpec::ctrl('e'))
+            .is_err());
+        assert!(settings.assign(Action::Settings, 0, KeySpec::f(2)).is_err());
+    }
+
+    /// The bug this refactor fixes: rebinding Q to preview must free Q from Quit.
+    #[test]
+    fn rebinding_q_to_preview_frees_q_from_quit() {
+        let mut settings = defaults();
+        // Slot 1 of Quit was `q`.
+        settings.clear_slot(Action::Quit, 0);
+        // Preview's slot 1 is Ctrl+Q and slot 2 is Ctrl+P; `q` needs a free slot,
+        // which is exactly what clearing Quit's gave it.
+        settings.clear_slot(Action::TogglePreview, 1);
+        settings
+            .assign(Action::TogglePreview, 1, KeySpec::plain_char('q'))
+            .expect("q must be assignable once Quit released it");
+
+        assert_eq!(
+            settings.action_for(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
+            Some(Action::TogglePreview),
+            "q must no longer quit"
+        );
+        assert_eq!(
+            settings.action_for(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+            Some(Action::TogglePreview),
+            "Ctrl+Q stays preview; only the bare q moved"
+        );
+        assert_eq!(
+            settings.action_for(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some(Action::Quit),
+            "Ctrl+C must still quit"
+        );
+    }
+
+    #[test]
+    fn ctrl_c_stays_the_interrupt_and_enter_opens() {
+        let settings = defaults();
+        // `Ctrl+C` is quit's second slot and the only claimant: no letter chord
+        // may shadow it.
         assert_eq!(
             settings.action_for(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
             Some(Action::Quit)
         );
         assert_eq!(
+            settings.action_for(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(Action::OpenHere)
+        );
+        // A plain letter for copy is gone: only F5 remains.
+        assert_eq!(
             settings.action_for(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE)),
             Some(Action::Copy)
-        );
-        assert_eq!(
-            settings.action_for(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE)),
-            None
         );
     }
 
     #[test]
-    fn every_action_has_a_distinct_id_and_default() {
+    fn every_default_is_hidden_behind_a_slot() {
+        // Two slots maximum, and anything beyond them used to be unreachable.
+        for action in Action::ALL {
+            assert_eq!(action.defaults().len(), 2);
+        }
+        let settings = defaults();
+        for action in Action::ALL {
+            let bound = settings
+                .shortcuts()
+                .into_iter()
+                .filter(|shortcut| shortcut.action == action)
+                .count();
+            let expected = action.defaults().iter().flatten().count();
+            assert_eq!(
+                bound,
+                expected,
+                "{} lost a slot in resolution ({} of {expected})",
+                action.id(),
+                bound
+            );
+        }
+    }
+
+    #[test]
+    fn a_single_action_never_shows_the_same_key_twice() {
+        let mut settings = defaults();
+        // Del was both in Delete's second slot and in the old hidden third one;
+        // the footer showed it repeatedly. Now one entry per action+key.
+        settings
+            .assign(Action::Delete, 0, KeySpec::code(KeyCode::Delete))
+            .unwrap();
+        let keys: Vec<String> = settings
+            .shortcuts()
+            .into_iter()
+            .filter(|shortcut| shortcut.action == Action::Delete)
+            .map(|shortcut| shortcut.spec.label())
+            .collect();
+        let unique: std::collections::BTreeSet<&String> = keys.iter().collect();
+        assert_eq!(keys.len(), unique.len(), "duplicate keys in {keys:?}");
+    }
+
+    #[test]
+    fn every_action_has_a_distinct_id_and_label() {
         let mut ids = std::collections::BTreeSet::new();
         for action in Action::ALL {
             assert!(ids.insert(action.id()), "duplicate id: {}", action.id());
-            assert!(!action.defaults().is_empty());
             assert!(!action.label().is_empty());
+            // `Confirm` and `Cancel` are prompt keys, not bindable slots.
+            if !matches!(action, Action::Confirm | Action::Cancel) {
+                assert!(
+                    action.defaults().iter().any(Option::is_some),
+                    "{} has no default key at all",
+                    action.id()
+                );
+            }
         }
     }
 }

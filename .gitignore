@@ -15,5 +15,3 @@ yazi2d.log*
 .idea/
 .vscode/
 *.swp
-vendor/ghostty/*
-!vendor/ghostty/README.md
