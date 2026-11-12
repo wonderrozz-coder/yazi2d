@@ -40,10 +40,10 @@ pub enum Action {
     TogglePreview,
     ToggleThumbnails,
     OpenInOther,
+    ContextMenu,
     AddFavorite,
     FocusFavorites,
     OpenHere,
-    OpenFolderThere,
     PreviewThere,
     ToggleSidebar,
     CopyPath,
@@ -77,6 +77,7 @@ impl Action {
         Action::TogglePreview,
         Action::ToggleThumbnails,
         Action::OpenInOther,
+        Action::ContextMenu,
         Action::AddFavorite,
         Action::FocusFavorites,
         Action::ToggleSidebar,
@@ -85,7 +86,6 @@ impl Action {
         Action::CopySelection,
         Action::SwitchPanel,
         Action::OpenHere,
-        Action::OpenFolderThere,
         Action::PreviewThere,
         Action::Confirm,
         Action::Cancel,
@@ -112,6 +112,7 @@ impl Action {
             Action::TogglePreview => "toggle_preview",
             Action::ToggleThumbnails => "toggle_thumbnails",
             Action::OpenInOther => "open_in_other",
+            Action::ContextMenu => "context_menu",
             Action::AddFavorite => "add_favorite",
             Action::FocusFavorites => "focus_favorites",
             Action::ToggleSidebar => "toggle_sidebar",
@@ -120,7 +121,7 @@ impl Action {
             Action::CopySelection => "copy_selection",
             Action::SwitchPanel => "switch_panel",
             Action::OpenHere => "open_here",
-            Action::OpenFolderThere => "open_folder_there",
+
             Action::PreviewThere => "preview_there",
             Action::Confirm => "confirm",
             Action::Cancel => "cancel",
@@ -146,7 +147,8 @@ impl Action {
             Action::Settings => "Settings menu",
             Action::TogglePreview => "Preview other panel",
             Action::ToggleThumbnails => "Thumbnail grid",
-            Action::OpenInOther => "Open folder there",
+            Action::OpenInOther => "Open folder in the other panel",
+            Action::ContextMenu => "Context menu",
             Action::AddFavorite => "Add to favorites",
             Action::FocusFavorites => "Focus favorites",
             Action::ToggleSidebar => "Show/hide favorites",
@@ -155,7 +157,7 @@ impl Action {
             Action::CopySelection => "Copy selected paths",
             Action::SwitchPanel => "Switch panel",
             Action::OpenHere => "Open entry (Enter)",
-            Action::OpenFolderThere => "Open folder there",
+
             Action::PreviewThere => "Preview there",
             Action::Confirm => "Confirm prompt",
             Action::Cancel => "Cancel / clear",
@@ -200,7 +202,17 @@ impl Action {
             Action::Settings => [Some(KeySpec::ctrl('e')), None],
             Action::TogglePreview => [Some(KeySpec::ctrl('q')), Some(KeySpec::ctrl('p'))],
             Action::ToggleThumbnails => [Some(KeySpec::ctrl('t')), None],
-            Action::OpenInOther => [Some(KeySpec::ctrl('o')), None],
+            // `Ctrl+O` and `Shift+→` were two separate actions with the same
+            // effect and two different labels; they are two slots of one action
+            // now. `Shift+←` mirrors the gesture (see `KeySpec::matches`).
+            Action::OpenInOther => [
+                Some(KeySpec::ctrl('o')),
+                Some(KeySpec::new(KeyCode::Right, KeyModifiers::SHIFT)),
+            ],
+            Action::ContextMenu => [
+                Some(KeySpec::new(KeyCode::F(10), KeyModifiers::SHIFT)),
+                None,
+            ],
             Action::AddFavorite => [Some(KeySpec::ctrl('b')), None],
             Action::FocusFavorites => [
                 Some(KeySpec::code(KeyCode::BackTab)),
@@ -221,10 +233,6 @@ impl Action {
             ],
             Action::SwitchPanel => [Some(KeySpec::code(KeyCode::Tab)), None],
             Action::OpenHere => [Some(KeySpec::code(KeyCode::Enter)), None],
-            Action::OpenFolderThere => [
-                Some(KeySpec::new(KeyCode::Right, KeyModifiers::SHIFT)),
-                Some(KeySpec::new(KeyCode::Left, KeyModifiers::SHIFT)),
-            ],
             Action::PreviewThere => [
                 Some(KeySpec::new(KeyCode::Right, KeyModifiers::ALT)),
                 Some(KeySpec::new(KeyCode::Left, KeyModifiers::ALT)),
@@ -323,7 +331,8 @@ fn action_rank(action: Action) -> u8 {
         Action::BulkRename => 13,
         Action::Refresh => 14,
         Action::Settings => 15,
-        Action::OpenInOther | Action::OpenFolderThere => 16,
+        Action::OpenInOther => 16,
+        Action::ContextMenu => 25,
         Action::PreviewThere => 17,
         Action::AddFavorite => 18,
         Action::FocusFavorites => 19,
@@ -371,6 +380,22 @@ impl KeySpec {
     /// is folded into the character, so a plain `?` arrives without a modifier
     /// and must still match a `?` binding.
     pub fn matches(self, key: KeyEvent) -> bool {
+        // `Shift+←` is the mirror of `Shift+→` for "open in the other panel":
+        // the arrow says *which* panel, so a spec holding one arrow must not
+        // answer to the other. Compared by code, this keeps `Ctrl+O` (same
+        // action) working while keeping the two arrows distinct.
+        if self.modifiers == KeyModifiers::SHIFT
+            && key.modifiers == KeyModifiers::SHIFT
+            && matches!(
+                (self.code, key.code),
+                (KeyCode::Right, KeyCode::Left) | (KeyCode::Left, KeyCode::Right)
+            )
+        {
+            // The displayed arrow is the twin; the action itself decides the
+            // panel from `active`, so both directions are the same gesture.
+            return true;
+        }
+
         // `PreviewThere` is bound to Alt+←/→, but Ghostty and iTerm2 encode
         // Alt+←/→ as `ESC b` / `ESC f` by default, so those letters arrive as
         // the arrow. Only the Alt binding accepts them, and only when Alt is

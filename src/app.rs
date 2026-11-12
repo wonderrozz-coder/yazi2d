@@ -18,9 +18,6 @@ use crate::search::{self, SearchMsg};
 use crate::settings::{Action, KeySpec, Settings};
 use crate::transfer::{self, Job, JobKind, JobMsg};
 
-/// How long `F9` waits for an arrow before the chord is abandoned.
-const LEADER_WINDOW: Duration = Duration::from_millis(2000);
-
 /// Two pointer taps within this window open the entry under the cursor.
 const DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(400);
 
@@ -69,6 +66,12 @@ pub struct App {
     pub favorites_area: Rect,
     /// First favorites row currently drawn, so clicks map to the right bookmark.
     pub fav_offset: usize,
+    /// Mounted volumes shown under the bookmarks.
+    pub disks: Vec<crate::disks::Disk>,
+    /// True while the cursor is in the Disks section, not the bookmarks.
+    pub disks_focus: bool,
+    /// Cursor row inside the Disks section.
+    pub disk_cursor: usize,
     pub hidden: bool,
     pub prompt: Option<Prompt>,
     pub help: bool,
@@ -111,8 +114,6 @@ pub struct App {
     pub held_modifiers: KeyModifiers,
     /// Physical modifier keys currently held (left/right tracked separately).
     pub held_keys: Vec<ModifierKeyCode>,
-    /// Set when `F9` was pressed and an arrow is expected next.
-    pub leader: Option<Instant>,
     /// Timestamp of the last pointer tap, for double-tap detection.
     pub last_tap: Option<Instant>,
     /// Where the last tap landed: panel index and row index. A second tap on a
@@ -130,8 +131,10 @@ pub struct App {
     pub folder_sizes: HashMap<PathBuf, u64>,
     /// Folders whose size is being measured right now.
     pub folder_size_pending: Vec<(PathBuf, Receiver<(PathBuf, u64)>)>,
-    /// A row of the favorites sidebar waiting to be revealed in a panel.
+    /// A row of the favorites sidebar waiting to be revealed as a folder.
     pub favorites_preview: Option<(usize, PathBuf)>,
+    /// Bookmarked file to put the cursor on once its folder has loaded.
+    pub favorite_file: Option<PathBuf>,
 }
 
 /// After the arrow has been held this long, the app moves the cursor itself.
@@ -343,6 +346,9 @@ impl App {
             fav_cursor: 0,
             favorites_area: Rect::new(0, 0, 0, 0),
             fav_offset: 0,
+            disks: crate::disks::list(),
+            disks_focus: false,
+            disk_cursor: 0,
             hidden,
             prompt: None,
             help: false,
@@ -367,7 +373,6 @@ impl App {
             dirty: true,
             held_modifiers: KeyModifiers::NONE,
             held_keys: Vec::new(),
-            leader: None,
             last_tap: None,
             last_tap_target: None,
             held_arrow: None,
@@ -375,6 +380,7 @@ impl App {
             folder_sizes: HashMap::new(),
             folder_size_pending: Vec::new(),
             favorites_preview: None,
+            favorite_file: None,
         }
     }
 
@@ -485,6 +491,18 @@ impl App {
                         // letting it jump to the first row.
                         if let Some((names, previous)) = self.pending_cursor_after.take() {
                             self.panels[index].focus_after_removal(&names, previous);
+                        }
+                        // A bookmarked file was waiting for its folder: put the
+                        // cursor on it now so the preview pane picks it up.
+                        if let Some(file) = self.favorite_file.take() {
+                            if let Some(position) = self.panels[index]
+                                .entries
+                                .iter()
+                                .position(|entry| entry.path == file)
+                            {
+                                self.panels[index].cursor = position;
+                                self.panels[index].ensure_visible();
+                            }
                         }
                         let label = if index == 0 { "Left" } else { "Right" };
                         self.status = format!("{label}: {}", self.panels[index].cwd.display());
@@ -761,45 +779,6 @@ impl App {
             return;
         }
 
-        // F9 is a chord leader, so the cross-panel actions also work on
-        // keyboards where Ctrl/Alt + arrow never reaches the terminal:
-        //   F9 → (wait for one arrow)
-        //   ←/→  open the cursor folder in that panel
-        //   ↑/↓  toggle the thumbnail grid in the active panel
-        // The leader expires after LEADER_WINDOW or on any unrelated key.
-        if let Some(started) = self.leader {
-            if started.elapsed() > LEADER_WINDOW {
-                self.leader = None;
-            }
-        }
-
-        // The F9 chord is only armed while F9 is not a regular binding. Rebind
-        // F9 to something (delete, for instance) and the chord steps aside.
-        if key.code == KeyCode::F(9)
-            && key.modifiers.is_empty()
-            && self.settings.action_for(key).is_none()
-        {
-            self.leader = Some(Instant::now());
-            self.status = "F9 + ←/→ open the cursor folder in that panel".to_string();
-            return;
-        }
-
-        if let Some(_started) = self.leader.take() {
-            match key.code {
-                KeyCode::Left => {
-                    self.open_entry_in_panel(0);
-                    return;
-                }
-                KeyCode::Right => {
-                    self.open_entry_in_panel(1);
-                    return;
-                }
-                _ => {
-                    self.status = "F9 chord cancelled".to_string();
-                }
-            }
-        }
-
         // `Alt+Shift+F7` opens the search in the other panel, `Alt+F7` in the
         // active one; `Meta`/`Super` is accepted too because some terminals
         // deliver the Option key that way.
@@ -990,6 +969,16 @@ impl App {
     }
 
     fn handle_panel_key(&mut self, key: KeyEvent) {
+        // `S` is the sidebar's separator key. In the panels it used to do
+        // nothing at all, which read as "the feature is broken"; say where the
+        // key works instead.
+        if key.code == KeyCode::Char('S') && key.modifiers.is_empty() {
+            self.status =
+                "Separators live in the sidebar: press § or Ctrl+D to focus Favorites, then S"
+                    .to_string();
+            return;
+        }
+
         // A held arrow accelerates; every other key stops the auto-repeat so it
         // can never fight with what the user is typing.
         if matches!(
@@ -1373,6 +1362,23 @@ impl App {
         self.copy_text(&text, &format!("Copied {} path(s)", paths.len()));
     }
 
+    /// Open the context menu for the cursor entry from the keyboard.
+    ///
+    /// The menu used to be reachable only with a right click, which left
+    /// keyboard-only users (and terminals without mouse reporting) unable to
+    /// use it. It is a rebindable action now, so it also shows up in the
+    /// settings list and in `F1`.
+    fn open_context_menu_for_cursor(&mut self) {
+        let panel = self.active;
+        let index = self.panels[panel].cursor;
+        // Anchor it under the cursor row when we know where the list is; the
+        // renderer clamps it to the screen either way.
+        let area = self.panels[panel].body_area;
+        let x = area.x + 2;
+        let y = area.y + (index.saturating_sub(self.panels[panel].offset)) as u16;
+        self.open_context_menu(panel, Some(index), x, y);
+    }
+
     /// Right click: build the menu for an entry, or for the folder itself when
     /// `index` is `None` (the path bar).
     fn open_context_menu(&mut self, panel: usize, index: Option<usize>, x: u16, y: u16) {
@@ -1754,9 +1760,11 @@ impl App {
             Action::Refresh => {
                 self.reload_panel_async(0);
                 self.reload_panel_async(1);
+                self.refresh_disks();
             }
             Action::SortMenu => self.sort_menu = true,
             Action::ColourMenu => self.theme_menu = true,
+            Action::ContextMenu => self.open_context_menu_for_cursor(),
             Action::TogglePreview => self.toggle_preview(),
             Action::ToggleThumbnails => self.toggle_thumbnails(),
             Action::OpenInOther => self.open_entry_in_panel(1 - self.active),
@@ -1775,7 +1783,6 @@ impl App {
                 );
             }
             Action::OpenHere => self.open_current_entry(),
-            Action::OpenFolderThere => self.open_entry_in_panel(1 - self.active),
             Action::PreviewThere => self.preview_panel(1 - self.active),
             Action::Confirm => {
                 // Enter on a prompt is handled by the prompt itself.
@@ -1988,7 +1995,13 @@ impl App {
             KeyCode::Char('S') => self.begin_separator(),
             // Enter *and* `→`/`l` open the bookmark: `→` used to work and must
             // keep working, `Enter` is the discoverable one.
-            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => self.open_favorite(),
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+                if self.disks_focus {
+                    self.open_disk();
+                } else {
+                    self.open_favorite();
+                }
+            }
             _ => {}
         }
     }
@@ -1999,6 +2012,48 @@ impl App {
     /// This is the "browse without committing" behaviour: the panel follows the
     /// cursor (a folder is opened, a file is previewed), while Enter chooses.
     fn move_favorite(&mut self, delta: i32) {
+        // Moving into the Disks section is a *step past the end*, not a step
+        // onto the last bookmark: the bookmark rows must be reachable first.
+        if delta > 0 && !self.disks_focus {
+            let last_bookmark = self
+                .favorites
+                .entries
+                .iter()
+                .rposition(|entry| !entry.is_separator());
+            let past_the_end = match last_bookmark {
+                Some(last) => self.fav_cursor > last,
+                None => true,
+            };
+            if past_the_end {
+                if !self.disks.is_empty() {
+                    self.disks_focus = true;
+                    self.disk_cursor = 0;
+                    self.reveal_disk();
+                }
+                return;
+            }
+        }
+        if delta < 0 && self.disks_focus && self.disk_cursor == 0 {
+            self.disks_focus = false;
+            self.fav_cursor = self
+                .favorites
+                .entries
+                .iter()
+                .rposition(|entry| !entry.is_separator())
+                .unwrap_or(0);
+            self.select_favorite_row();
+            return;
+        }
+        if self.disks_focus {
+            let last = self.disks.len().saturating_sub(1);
+            let next = (self.disk_cursor as i32 + delta).clamp(0, last as i32) as usize;
+            if next != self.disk_cursor {
+                self.disk_cursor = next;
+                self.reveal_disk();
+            }
+            return;
+        }
+
         let len = self.favorites.len();
         if len == 0 {
             return;
@@ -2017,6 +2072,29 @@ impl App {
         self.select_favorite_row();
     }
 
+    /// Show the highlighted disk in the active panel, keeping the sidebar focus.
+    fn reveal_disk(&mut self) {
+        let Some(disk) = self.disks.get(self.disk_cursor).cloned() else {
+            return;
+        };
+        let panel = self.active;
+        if self.panels[panel].cwd != disk.mount {
+            self.start_load(panel, disk.mount, None, LoadKind::Navigate);
+        }
+    }
+
+    /// Enter/`→` on a disk: hand the panel over to it.
+    fn open_disk(&mut self) {
+        let Some(disk) = self.disks.get(self.disk_cursor).cloned() else {
+            return;
+        };
+        let panel = self.active;
+        self.focus = Focus::Panels;
+        let mount = disk.mount.clone();
+        self.status = format!("{} ({})", disk.label, mount.display());
+        self.start_load(panel, disk.mount, None, LoadKind::Navigate);
+    }
+
     /// Reveal the cursor row in the active panel without leaving the sidebar.
     fn select_favorite_row(&mut self) {
         let Some(entry) = self.favorites.entries.get(self.fav_cursor).cloned() else {
@@ -2031,23 +2109,40 @@ impl App {
         if path.is_dir() {
             // Load the folder so the panel shows its contents; the sidebar keeps
             // the focus, which is what makes arrow-browsing possible.
-            if self.panels[panel].cwd != path {
-                self.favorites_preview = Some((panel, path));
-            }
-        } else {
-            // A bookmarked file: open its folder and put the cursor on it, so
-            // the preview pane shows the file instead of a folder listing.
-            let parent = path.parent().map(Path::to_path_buf);
-            let name = path
-                .file_name()
-                .map(|name| name.to_string_lossy().to_string());
-            if let (Some(parent), Some(name)) = (parent, name) {
-                if self.panels[panel].cwd != parent {
-                    self.favorites_preview = Some((panel, parent.with_file_name(name)));
-                }
-            }
+            self.favorites_preview = Some((panel, path));
+            self.run_favorites_preview();
+            return;
         }
-        self.run_favorites_preview();
+
+        // A bookmarked file is *previewed* where it already is: only the panel
+        // cursor moves, so the list stays put and the preview pane picks the
+        // file up. Navigating to its folder would lose the user's place for a
+        // single keystroke — that is what `Enter` is for.
+        if self.panels[panel].cwd == path.parent().unwrap_or(Path::new("")) {
+            if let Some(index) = self.panels[panel]
+                .entries
+                .iter()
+                .position(|entry| entry.path == path)
+            {
+                self.panels[panel].cursor = index;
+                self.panels[panel].ensure_visible();
+                self.sync_preview_scroll();
+            }
+            return;
+        }
+
+        // The panel is somewhere else, so reveal the folder once and let the
+        // load finish with the cursor on the file.
+        self.favorite_file = Some(path.clone());
+        if let Some(parent) = path.parent() {
+            self.start_load(
+                panel,
+                parent.to_path_buf(),
+                path.file_name()
+                    .map(|name| name.to_string_lossy().to_string()),
+                LoadKind::Navigate,
+            );
+        }
     }
 
     /// Apply a queued reveal once the sidebar has settled on a row.
@@ -2105,6 +2200,12 @@ impl App {
         self.fav_cursor = (self.fav_cursor + 1).min(self.favorites.len().saturating_sub(1));
         self.persist_favorites();
         self.status = format!("Separator added: {title}");
+    }
+
+    /// Re-read the mount table (disks appear and disappear as they are plugged).
+    pub fn refresh_disks(&mut self) {
+        self.disks = crate::disks::list();
+        self.disk_cursor = self.disk_cursor.min(self.disks.len().saturating_sub(1));
     }
 
     fn persist_favorites(&mut self) {
@@ -2599,6 +2700,9 @@ impl App {
     }
 
     fn toggle_favorites_focus(&mut self) {
+        // Opening the sidebar re-reads the mount table, so a freshly plugged
+        // volume appears without a restart.
+        self.refresh_disks();
         if self.show_favorites && self.focus == Focus::Favorites {
             self.focus = Focus::Panels;
             self.status = "Favorites unfocused (still visible)".to_string();
@@ -3205,48 +3309,6 @@ mod tests {
     }
 
     #[test]
-    fn f9_then_arrow_opens_the_cursor_folder_or_toggles_thumbnails() {
-        let tmp = tempfile::tempdir().unwrap();
-        let left = tmp.path().join("left");
-        let right = tmp.path().join("right");
-        let child = left.join("child");
-        fs::create_dir_all(&child).unwrap();
-        fs::create_dir_all(&right).unwrap();
-
-        let mut app = app_for(&left, &right);
-        app.panels[0].select_name("child");
-
-        // F9 → Right opens the cursor folder in the right panel.
-        press(&mut app, KeyCode::F(9), KeyModifiers::NONE);
-        assert!(app.leader.is_some());
-        press(&mut app, KeyCode::Right, KeyModifiers::NONE);
-        assert!(app.leader.is_none());
-        wait_for_loads(&mut app);
-        assert_eq!(app.panels[1].cwd, child);
-
-        // Any other key cancels the chord instead of doing something hidden.
-        press(&mut app, KeyCode::F(9), KeyModifiers::NONE);
-        press(&mut app, KeyCode::Up, KeyModifiers::NONE);
-        assert!(app.leader.is_none());
-        assert_eq!(app.panels[0].mode, PanelMode::List);
-    }
-
-    #[test]
-    fn f9_chord_is_cancelled_by_escape_or_an_unrelated_key() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut app = app_for(tmp.path(), tmp.path());
-
-        press(&mut app, KeyCode::F(9), KeyModifiers::NONE);
-        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
-        assert!(app.leader.is_none());
-        assert_eq!(app.panels[0].mode, PanelMode::List);
-
-        press(&mut app, KeyCode::F(9), KeyModifiers::NONE);
-        press(&mut app, KeyCode::Char('z'), KeyModifiers::NONE);
-        assert!(app.leader.is_none());
-    }
-
-    #[test]
     fn ctrl_o_opens_the_cursor_folder_in_the_other_panel() {
         let tmp = tempfile::tempdir().unwrap();
         let left = tmp.path().join("left");
@@ -3397,7 +3459,6 @@ mod tests {
         for action in [
             A::ToggleSidebar,
             A::OpenHere,
-            A::OpenFolderThere,
             A::PreviewThere,
             A::Confirm,
             A::Cancel,
@@ -3741,7 +3802,7 @@ mod tests {
             .unwrap();
         app.panels[0].select_name("a.txt");
 
-        // F9 now arms the delete prompt instead of the F9 leader chord.
+        // F9 is a normal, rebindable key now: it arms the delete prompt.
         press(&mut app, KeyCode::F(9), KeyModifiers::NONE);
         assert!(matches!(app.prompt, Some(Prompt::Delete { .. })));
     }
@@ -4584,7 +4645,7 @@ mod tests {
         assert_eq!(
             app.settings
                 .action_for(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT)),
-            Some(Action::OpenFolderThere)
+            Some(Action::OpenInOther)
         );
     }
 
@@ -4816,6 +4877,21 @@ mod tests {
             labels.len(),
             unique.len(),
             "duplicate menu labels: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn s_in_the_panels_explains_where_separators_live() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+
+        press(&mut app, KeyCode::Char('S'), KeyModifiers::NONE);
+
+        assert!(app.prompt.is_none(), "no prompt outside the sidebar");
+        assert!(
+            app.status.contains("Favorites"),
+            "the status must point at the sidebar: {}",
+            app.status
         );
     }
 }

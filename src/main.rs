@@ -1,6 +1,7 @@
 mod app;
 mod clipboard;
 mod colors;
+mod disks;
 mod favorites;
 mod graphics;
 mod icons;
@@ -222,8 +223,6 @@ fn print_help() {
          \x20 Ctrl+L          copy the current path to the clipboard\n\
          \x20 Alt+I           copy the cursor name to the clipboard\n\
          \x20 Ctrl+Shift+C    copy the selected paths\n\
-         \x20 F9 + Left/Right open cursor folder in that panel\n\
-         \x20 F9 + Up/Down    thumbnail grid on / off\n\
          \x20 Ctrl+Q / Ctrl+P quick preview in the OTHER panel\n\
          \x20 Ctrl+T          thumbnail grid in the active panel\n\
          \x20 Ctrl+O          open cursor folder in the other panel\n\

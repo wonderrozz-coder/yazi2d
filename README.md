@@ -199,8 +199,6 @@ alternative.
 | `F8` / `d` / `Delete` | delete (confirm with `Enter`/`y`) |
 | `Ctrl+Q` / `Ctrl+P` | quick preview in the **other** panel |
 | `Ctrl+T` | thumbnail grid |
-| `F9`, then `↑`/`↓` | thumbnails on/off (fallback) |
-| `F9`, then `←`/`→` | open cursor folder in that panel (fallback) |
 | `Shift+←` / `Shift+→` | open cursor folder in that panel |
 | `Alt+←` / `Alt+→` | quick preview in that panel |
 | `Ctrl+O` | open cursor folder in the other panel |
@@ -580,8 +578,6 @@ WIN7=0 ./packaging/windows/build-windows.sh   # только Windows 10/11
 | `F8` / `d` / `Delete` | удалить (`Enter` или `y` подтверждает) |
 | `Ctrl+Q` / `Ctrl+P` | быстрый просмотр в **противоположной** панели |
 | `Ctrl+T` | режим миниатюр в активной панели |
-| `F9`, затем `↑` или `↓` | миниатюры вкл/выкл (резервный путь) |
-| `F9`, затем `←` или `→` | открыть папку под курсором в указанной панели |
 | `Shift+←` / `Shift+→` | открыть папку под курсором в указанной панели |
 | `Alt+←` / `Alt+→` | быстрый просмотр в указанной панели |
 | `Ctrl+O` | открыть папку под курсором в соседней панели |

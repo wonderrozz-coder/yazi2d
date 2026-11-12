@@ -1104,3 +1104,44 @@ Behaviour follows from the row type:
 that can be rearranged, and entries that may point at a single document. The
 footer and the settings menu read the same `Action` enum, so the sidebar's
 `Del` still means "remove a bookmark" and never a file operation (ADR-047).
+
+## ADR-049 — One "open in the other panel" action; F9 chord removed
+
+**Status:** accepted (2026-11-13, `0.6.6`)
+
+**Context:** Three separate things claimed to do the same job and showed up in
+the settings list as three rows: `Open folder there` (`Ctrl+O`),
+`Open folder there` (`Shift+→/←`, a different action with an identical label)
+and the `F9` chord leader, which was not in the menu at all but worked and was
+printed in the footer.
+
+**Decision:** `Action::OpenInOther` is the only action. Its two slots are
+`Ctrl+O` and `Shift+→`; `Shift+←` is accepted by the same spec through a
+modifier-and-code mirror in `KeySpec::matches`, so the arrow still says which
+direction the user meant while there is exactly one line in the menu. The
+`OpenFolderThere` action, its label and its rows are gone.
+
+The `F9` chord is deleted outright (`leader` state, `LEADER_WINDOW`, the status
+hint, the footer chip, the `F1` line and the help text). Its one useful effect —
+opening the cursor folder in the panel on the arrow's side — is what
+`Milestone::OpenInOther` already does.
+
+**Consequences:** The settings list has one row per real behaviour, and the
+footer/`F1` can no longer advertise a chord that is not in the menu. A welcome
+side effect: `F9` is a free, ordinary key that can be bound like any other.
+
+## ADR-050 — `S` explains itself outside the sidebar
+
+**Status:** accepted (2026-11-13, `0.6.6`)
+
+**Context:** `S` adds a separator, but only while the sidebar has the focus.
+Pressed in a panel it did nothing, which is indistinguishable from a broken
+feature — and it was reported as exactly that.
+
+**Decision:** `App::handle_panel_key` intercepts `S` and writes
+"Separators live in the sidebar: press § or Ctrl+D to focus Favorites, then S"
+into the status line. The key still does its real job inside the sidebar.
+
+**Consequences:** A key that would otherwise be a silent no-op now teaches the
+navigation it needs. Nothing else changed: `S` is not a rebindable action, and
+the status line is the place the app already explains itself.

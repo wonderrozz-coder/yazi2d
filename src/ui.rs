@@ -1050,21 +1050,57 @@ fn draw_favorites(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    if app.favorites.is_empty() {
-        frame.render_widget(
-            Paragraph::new(
-                "No favorites yet.\n\nCtrl+B bookmarks the\ncursor folder or file,\nS adds a separator.",
-            )
-            .style(Style::default().fg(Color::DarkGray))
-            .wrap(Wrap { trim: true }),
-            inner,
-        );
-        app.favorites_area = inner;
+    // Two sections: bookmarks on top, mounted volumes at the bottom. The disks
+    // get a fixed slice (as tall as their list needs, capped) so the bookmarks
+    // keep the rest even on a small terminal.
+    // One caption row plus the entries. The disks take what they need but never
+    // more than a third of the panel, so the bookmarks keep the rest; on a tall
+    // terminal the needs win, on a short one the bookmarks do.
+    let wanted = app.disks.len() as u16 + 1;
+    let cap = (inner.height / 3).max(3);
+    let disk_height = if app.disks.is_empty() {
+        0
+    } else {
+        wanted.min(cap).min(inner.height)
+    };
+    // Bookmark rows must survive: never take more than the disks need.
+    let disk_height = disk_height.min(inner.height.saturating_sub(1));
+    let bookmarks = Rect {
+        height: inner.height.saturating_sub(disk_height),
+        ..inner
+    };
+    let disks_area = Rect {
+        y: inner.y + inner.height.saturating_sub(disk_height),
+        height: disk_height,
+        ..inner
+    };
+
+    draw_bookmarks(frame, app, bookmarks, active);
+    if disk_height > 0 {
+        draw_disks(frame, app, disks_area, active);
+    }
+    app.favorites_area = inner;
+}
+
+/// The bookmarks list: paths, files and named separators.
+fn draw_bookmarks(frame: &mut Frame, app: &mut App, area: Rect, active: bool) {
+    if area.height == 0 || area.width == 0 {
         app.fav_offset = 0;
         return;
     }
 
-    let width = inner.width as usize;
+    if app.favorites.is_empty() {
+        frame.render_widget(
+            Paragraph::new("Ctrl+B bookmarks the cursor\nentry, S adds a separator.")
+                .style(Style::default().fg(Color::DarkGray))
+                .wrap(Wrap { trim: true }),
+            area,
+        );
+        app.fav_offset = 0;
+        return;
+    }
+
+    let width = area.width as usize;
     let icons = app.settings.icons;
     let active_cwd = app.panels[app.active].cwd.clone();
 
@@ -1074,14 +1110,12 @@ fn draw_favorites(frame: &mut Frame, app: &mut App, area: Rect) {
         .iter()
         .map(|entry| match entry {
             crate::favorites::Entry::Separator(title) => {
-                // A caption, not a row: dim, with a rule so groups read apart.
-                let line = Line::from(vec![Span::styled(
+                ListItem::new(Line::from(vec![Span::styled(
                     truncate_right(&format!("── {title} "), width),
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
-                )]);
-                ListItem::new(line)
+                )]))
             }
             crate::favorites::Entry::Path(path) => {
                 let is_dir = path.is_dir();
@@ -1128,13 +1162,81 @@ fn draw_favorites(frame: &mut Frame, app: &mut App, area: Rect) {
             .add_modifier(Modifier::BOLD),
     );
 
+    // In the Disks section the bookmarks show no highlight at all, so it is
+    // obvious which of the two lists the cursor is in.
     let cursor = app.fav_cursor.min(app.favorites.len().saturating_sub(1));
-    let mut state = ListState::default().with_selected(Some(cursor));
-    frame.render_stateful_widget(list, inner, &mut state);
-    // Remember where the rows are and which row is first, so a click in the
-    // sidebar selects the bookmark the user actually pointed at.
-    app.favorites_area = inner;
+    let highlight = if app.disks_focus { None } else { Some(cursor) };
+    let mut state = ListState::default().with_selected(highlight);
+    frame.render_stateful_widget(list, area, &mut state);
     app.fav_offset = state.offset();
+}
+
+/// Mounted volumes: each row is `label  free of total` with the kind after it.
+fn draw_disks(frame: &mut Frame, app: &mut App, area: Rect, active: bool) {
+    let _ = active;
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let width = area.width as usize;
+
+    let mut lines = vec![Line::from(Span::styled(
+        truncate_right("── Disks ", width),
+        Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD),
+    ))];
+
+    let room = area.height.saturating_sub(1) as usize;
+    for (index, disk) in app.disks.iter().enumerate().take(room) {
+        let focused = app.disks_focus && index == app.disk_cursor;
+
+        // The detail is built first, so the label gets whatever is left. The old
+        // order let the detail column eat the name, which left rows that read
+        // "10G free of 100G" with no disk at all.
+        let usage = disk.usage();
+        let detail = if usage.is_empty() {
+            disk.kind.clone()
+        } else {
+            usage
+        };
+        let detail = truncate_right(&detail, width.saturating_sub(6).max(4));
+        let label_width = width.saturating_sub(2 + detail.width() + 1);
+        let label = truncate_right(&disk.label, label_width.max(1));
+
+        let style = if focused {
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        let background = if focused {
+            SELECT_BG_ACTIVE
+        } else {
+            Color::Reset
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::default().fg(Color::Magenta).bg(background)),
+            Span::styled(label.clone(), style.bg(background)),
+            Span::styled(
+                format!(
+                    "{}{} ",
+                    " ".repeat(width.saturating_sub(2 + label.width() + detail.width() + 1)),
+                    detail
+                ),
+                Style::default()
+                    .fg(if focused {
+                        Color::LightYellow
+                    } else {
+                        Color::DarkGray
+                    })
+                    .bg(background),
+            ),
+        ]));
+    }
+
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
@@ -1248,6 +1350,7 @@ fn short_label(action: crate::settings::Action) -> &'static str {
         A::TogglePreview => "preview",
         A::ToggleThumbnails => "thumbnails",
         A::OpenInOther => "open there",
+        A::ContextMenu => "menu",
         A::AddFavorite => "add fav",
         A::FocusFavorites => "favorites",
         A::ToggleSidebar => "sidebar",
@@ -1256,7 +1359,6 @@ fn short_label(action: crate::settings::Action) -> &'static str {
         A::CopySelection => "copy paths",
         A::SwitchPanel => "switch",
         A::OpenHere => "open",
-        A::OpenFolderThere => "open there",
         A::PreviewThere => "preview there",
         A::Confirm => "confirm",
         A::Cancel => "cancel",
@@ -1281,7 +1383,8 @@ fn footer_rank(action: crate::settings::Action) -> u8 {
         A::SelectAll => 10,
         A::BulkRename => 11,
         A::Refresh => 12,
-        A::OpenInOther | A::OpenFolderThere => 13,
+        A::OpenInOther => 13,
+        A::ContextMenu => 26,
         A::PreviewThere => 14,
         A::AddFavorite => 15,
         A::FocusFavorites => 16,
@@ -1366,7 +1469,7 @@ fn hints_for(app: &App, modifiers: crossterm::event::KeyModifiers) -> Vec<Hint> 
     // A narrow footer must show the workhorses first, not `F6 move`.
     order.sort_by_key(|(rank, action)| (*rank, action.id()));
 
-    let mut hints: Vec<Hint> = order
+    let hints: Vec<Hint> = order
         .into_iter()
         .filter_map(|(_, action)| {
             let keys = keys.remove(&action)?;
@@ -1376,24 +1479,6 @@ fn hints_for(app: &App, modifiers: crossterm::event::KeyModifiers) -> Vec<Hint> 
             })
         })
         .collect();
-
-    // The `F9` chord has no `Action` of its own: it is documented as
-    // `F9` + ←/→ only, so a single chip is enough.
-    if modifiers == M::NONE {
-        if let Some((index, _)) = hints
-            .iter()
-            .enumerate()
-            .find(|(_, hint)| hint.label == "open")
-        {
-            hints.insert(
-                index + 1,
-                Hint {
-                    key: "F9+←→".to_string(),
-                    label: "open there",
-                },
-            );
-        }
-    }
 
     hints
 }
@@ -1621,11 +1706,6 @@ fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
         help_line(
             &format!("  {}", live(Action::OpenInOther)),
             "open cursor folder in the other panel",
-            key,
-        ),
-        help_line(
-            &format!("  {}", live(Action::OpenFolderThere)),
-            "open cursor folder in that panel",
             key,
         ),
         help_line(
@@ -2994,17 +3074,116 @@ mod tests {
         app.settings_menu = true;
         app.settings_cursor = crate::settings::Action::menu_actions()
             .iter()
-            .position(|action| *action == Action::OpenFolderThere)
+            .position(|action| *action == Action::OpenInOther)
             .unwrap();
 
         let text = render(&mut app, 120, 50);
-        assert!(text.contains("Open folder there"), "action row missing");
         assert!(
-            text.contains("shift+right"),
-            "slot 1 of Open folder there must be visible: {text}"
+            text.contains("Open folder in the other panel"),
+            "action row missing: {text}"
         );
-        assert!(text.contains("shift+left"), "slot 2 must be visible too");
+        // One action, two slots: Ctrl+O and Shift+→.
+        assert!(text.contains("ctrl+o"), "slot 1 must be visible: {text}");
+        assert!(text.contains("shift+right"), "slot 2 must be visible too");
         // Every action row shows two slots, so the header labels them.
         assert!(text.contains("slot 1") || text.contains("slot1") || text.contains("slot"));
+    }
+
+    #[test]
+    fn the_sidebar_shows_bookmarks_and_a_disks_section() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = default_app(tmp.path());
+        app.favorites.entries.clear();
+        app.favorites.add(tmp.path().to_path_buf());
+        app.favorites.add_separator("Group".to_string(), Some(0));
+        // A fake disk so the test does not depend on the build machine.
+        app.disks = vec![crate::disks::Disk {
+            mount: std::path::PathBuf::from("/"),
+            label: "Root".to_string(),
+            kind: "ext4".to_string(),
+            free: Some(10 * 1024 * 1024 * 1024),
+            total: Some(100 * 1024 * 1024 * 1024),
+        }];
+
+        let text = render(&mut app, 140, 40);
+        let rows: Vec<String> = text
+            .chars()
+            .collect::<Vec<_>>()
+            .chunks(140)
+            .map(|chunk| chunk.iter().collect())
+            .collect();
+        let side: String = rows
+            .iter()
+            .map(|row| row.chars().take(26).collect::<String>() + "\n")
+            .collect();
+        assert!(text.contains("Group"), "separator missing: {text}");
+        assert!(
+            side.contains("Disks"),
+            "disks caption missing, sidebar: {side}"
+        );
+        assert!(
+            side.contains("Root"),
+            "disk row missing, sidebar was: {side}"
+        );
+        assert!(
+            side.contains("free of"),
+            "free space missing, sidebar: {side}"
+        );
+    }
+
+    #[test]
+    fn a_bookmarked_file_is_previewed_in_place_not_navigated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder = tmp.path().join("docs");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("one.txt"), "first").unwrap();
+        fs::write(folder.join("note.md"), "the note body").unwrap();
+
+        let mut app = default_app(&folder);
+        app.favorites.entries.clear();
+        app.favorites
+            .entries
+            .push(crate::favorites::Entry::Path(folder.join("note.md")));
+        app.focus = Focus::Favorites;
+        // The panel already shows the file's folder, so browsing must only move
+        // the cursor: the list stays and the preview follows.
+        app.panels[0].set_mode(crate::panel::PanelMode::List);
+
+        app.on_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Down,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        app.tick();
+
+        assert_eq!(app.panels[0].cwd, folder, "the panel must not navigate");
+        assert_eq!(
+            app.panels[0]
+                .current_entry()
+                .map(|entry| entry.name.as_str()),
+            Some("note.md"),
+            "the cursor must land on the bookmarked file"
+        );
+    }
+
+    #[test]
+    fn the_settings_list_has_no_duplicate_labels() {
+        let mut labels = Vec::new();
+        for action in Action::menu_actions() {
+            labels.push(action.label().to_lowercase());
+        }
+        labels.sort();
+        let mut unique = labels.clone();
+        unique.dedup();
+        assert_eq!(labels, unique, "duplicate action labels: {labels:?}");
+        // The three "open there" variants were the reported problem.
+        assert_eq!(
+            labels.iter().filter(|label| label.contains("open")).count(),
+            labels
+                .iter()
+                .filter(|label| label.contains("open"))
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            "the same open label appears twice: {labels:?}"
+        );
     }
 }

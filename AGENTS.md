@@ -20,7 +20,7 @@ filesystems, a GUI, sixel/Kitty image protocols.
 
 ## Current status (2026-11-11)
 
-Version `0.6.5` — MVP + quick view, thumbnails, background loading, logging,
+Version `0.6.6` — MVP + quick view, thumbnails, background loading, logging,
 sorting, type colours, bulk rename, trackpad gestures, a live footer, a
 polished thumbnail grid, full mouse support (click, double click, path-bar
 copy, right-click menu), recursive search, Windows builds, native image
