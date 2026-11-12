@@ -265,8 +265,9 @@ mod tests {
     use super::*;
 
     fn with_trash<T>(dir: &Path, run: impl FnOnce() -> T) -> T {
-        // The override is process-wide, so these tests are serialised by `cargo
-        // test`'s default single-threaded-per-module? No: use a mutex.
+        // `YAZI2D_TRASH_DIR` is process-wide and `cargo test` runs these in
+        // parallel with every other module, so a single mutex serialises them;
+        // without it one test could delete another's trash root mid-run.
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         std::env::set_var(TRASH_DIR_ENV, dir);
