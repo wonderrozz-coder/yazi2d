@@ -30,21 +30,11 @@ deliberately simplified Total Commander workflow.
 Every screenshot is taken in [Ghostty](https://ghostty.org), the terminal where
 the truecolor previews and thumbnails look best.
 
-List view with a folder preview on the right:
-
-![List view with image thumbnails](docs/screenshots/screenshot-2026-11-12_17-59-34-ghostty.png)
-
-Text preview of a file selected in the left panel:
-
-![Text preview](docs/screenshots/screenshot-2026-11-12_18-00-13-ghostty.png)
-
-Thumbnail grid and file preview in one window:
-
-![Thumbnail grid](docs/screenshots/screenshot-2026-11-12_17-58-46-ghostty.png)
-
-Favorites sidebar with a folder tree:
-
-![Favorites](docs/screenshots/screenshot-2026-11-12_17-58-00-ghostty.png)
+| | |
+|---|---|
+| ![Yazi2D in Ghostty](docs/screenshots/screenshot-2026-11-13_21-20-28-ghostty.png) | ![Yazi2D in Ghostty](docs/screenshots/screenshot-2026-11-13_21-22-04-ghostty.png) |
+| ![Yazi2D in Ghostty](docs/screenshots/screenshot-2026-11-13_21-23-55-ghostty.png) | ![Yazi2D in Ghostty](docs/screenshots/screenshot-2026-11-13_21-24-18-ghostty.png) |
+| ![Yazi2D in Ghostty](docs/screenshots/screenshot-2026-11-13_21-24-52-ghostty.png) | ![Yazi2D in Ghostty](docs/screenshots/screenshot-2026-11-13_21-25-43-ghostty.png) |
 
 ## Features
 
@@ -496,21 +486,11 @@ two-panel model). No Yazi source is included.
 Снято в [Ghostty](https://ghostty.org) — терминале, где truecolor-превью и
 миниатюры выглядят так, как задумано.
 
-Список и сетка миниатюр папки в соседней панели:
-
-![Список и миниатюры](docs/screenshots/screenshot-2026-11-12_17-59-34-ghostty.png)
-
-Просмотр текста выбранного файла:
-
-![Просмотр текста](docs/screenshots/screenshot-2026-11-12_18-00-13-ghostty.png)
-
-Режим миниатюр и превью в одном окне:
-
-![Режим миниатюр](docs/screenshots/screenshot-2026-11-12_17-58-46-ghostty.png)
-
-Избранное и список файлов:
-
-![Избранное](docs/screenshots/screenshot-2026-11-12_17-58-00-ghostty.png)
+| | |
+|---|---|
+| ![Yazi2D в Ghostty](docs/screenshots/screenshot-2026-11-13_21-20-28-ghostty.png) | ![Yazi2D в Ghostty](docs/screenshots/screenshot-2026-11-13_21-22-04-ghostty.png) |
+| ![Yazi2D в Ghostty](docs/screenshots/screenshot-2026-11-13_21-23-55-ghostty.png) | ![Yazi2D в Ghostty](docs/screenshots/screenshot-2026-11-13_21-24-18-ghostty.png) |
+| ![Yazi2D в Ghostty](docs/screenshots/screenshot-2026-11-13_21-24-52-ghostty.png) | ![Yazi2D в Ghostty](docs/screenshots/screenshot-2026-11-13_21-25-43-ghostty.png) |
 
 ## Возможности
 
