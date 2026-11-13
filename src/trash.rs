@@ -55,6 +55,11 @@ pub fn trash(source: &Path) -> Result<Trashed, String> {
 
 /// Root of the trash that can hold `source` on the same filesystem.
 fn trash_dir_for(source: &Path) -> Result<PathBuf, String> {
+    // macOS keeps everything in `~/.Trash` regardless of the volume, so the
+    // source is only interesting on Linux (per-volume `.Trash-$uid`).
+    #[cfg(target_os = "macos")]
+    let _ = source;
+
     if let Some(dir) = std::env::var_os(TRASH_DIR_ENV) {
         let dir = PathBuf::from(dir);
         fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
@@ -106,34 +111,30 @@ fn trash_dir_for(source: &Path) -> Result<PathBuf, String> {
 }
 
 /// The mount point `path` belongs to, by walking up until the device changes.
+///
+/// Only Linux needs this: its trash lives per-volume. macOS and Windows use one
+/// global trash, so the function is compiled out there instead of being dead.
+#[cfg(all(unix, not(target_os = "macos")))]
 fn mount_point_of(path: &Path) -> Option<PathBuf> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::MetadataExt;
 
-        let mut current = path.canonicalize().ok()?;
-        while !current.is_dir() {
-            current = current.parent()?.to_path_buf();
-        }
-        let mut device = fs::metadata(&current).ok()?.dev();
-        while let Some(parent) = current.parent() {
-            let parent_device = match fs::metadata(parent) {
-                Ok(meta) => meta.dev(),
-                Err(_) => break,
-            };
-            if parent_device != device {
-                break;
-            }
-            device = parent_device;
-            current = parent.to_path_buf();
-        }
-        Some(current)
+    let mut current = path.canonicalize().ok()?;
+    while !current.is_dir() {
+        current = current.parent()?.to_path_buf();
     }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        None
+    let mut device = fs::metadata(&current).ok()?.dev();
+    while let Some(parent) = current.parent() {
+        let parent_device = match fs::metadata(parent) {
+            Ok(meta) => meta.dev(),
+            Err(_) => break,
+        };
+        if parent_device != device {
+            break;
+        }
+        device = parent_device;
+        current = parent.to_path_buf();
     }
+    Some(current)
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -266,13 +267,13 @@ mod tests {
 
     fn with_trash<T>(dir: &Path, run: impl FnOnce() -> T) -> T {
         // `YAZI2D_TRASH_DIR` is process-wide and `cargo test` runs these in
-        // parallel with every other module, so a single mutex serialises them;
-        // without it one test could delete another's trash root mid-run.
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        // parallel with every other module, so the shared env lock serialises
+        // them; without it one test could delete another's trash root mid-run.
+        let guard = crate::testutil::env_lock();
         std::env::set_var(TRASH_DIR_ENV, dir);
         let result = run();
         std::env::remove_var(TRASH_DIR_ENV);
+        drop(guard);
         result
     }
 

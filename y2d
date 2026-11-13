@@ -1,0 +1,407 @@
+#!/usr/bin/env bash
+#
+# y2d — the one command you need for Yazi2D.
+#
+#   y2d                 show this help
+#   y2d run [args]      build (debug) and start it right here
+#   y2d app             build release and install the icon app
+#   y2d update          git pull, then rebuild and reinstall the app
+#   y2d test            fmt + clippy + unit tests + PTY end-to-end test
+#   y2d note "text"     leave a comment for the agent in docs/FEEDBACK.md
+#   y2d notes           read those comments
+#   y2d status          version, git state, where the binaries are
+#
+# Works on macOS and Linux. No dependencies beyond a shell, git and Rust.
+#
+# The app it installs is:
+#   macOS  — Yazi2D.app in /Applications (double-click icon, opens a terminal)
+#   Linux  — yazi2d in ~/.local/bin + an entry in the desktop application menu
+
+set -euo pipefail
+
+# --- Locate the repository ------------------------------------------------
+# The script is usually run through a symlink in ~/.local/bin, so resolve the
+# real file first and treat its directory as the project root.
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  case "$SOURCE" in
+    /*) ;;
+    *) SOURCE="$DIR/$SOURCE" ;;
+  esac
+done
+ROOT="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
+FEEDBACK="$ROOT/docs/FEEDBACK.md"
+
+# Where the user actually stands. `y2d run` starts the file manager here, not in
+# the repository, and `y2d note`/`update` still work from anywhere.
+INVOKED_FROM="$PWD"
+
+# --- Pretty output --------------------------------------------------------
+if [ -t 1 ]; then
+  BOLD="$(printf '\033[1m')"; DIM="$(printf '\033[2m')"
+  GREEN="$(printf '\033[32m')"; YELLOW="$(printf '\033[33m')"
+  RED="$(printf '\033[31m')"; RESET="$(printf '\033[0m')"
+else
+  BOLD=""; DIM=""; GREEN=""; YELLOW=""; RED=""; RESET=""
+fi
+
+step() { printf '%s==>%s %s\n' "$BOLD" "$RESET" "$*"; }
+ok()   { printf '%s ok %s %s\n' "$GREEN" "$RESET" "$*"; }
+warn() { printf '%swarn%s %s\n' "$YELLOW" "$RESET" "$*" >&2; }
+die()  { printf '%serr %s %s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
+
+# --- Rust environment -----------------------------------------------------
+if ! command -v cargo >/dev/null 2>&1; then
+  if [ -f "$HOME/.cargo/env" ]; then
+    # shellcheck disable=SC1091
+    . "$HOME/.cargo/env"
+  fi
+fi
+command -v cargo >/dev/null 2>&1 || die "cargo not found — install Rust from https://rustup.rs"
+
+# A synced folder (Nextcloud, Dropbox, …) must not receive gigabytes of build
+# artifacts, so the target directory is moved out of it automatically. An
+# explicit CARGO_TARGET_DIR always wins.
+if [ -z "${CARGO_TARGET_DIR:-}" ]; then
+  case "$ROOT" in
+    *[Nn]extcloud*|*[Dd]ropbox*|*[Gg]oogle*[Dd]rive*|*"iCloud Drive"*|*[Oo]neDrive*)
+      export CARGO_TARGET_DIR="$HOME/.cache/yazi2d-target"
+      ;;
+  esac
+fi
+
+# Ask cargo where the profiles really live, so a `[build] target-dir` in a
+# cargo config file is honoured too.
+target_dir() {
+  local dir
+  dir="$(cargo metadata --no-deps --format-version 1 2>/dev/null \
+    | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
+  if [ -n "$dir" ]; then
+    printf '%s\n' "$dir"
+  elif [ -n "${CARGO_TARGET_DIR:-}" ]; then
+    printf '%s\n' "$CARGO_TARGET_DIR"
+  else
+    printf '%s\n' "$ROOT/target"
+  fi
+}
+
+binary() {
+  local profile="${1:-debug}"
+  if [ "$profile" = "release" ]; then
+    printf '%s\n' "$(target_dir)/release/yazi2d"
+  else
+    printf '%s\n' "$(target_dir)/debug/yazi2d"
+  fi
+}
+
+# --- Commands -------------------------------------------------------------
+
+cmd_run() {
+  step "Building (debug) — fast, what you want while testing"
+  cargo build --manifest-path "$ROOT/Cargo.toml"
+  local bin
+  bin="$(binary debug)"
+  [ -x "$bin" ] || die "build finished but $bin is missing"
+  ok "starting $bin"
+  # Start in the directory the user ran `y2d` from, not in the repository:
+  # `y2d run` is usually invoked while browsing something else.
+  cd "$INVOKED_FROM"
+  exec "$bin" "$@"
+}
+
+cmd_test() {
+  step "cargo fmt --check"
+  cargo fmt --manifest-path "$ROOT/Cargo.toml" --check
+  ok "formatting"
+
+  step "cargo clippy -D warnings"
+  cargo clippy --manifest-path "$ROOT/Cargo.toml" --all-targets -- -D warnings
+  ok "lints"
+
+  step "cargo test --all-targets"
+  cargo test --manifest-path "$ROOT/Cargo.toml" --all-targets
+  ok "unit tests"
+
+  step "PTY end-to-end test"
+  cargo build --manifest-path "$ROOT/Cargo.toml"
+  python3 "$ROOT/scripts/e2e_pty.py" "$(binary debug)"
+  ok "end-to-end"
+  printf '\n%sall quality gates passed%s\n' "$BOLD$GREEN" "$RESET"
+}
+
+cmd_install() {
+  local platform
+  platform="$(uname -s)"
+  case "$platform" in
+    Darwin)
+      step "Building release + macOS app bundle"
+      # Run through bash: a synced folder can strip the executable bit, and
+      # passing CARGO_TARGET_DIR through keeps everything in one place.
+      bash "$ROOT/packaging/macos/build-app.sh"
+      ;;
+    Linux)
+      step "Building release + desktop entry"
+      bash "$ROOT/packaging/linux/build-desktop.sh"
+      ;;
+    *)
+      die "no app bundle for $platform — run 'y2d run' instead"
+      ;;
+  esac
+}
+
+cmd_update() {
+  cd "$ROOT"
+  step "Updating the working copy"
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    warn "not a git checkout — skipping the pull"
+  elif [ "$(git status --porcelain | wc -l | tr -d ' ')" != "0" ]; then
+    warn "you have uncommitted changes:"
+    git status --short | sed 's/^/    /'
+    printf '\n'
+    printf 'Nothing was pulled. Commit, stash or discard them first, then rerun.\n' >&2
+    exit 1
+  else
+    git fetch --quiet origin || warn "could not reach origin — using the local copy"
+    git pull --ff-only --quiet || warn "pull --ff-only failed — using the local copy"
+    git --no-pager log --oneline -3 | sed 's/^/    /'
+  fi
+
+  cmd_install
+
+  # Keep the standalone `yazi2d` command in sync as well.
+  link_binary
+  link_self
+
+  printf '\n%sYazi2D %s is ready.%s\n' "$BOLD$GREEN" "$VERSION" "$RESET"
+}
+
+# Put the release binary on PATH as plain `yazi2d`.
+#
+# A symlink keeps `yazi2d` in sync with every later `cargo build --release`,
+# but only when the target lives outside the repo: a synced folder (Nextcloud,
+# Dropbox) strips the executable bit from files, and a symlink to such a file
+# cannot be started. Inside the repo the binary is copied instead.
+link_binary() {
+  local bin="$1"
+  if [ -z "$bin" ]; then
+    bin="$(binary release)"
+  fi
+  if [ ! -x "$bin" ]; then
+    warn "release binary not found — skipping the ~/.local/bin link"
+    return 0
+  fi
+  mkdir -p "$HOME/.local/bin"
+  case "$bin" in
+    "$ROOT"/*)
+      install -m 755 "$bin" "$HOME/.local/bin/yazi2d"
+      ok "copied binary to $HOME/.local/bin/yazi2d"
+      ;;
+    *)
+      ln -sf "$bin" "$HOME/.local/bin/yazi2d"
+      ok "$HOME/.local/bin/yazi2d → $bin"
+      ;;
+  esac
+  case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ;;
+    *) warn "$HOME/.local/bin is not on PATH — add it to your shell profile" ;;
+  esac
+}
+
+# Put `y2d` itself on PATH.
+#
+# This is deliberately a small generated wrapper instead of a symlink: the repo
+# may live in a synced folder (Nextcloud, Dropbox) whose client strips the
+# executable bit, and a symlink to a non-executable file cannot be run. The
+# wrapper only calls `bash <repo>/y2d`, so it keeps working no matter what the
+# sync client does with modes.
+link_self() {
+  mkdir -p "$HOME/.local/bin"
+  local wrapper="$HOME/.local/bin/y2d"
+  chmod +x "$ROOT/y2d" 2>/dev/null || true
+  cat > "$wrapper" <<WRAPPER
+#!/bin/sh
+# Generated by 'y2d setup'. Runs the copy in the repository, so edits there are
+# picked up immediately and a stripped executable bit cannot break this.
+exec bash "$ROOT/y2d" "\$@"
+WRAPPER
+  chmod 755 "$wrapper"
+  ok "$wrapper → $ROOT/y2d"
+  case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ;;
+    *) warn "$HOME/.local/bin is not on PATH — add it to your shell profile" ;;
+  esac
+}
+
+cmd_setup() {
+  link_self
+  cmd_install
+  local bin
+  bin="$(binary release)"
+  if [ -x "$bin" ]; then
+    link_binary "$bin"
+  else
+    warn "release binary missing — run 'y2d app' first"
+  fi
+  printf '\n%sDone. Type `y2d` anywhere to see the commands.%s\n' "$BOLD$GREEN" "$RESET"
+}
+
+cmd_note() {
+  local text timestamp
+  if [ "$#" -gt 0 ]; then
+    text="$*"
+  elif [ ! -t 0 ]; then
+    text="$(cat)"           # piped text or a heredoc
+  else
+    printf 'Comment for the agent (finish with Ctrl+D):\n' >&2
+    text="$(cat)"
+  fi
+  text="$(printf '%s' "$text" | sed -e 's/[[:space:]]*$//')"
+  [ -n "$text" ] || die "empty comment"
+
+  timestamp="$(date '+%Y-%m-%d %H:%M')"
+  mkdir -p "$(dirname "$FEEDBACK")"
+  if [ ! -f "$FEEDBACK" ]; then
+    write_feedback_header
+  fi
+
+  # Newest first: the file is an inbox, and the agent reads from the top.
+  local tmp
+  tmp="$(mktemp "${TMPDIR:-/tmp}/yazi2d-feedback.XXXXXX")"
+  {
+    sed -n '1,/^<!-- entries below -->$/p' "$FEEDBACK"
+    printf '\n### %s\n\n%s\n\n' "$timestamp" "$text"
+    sed -n '/^<!-- entries below -->$/,$p' "$FEEDBACK" | sed '1d'
+  } > "$tmp"
+  mv "$tmp" "$FEEDBACK"
+  ok "comment saved to docs/FEEDBACK.md"
+}
+
+write_feedback_header() {
+  cat > "$FEEDBACK" <<'HEADER'
+# Feedback inbox
+
+Thoughts, bugs and wishes written for the agent from any machine. Newest entry
+first. `y2d note "..."` appends here; `y2d notes` prints it.
+
+<!-- entries below -->
+HEADER
+}
+
+cmd_notes() {
+  [ -f "$FEEDBACK" ] || { printf 'No comments yet. Add one: y2d note "text"\n'; return 0; }
+  printf '%s\n' "$(cat "$FEEDBACK")"
+}
+
+cmd_log() {
+  local log
+  case "$(uname -s)" in
+    Darwin) log="$HOME/Library/Application Support/yazi2d/yazi2d.log" ;;
+    *)      log="${XDG_CONFIG_HOME:-$HOME/.config}/yazi2d/yazi2d.log" ;;
+  esac
+  [ -f "$log" ] || die "no log yet at $log — start the app first"
+  step "$log"
+  tail -n "${1:-40}" "$log"
+}
+
+cmd_status() {
+  printf '%sYazi2D %s%s\n' "$BOLD" "$VERSION" "$RESET"
+  printf '  repo      %s\n' "$ROOT"
+  printf '  target    %s\n' "$(target_dir)"
+  printf '  debug     %s\n' "$(binary debug)"
+  if [ -x "$(binary release)" ]; then
+    printf '  release   %s\n' "$(binary release)"
+  else
+    printf '  release   %s\n' "(not built yet — run: y2d app)"
+  fi
+  if [ -n "$(git -C "$ROOT" rev-parse --git-dir 2>/dev/null || true)" ]; then
+    printf '  git       %s\n' "$(git -C "$ROOT" rev-parse --abbrev-ref HEAD)"
+    if [ "$(git -C "$ROOT" status --porcelain | wc -l | tr -d ' ')" = "0" ]; then
+      printf '  changes   none\n'
+    else
+      printf '  changes   %s file(s) uncommitted\n' "$(git -C "$ROOT" status --porcelain | wc -l | tr -d ' ')"
+    fi
+  fi
+  case "$(uname -s)" in
+    Darwin)
+      if [ -d /Applications/Yazi2D.app ]; then
+        printf '  app       /Applications/Yazi2D.app (version %s)\n' \
+          "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+             /Applications/Yazi2D.app/Contents/Info.plist 2>/dev/null || echo '?')"
+      else
+        printf '  app       not installed — run: y2d app\n'
+      fi
+      ;;
+    Linux)
+      if [ -f "$HOME/.local/share/applications/yazi2d.desktop" ]; then
+        printf '  app       %s/.local/share/applications/yazi2d.desktop\n' "$HOME"
+      else
+        printf '  app       not installed — run: y2d app\n'
+      fi
+      ;;
+  esac
+  if command -v yazi2d >/dev/null 2>&1; then
+    printf '  command   %s\n' "$(command -v yazi2d)"
+  else
+    printf '  command   not on PATH — run: y2d setup\n'
+  fi
+}
+
+cmd_clean() {
+  step "Removing build artifacts"
+  cargo clean --manifest-path "$ROOT/Cargo.toml"
+  ok "clean"
+}
+
+cmd_help() {
+  cat <<EOF
+${BOLD}Yazi2D ${VERSION}${RESET} — ${DIM}$ROOT${RESET}
+
+${BOLD}Everyday${RESET}
+  y2d run [args]       build (debug) and start it  ${DIM}— what you want while testing${RESET}
+  y2d app              build release and install the icon app
+  y2d update           git pull + rebuild + reinstall  ${DIM}— after work on another machine${RESET}
+  y2d setup            first-time: link y2d, install the app, put yazi2d on PATH
+
+${BOLD}Quality${RESET}
+  y2d test             fmt + clippy -D warnings + unit tests + PTY e2e test
+
+${BOLD}Talking to the agent${RESET}
+  y2d note "text"      save a comment to docs/FEEDBACK.md
+  echo "text" | y2d note    ${DIM}(or paste several lines this way)${RESET}
+  y2d notes            read the comments back
+
+${BOLD}Diagnostics${RESET}
+  y2d status           version, git state, paths of the binaries
+  y2d log [lines]      tail the runtime log (default 40 lines)
+  y2d clean            remove build artifacts
+
+${BOLD}Where things land${RESET}
+  debug binary         $(binary debug)
+  release binary       $(binary release)
+  macOS app            /Applications/Yazi2D.app
+  Linux app entry      ~/.local/share/applications/yazi2d.desktop
+EOF
+}
+
+# --- Dispatch -------------------------------------------------------------
+cmd="${1:-help}"
+if [ "$#" -gt 0 ]; then shift; fi
+
+case "$cmd" in
+  run|r|start)            cmd_run "$@" ;;
+  app|install|bundle)     cmd_install ;;
+  update|up|pull)         cmd_update ;;
+  setup|link)             cmd_setup ;;
+  test|check|quality|ci)  cmd_test ;;
+  note|comment|feedback)  cmd_note "$@" ;;
+  notes|inbox)            cmd_notes ;;
+  log|logs)               cmd_log "$@" ;;
+  status|st)              cmd_status ;;
+  clean)                  cmd_clean ;;
+  help|-h|--help|"")      cmd_help ;;
+  *) die "unknown command '$cmd' — run 'y2d' to see them all" ;;
+esac

@@ -297,8 +297,9 @@ fn macos_mounts() -> Vec<Disk> {
     String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|line| {
-            // `/dev/disk3s1 on / (apfs, local, journaled)`
-            let (device, rest) = line.split_once(" on ")?;
+            // `/dev/disk3s1 on / (apfs, local, journaled)`. The device node is
+            // not needed: the label comes from the mount point instead.
+            let (_, rest) = line.split_once(" on ")?;
             let (mount, info) = rest.split_once(" (")?;
             let kind = info.split(',').next().unwrap_or_default().to_string();
             if mount.starts_with("/System/Volumes/") && mount != "/System/Volumes/Data" {

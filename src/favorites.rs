@@ -370,7 +370,10 @@ mod tests {
         fs::write(&file, "x").unwrap();
 
         assert!(favorites.add(file.clone()));
-        assert_eq!(favorites.path_at(0), Some(file.as_path()));
+        // `add` canonicalizes, and on macOS a temp dir is behind the `/var`
+        // symlink, so the expected path has to be canonicalized as well.
+        let expected = file.canonicalize().unwrap();
+        assert_eq!(favorites.path_at(0), Some(expected.as_path()));
         assert!(!favorites.entries[0].is_separator());
     }
 

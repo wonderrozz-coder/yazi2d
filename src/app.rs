@@ -124,6 +124,19 @@ pub struct App {
     /// starts moving the cursor by itself, much faster than the terminal
     /// repeats the key.
     pub held_arrow: Option<(KeyCode, Instant)>,
+    /// Last time the held arrow produced any key event.
+    ///
+    /// A release event is the normal way to end an auto-repeat, but it can be
+    /// lost or never sent at all (Terminal.app does not report releases). This
+    /// timestamp is the watchdog that stops the cursor moving on its own.
+    pub last_arrow_activity: Option<Instant>,
+    /// Set once the terminal has delivered a key-release event.
+    ///
+    /// The app moves the cursor itself for smoother acceleration, which is only
+    /// safe when the terminal reports releases — otherwise nothing tells it that
+    /// the key was let go and the cursor keeps walking. Until a release has
+    /// actually been seen, the terminal's own key repeat drives the movement.
+    pub releases_seen: bool,
     /// Last automatic move of a held arrow.
     pub last_auto_repeat: Option<Instant>,
     /// Folder sizes measured on demand (Space on a folder). Keyed by path so a
@@ -145,6 +158,17 @@ const REPEAT_START: Duration = Duration::from_millis(55);
 const REPEAT_MIN: Duration = Duration::from_millis(12);
 /// How often the repeat speed is doubled.
 const REPEAT_RAMP: Duration = Duration::from_millis(500);
+
+/// Silence after which a held arrow counts as released.
+///
+/// The app moves the cursor itself instead of waiting for the terminal's slow
+/// repeat, so it needs to know when the key is let go. A release event only
+/// arrives with keyboard enhancement, and even then one can be lost (a dropped
+/// read, a multiplexer, a terminal that keeps repeat switched off). A held key
+/// produces events every few tens of milliseconds, so a whole second of silence
+/// means the key is up: without this the cursor walked on its own until another
+/// key was pressed.
+const LOST_KEY_RELEASE: Duration = Duration::from_millis(600);
 
 /// One row of the right-click menu.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -376,6 +400,8 @@ impl App {
             last_tap: None,
             last_tap_target: None,
             held_arrow: None,
+            last_arrow_activity: None,
+            releases_seen: false,
             last_auto_repeat: None,
             folder_sizes: HashMap::new(),
             folder_size_pending: Vec::new(),
@@ -661,6 +687,9 @@ impl App {
     /// Pressing and releasing a bare modifier produces no `Press` event on most
     /// terminals, so this is the only way to know when Ctrl/Alt/Shift is held.
     pub fn on_key_release(&mut self, key: KeyEvent) {
+        // A release proves this terminal reports them, which is what makes the
+        // app's own key acceleration safe. See `releases_seen`.
+        self.releases_seen = true;
         match key.code {
             KeyCode::Modifier(modifier) => self.release_modifier(modifier),
             KeyCode::Up | KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('k') => {
@@ -884,11 +913,15 @@ impl App {
             self.held_arrow = Some((code, Instant::now()));
             self.last_auto_repeat = None;
         }
+        // Any event for the arrow proves the key is still down, whatever the
+        // acceleration timer says. See `LOST_KEY_RELEASE`.
+        self.last_arrow_activity = Some(Instant::now());
     }
 
     /// Forget the held arrow (a release, or a key that is not an arrow).
     fn release_arrow(&mut self) {
         self.held_arrow = None;
+        self.last_arrow_activity = None;
         self.last_auto_repeat = None;
     }
 
@@ -918,6 +951,28 @@ impl App {
 
         let now = Instant::now();
         let held = now.saturating_duration_since(pressed);
+
+        // Only accelerate when the terminal has told us it reports releases.
+        // Otherwise nothing can end the repeat reliably (Terminal.app sends no
+        // releases at all), and the cursor would keep walking after the key is
+        // up. The terminal's own repeat still moves the cursor in that case.
+        if !self.releases_seen {
+            return false;
+        }
+
+        // A lost release must not leave the cursor walking on its own: a key
+        // that is really down keeps sending events, so a long silence means it
+        // was let go.
+        if let Some(activity) = self.last_arrow_activity {
+            if now.saturating_duration_since(activity) > LOST_KEY_RELEASE {
+                self.release_arrow();
+                return false;
+            }
+        } else {
+            self.release_arrow();
+            return false;
+        }
+
         if held < REPEAT_DELAY {
             return false;
         }
@@ -4458,7 +4513,12 @@ mod tests {
 
         // Simulate a hold: arm the arrow, then let the clock pass and drive the
         // repeat by hand. One terminal press, many app moves.
+        //
+        // Acceleration only runs when the terminal reports key releases; that
+        // is what makes it safe to move the cursor on our own.
+        app.releases_seen = true;
         app.held_arrow = Some((KeyCode::Down, Instant::now() - Duration::from_millis(1000)));
+        app.last_arrow_activity = Some(Instant::now());
         app.last_auto_repeat = None;
 
         let mut moves = 0;
@@ -4486,7 +4546,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut app = app_for(tmp.path(), tmp.path());
 
+        app.releases_seen = true;
         app.held_arrow = Some((KeyCode::Down, Instant::now() - Duration::from_millis(1000)));
+        app.last_arrow_activity = Some(Instant::now());
         assert!(app.tick_key_repeat());
 
         app.on_key_release(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
@@ -4495,6 +4557,53 @@ mod tests {
             !app.tick_key_repeat(),
             "the repeat must stop once the key is released"
         );
+    }
+
+    #[test]
+    fn a_terminal_without_key_releases_never_moves_the_cursor_itself() {
+        // Terminal.app sends no key-release events at all. If the app still ran
+        // its own repeat there, nothing could ever stop it: the cursor walked
+        // on until another key was pressed, wrapping onto `..` and making the
+        // next file operation report "Nothing selected".
+        let tmp = tempfile::tempdir().unwrap();
+        let left = tmp.path().join("left");
+        fs::create_dir_all(&left).unwrap();
+        for index in 0..20 {
+            fs::write(left.join(format!("f{index:02}.txt")), "x").unwrap();
+        }
+
+        let mut app = app_for(&left, &left);
+        assert!(!app.releases_seen);
+        app.panels[0].cursor = 1;
+
+        // A press, then no release ever arrives.
+        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        app.held_arrow = Some((KeyCode::Char('j'), Instant::now() - Duration::from_secs(5)));
+        app.last_arrow_activity = Some(Instant::now());
+
+        for _ in 0..50 {
+            assert!(
+                !app.tick_key_repeat(),
+                "the app must not move the cursor without key releases"
+            );
+        }
+        assert_eq!(app.panels[0].cursor, 2, "the cursor moved on its own");
+    }
+
+    #[test]
+    fn a_lost_key_release_stops_the_repeat_after_a_silence() {
+        // A release can be lost even on a terminal that reports them. A key
+        // that is still down keeps sending events, so silence means it is up.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+
+        app.releases_seen = true;
+        app.held_arrow = Some((KeyCode::Down, Instant::now() - Duration::from_millis(1000)));
+        app.last_arrow_activity =
+            Some(Instant::now() - LOST_KEY_RELEASE - Duration::from_millis(50));
+
+        assert!(!app.tick_key_repeat(), "the watchdog did not fire");
+        assert!(app.held_arrow.is_none(), "the held arrow was not cleared");
     }
 
     #[test]
@@ -4760,7 +4869,12 @@ mod tests {
         press(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL);
 
         assert_eq!(app.favorites.len(), 1);
-        assert_eq!(app.favorites.path_at(0), Some(file.as_path()));
+        // Bookmarks are canonicalized; a macOS temp dir is reached through the
+        // `/var` symlink, so compare the real path.
+        assert_eq!(
+            app.favorites.path_at(0),
+            Some(file.canonicalize().unwrap().as_path())
+        );
     }
 
     #[test]

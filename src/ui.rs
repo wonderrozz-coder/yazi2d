@@ -2658,6 +2658,18 @@ mod tests {
     use ratatui::Terminal;
     use std::fs;
 
+    /// A truecolor terminal with half blocks: the drawing code under test is the
+    /// fallback path, and the "no truecolor" warning must not replace it on a
+    /// machine whose own terminal is a 256-colour one.
+    fn truecolor_halfblocks() -> crate::testutil::EnvGuard {
+        let guard = crate::testutil::EnvGuard::set(&[
+            ("YAZI2D_IMAGE_PROTOCOL", "halfblocks"),
+            ("COLORTERM", "truecolor"),
+        ]);
+        crate::graphics::init();
+        guard
+    }
+
     fn render(app: &mut App, width: u16, height: u16) -> String {
         render_until(app, width, height, |text| !text.is_empty())
     }
@@ -2868,6 +2880,7 @@ mod tests {
 
     #[test]
     fn renders_a_thumbnail_grid_with_file_names() {
+        let _env = truecolor_halfblocks();
         let tmp = tempfile::tempdir().unwrap();
         let image = RgbImage::from_pixel(4, 4, image::Rgb([200, 40, 40]));
         image.save(tmp.path().join("red.png")).unwrap();
@@ -2886,6 +2899,7 @@ mod tests {
 
     #[test]
     fn renders_an_image_preview_with_half_blocks() {
+        let _env = truecolor_halfblocks();
         let tmp = tempfile::tempdir().unwrap();
         let image = RgbImage::from_pixel(8, 8, image::Rgb([30, 120, 220]));
         image.save(tmp.path().join("blue.png")).unwrap();

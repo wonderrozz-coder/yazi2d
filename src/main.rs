@@ -15,6 +15,10 @@ mod transfer;
 mod trash;
 mod ui;
 
+/// Test-only helpers (environment lock, temporary env vars).
+#[cfg(test)]
+mod testutil;
+
 use std::io::{self, stdout};
 use std::panic;
 use std::path::PathBuf;

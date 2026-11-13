@@ -1145,3 +1145,173 @@ into the status line. The key still does its real job inside the sidebar.
 **Consequences:** A key that would otherwise be a silent no-op now teaches the
 navigation it needs. Nothing else changed: `S` is not a rebindable action, and
 the status line is the place the app already explains itself.
+
+## ADR-051 — One `y2d` command as the project entry point
+
+**Status:** accepted (2026-11-13, tooling for `0.6.6`)
+
+**Context:** The commands needed to build, run, install, update and test the
+project are long, platform-specific and easy to forget — and the project is
+worked on from at least two machines (macOS and Linux) plus the agent. Every
+"how do I run it again?" question was answered by reading `AGENTS.md`.
+
+**Decision:** A single shell script, `y2d`, at the repository root, with
+subcommands: `run`, `app`, `update`, `test`, `note`, `notes`, `status`, `log`,
+`clean`, `setup`. It:
+
+* resolves its own location through symlinks, so it works when linked into
+  `~/.local/bin`;
+* loads `$HOME/.cargo/env` when `cargo` is not on `PATH`;
+* sets `CARGO_TARGET_DIR` outside the repository when it detects a synced
+  folder, and otherwise asks `cargo metadata` where the target directory is;
+* dispatches `app` per platform — the macOS bundle or the Linux `.desktop`
+  entry;
+* guards `update` with a clean-working-tree check so a pull cannot overwrite
+  local work.
+
+It deliberately has **no dependencies** beyond bash, git and Rust: `y2d` must
+keep working on a bare Linux box before anything is installed.
+
+**Consequences:** One memorable command replaces a page of instructions, and
+`README.md` / `AGENTS.md` lead with it instead of with `cargo`. The manual cargo
+commands remain documented for CI and for anyone who prefers them.
+
+## ADR-052 — `y2d note` writes to `docs/FEEDBACK.md`
+
+**Status:** accepted (2026-11-13, tooling for `0.6.6`)
+
+**Context:** The user dictates findings in natural language and wants them to
+survive until the next session, on whichever machine they are using. A chat
+scrollback does not survive a machine switch, and a tracker is too much ceremony
+for "the double tap in favorites feels wrong".
+
+**Decision:** `y2d note "text"` prepends a timestamped entry to a tracked
+Markdown file, `docs/FEEDBACK.md`, under a stable marker comment. `y2d notes`
+prints it. Entries are newest-first because the file is an inbox, and the agent
+reads it at the start of a session.
+
+**Consequences:** Feedback lives in the repository — it syncs with `git`, so it
+arrives on the other machine with `y2d update`. The marker line keeps the
+rewrite idempotent and the header stable, so the file merges cleanly.
+
+## ADR-053 — The installed `y2d` is a wrapper, and scripts are run through bash
+
+**Status:** accepted (2026-11-13, tooling for `0.6.6`)
+
+**Context:** This checkout lives inside a Nextcloud folder. The sync client
+rewrites file modes to `644`, so `./y2d`, `packaging/macos/build-app.sh` and
+`scripts/e2e_pty.py` all failed with `permission denied`, and `git status`
+reported a phantom mode change on `packaging/windows/build-windows.sh`. A
+symlink in `~/.local/bin` pointing at a non-executable file cannot be started
+either, and `chmod` is undone again on the next sync.
+
+**Decision:**
+
+1. `y2d setup` installs a **generated wrapper** — `exec bash "<repo>/y2d" "$@"` —
+   instead of a symlink. It only needs to be readable, whatever the sync client
+   does to modes, and it always runs the current copy in the repo.
+2. `y2d` itself invokes the packaging scripts through `bash`, never relying on
+   their executable bit.
+3. `yazi2d` in `~/.local/bin` is a symlink when the binary lives outside the
+   repo (the normal case with `CARGO_TARGET_DIR`) and a copy when it does not.
+4. `git config core.filemode false` is set in such a checkout, which is what
+   removes the phantom mode diffs.
+
+**Consequences:** The tools keep working inside a synced folder without fighting
+the sync client on every run. Running a script as `bash script.sh` is stated
+explicitly in `README.md` and `AGENTS.md` so nobody re-diagnoses it later.
+
+## ADR-054 — The environment lock is shared by every test
+
+**Status:** accepted (2026-11-13, tooling for `0.6.6`)
+
+**Context:** Three modules had their own `ENV_LOCK` (or none), while
+`cargo test` runs all tests in one process, in parallel. `graphics` tests set
+`COLORTERM` and `TERM_PROGRAM`; a UI test that renders an image consults those
+same variables. The result was a test that passed alone and failed in the full
+suite — and, on this machine, three permanently red tests.
+
+**Decision:** `src/testutil.rs` owns one process-wide `env_lock()`, plus an
+`EnvGuard` that sets variables, holds the lock, and restores the previous values
+on drop (including when an assertion panics). Every test that writes *or reads*
+such a variable takes it. `ui` renders images under an explicit
+`YAZI2D_IMAGE_PROTOCOL=halfblocks` plus `COLORTERM=truecolor`, so the result no
+longer depends on the terminal that started `cargo test`.
+
+**Consequences:** The suite is deterministic on macOS Terminal, Ghostty, a bare
+`xterm` and CI. Tests that used to depend on the developer's terminal now state
+their assumptions. A test that forgets the guard can still race — the rule is
+"touch `std::env` only through `EnvGuard`".
+
+## ADR-055 — A helper that outlives the grace period must not be waited for
+
+**Status:** accepted (2026-11-13, tooling for `0.6.6`)
+
+**Context:** `clipboard::run_helper` waits up to 400 ms for a helper to exit,
+because `wl-copy` and `xclip` stay alive on purpose to serve the selection. The
+unit test wrote its output file in a shell script and read it immediately, so on
+a loaded machine it read before the shell had written it.
+
+**Decision:** The test waits for the output file with a deadline instead of
+asserting immediately. The production code keeps its deliberate "don't wait for
+long-lived helpers" behaviour, which is what makes copying work on Wayland.
+
+**Consequences:** The test expresses the real contract — the text *eventually*
+arrives — without changing behaviour that exists for a platform reason.
+
+## ADR-056 — Key acceleration needs proof that the terminal reports releases
+
+**Status:** accepted (2026-11-13, `0.6.6`)
+
+**Context:** The app moves the cursor itself while an arrow is held, because
+terminal key repeat is slow and capped (ADR on fast arrows). That is only safe
+if the app learns when the key is let go, which happens through
+`KeyEventKind::Release` — available only with keyboard enhancement, and even then
+a release can be lost.
+
+Found while making the PTY end-to-end test reliable: pressing `j` once and never
+sending a release made the cursor walk for 45 seconds, wrap past the last entry
+onto `..`, and then report "Nothing selected" for `c`. The same thing happens on
+Terminal.app, which reports no releases at all: hold a key, let go, and the
+cursor keeps moving.
+
+**Decision:** Two guards in `tick_key_repeat`:
+
+1. **`releases_seen`** — the app never repeats on its own until it has observed
+   at least one release event. Terminals without them keep their native repeat,
+   which is slower but always stops when the key goes up.
+2. **`last_arrow_activity` / `LOST_KEY_RELEASE`** — any event for the arrow
+   refreshes the timestamp, and 600 ms of silence ends the hold. A key that is
+   really down sends events far more often than that.
+
+**Consequences:** A lost release can no longer move the cursor behind the user's
+back, and a 45-second runaway is impossible. Ghostty/kitty/WezTerm keep the fast
+accelerating cursor; Terminal.app keeps a plain, predictable repeat. The trade is
+one extra field and two guards in the hot path, plus the e2e test now sending a
+release like a real terminal does.
+
+The test was also made honest: its double-tap check clicked a hard-coded row that
+happened to be empty, so "the folder is still there" passed without anything
+being clicked. It now looks the row up on the reconstructed screen.
+
+## ADR-057 — The PTY test asserts on a reconstructed screen, and polls
+
+**Status:** accepted (2026-11-13, tooling for `0.6.6`)
+
+**Context:** The end-to-end test asserted on the raw byte stream. ratatui only
+repaints changed cells, so `hello from yazi2d` never arrives as one contiguous
+string — the cursor moves between runs and unchanged spaces are skipped. On top
+of that, fixed `sleep()` calls raced against worker threads (preview loading,
+directory listing, image decoding), which produced failures in roughly one run
+out of ten.
+
+**Decision:** The script carries a small `Screen` model that applies absolute
+cursor moves, erases and printable text, and every assertion reads the composed
+screen. Every wait became `until(needle, timeout)` — poll for the expected state
+instead of sleeping and hoping. Keys whose effect is only valid once a prompt
+exists (`c` … then `Esc`, `d` … then `Enter`) wait for that prompt first, or the
+second key arrives while nothing is pending and is ignored.
+
+**Consequences:** The suite is green run after run and failures now mean a real
+behaviour change. The checks are also stronger than before, which is how the
+`..`-cursor bug in ADR-056 surfaced.

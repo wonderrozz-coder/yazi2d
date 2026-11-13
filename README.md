@@ -96,9 +96,46 @@ Favorites sidebar with a folder tree:
 
 ## Install
 
+**One command to remember: `y2d`.**
+
 ```sh
 git clone https://github.com/wonderrozz-coder/yazi2d.git
 cd yazi2d
+y2d setup          # build, install the icon app, put y2d on PATH
+```
+
+If `./y2d` says `permission denied` (Nextcloud strips the executable bit), run
+the first one through bash: `bash y2d setup`.
+
+Everyday commands — identical on macOS and Linux:
+
+| Command | What it does |
+|---|---|
+| `y2d run` | build (debug) and **start it right here** |
+| `y2d run ~/Projects ~/Downloads` | same, with both panels set |
+| `y2d app` | build release, install the system icon |
+| `y2d update` | `git pull` + rebuild + reinstall |
+| `y2d test` | fmt + clippy + unit tests + PTY end-to-end |
+| `y2d note "text"` | leave a comment for the agent in `docs/FEEDBACK.md` |
+| `y2d notes` | read the comments back |
+| `y2d status` | version, git state, binary paths |
+| `y2d log 60` | last 60 lines of the runtime log |
+| `y2d clean` | remove build artifacts |
+
+Where the icon lands:
+
+| Platform | Icon | Binary |
+|---|---|---|
+| macOS | `/Applications/Yazi2D.app` — Launchpad, Spotlight, Dock | `~/.local/bin/yazi2d` |
+| Linux | "Yazi2D" in the application menu (`~/.local/share/applications/yazi2d.desktop`) | `~/.local/bin/yazi2d` |
+
+**Working on two machines:** `y2d setup` once per machine, then `y2d update`
+after working elsewhere. It refuses to pull when there are uncommitted changes,
+so nothing gets lost.
+
+### By hand, without `y2d`
+
+```sh
 cargo build --release
 ./target/release/yazi2d ~/Projects ~/Downloads
 ```
@@ -116,7 +153,7 @@ The binary lands in `target/release/yazi2d` (≈2 MB) and can be copied to
 ### macOS app icon
 
 ```sh
-./packaging/macos/build-app.sh
+bash packaging/macos/build-app.sh
 ```
 
 This builds **Yazi2D.app** with a custom icon and installs it to
@@ -133,6 +170,19 @@ Ghostty → kitty → WezTerm → iTerm2 → Terminal.app (last resort)
 Terminal.app has no truecolor support, so previews appear as black blocks
 there. Install [Ghostty](https://ghostty.org) to get the full experience.
 Pass `--no-copy` to build into `dist/` without installing.
+
+### Linux application entry
+
+```sh
+bash packaging/linux/build-desktop.sh
+```
+
+Installs the binary to `~/.local/bin/yazi2d`, icons into
+`~/.local/share/icons/hicolor/*/apps/` and a launcher into
+`~/.local/share/applications/yazi2d.desktop`, so Yazi2D appears in the
+application menu (GNOME, KDE, XFCE, Cinnamon). The entry uses
+`Terminal=true`, so your own terminal opens. Pass `--no-install` to stage
+everything in `dist/linux/` instead.
 
 The icon is generated from `packaging/icon-source.png`; regenerate it with
 `python3 packaging/render-icon.py` (no dependencies, pure stdlib).
@@ -341,6 +391,13 @@ directory that stalled.
 ## Development
 
 ```sh
+y2d test        # fmt + clippy -D warnings + unit tests + PTY end-to-end
+y2d run         # build (debug) and start it
+```
+
+The same gates by hand:
+
+```sh
 source "$HOME/.cargo/env"
 
 cargo fmt --check
@@ -472,11 +529,71 @@ two-panel model). No Yazi source is included.
 - **Бинарники для Windows**: `dist/windows/yazi2d-x86_64-windows.exe` (10/11)
   и `dist/windows/yazi2d-x86_64-win7.exe` (7/8/8.1).
 
-## Установка и запуск
+## Быстрый старт: одна команда `y2d`
+
+Держать в голове длинные команды не нужно — в репозитории лежит скрипт `y2d`,
+который делает всё сам и на **macOS, и на Linux**.
+
+Один раз на машине:
 
 ```sh
 git clone https://github.com/wonderrozz-coder/yazi2d.git
 cd yazi2d
+y2d setup          # соберёт, поставит приложение и положит `y2d` в PATH
+```
+
+Если `./y2d` отвечает `permission denied` (Nextcloud снимает бит исполнения),
+запустите первый раз через bash — дальше работает обычная команда:
+
+```sh
+bash y2d setup
+```
+
+Дальше каждый день:
+
+| Команда | Что делает |
+|---|---|
+| `y2d run` | быстро собирает debug-сборку и **запускает здесь же** |
+| `y2d run ~/Projects ~/Downloads` | то же с двумя панелями |
+| `y2d app` | собирает release и ставит ярлык в систему |
+| `y2d update` | `git pull` + пересборка + переустановка ярлыка |
+| `y2d test` | fmt + clippy + юнит-тесты + PTY-тест |
+| `y2d note "текст"` | оставить комментарий для агента в `docs/FEEDBACK.md` |
+| `y2d notes` | прочитать эти комментарии |
+| `y2d status` | версия, состояние git, где лежат бинарники |
+| `y2d log 60` | последние 60 строк лога |
+| `y2d clean` | удалить артефакты сборки |
+
+Комментарий можно передать и многострочно:
+
+```sh
+echo "первая мысль
+вторая мысль" | y2d note
+```
+
+**Работа на двух машинах.** На второй машине достаточно:
+
+```sh
+git clone https://github.com/wonderrozz-coder/yazi2d.git && cd yazi2d && bash y2d setup
+```
+
+а потом после работы на любой из машин — `y2d update`. Он откажется тянуть
+изменения, если есть незакоммиченные правки, чтобы ничего не потерять.
+
+### Где что появляется
+
+| Платформа | Ярлык | Бинарник |
+|---|---|---|
+| macOS | `/Applications/Yazi2D.app` — иконка в Launchpad, Spotlight, Dock | `~/.local/bin/yazi2d` |
+| Linux | пункт «Yazi2D» в меню приложений (`~/.local/share/applications/yazi2d.desktop`) | `~/.local/bin/yazi2d` |
+
+На macOS ярлык открывает окно терминала (лучшего из установленных: Ghostty →
+kitty → WezTerm → iTerm2 → Terminal.app). На Linux в `.desktop` стоит
+`Terminal=true`, поэтому открывается ваш собственный терминал.
+
+### Вручную, без `y2d`
+
+```sh
 cargo build --release
 ./target/release/yazi2d ~/Projects ~/Downloads
 ```
@@ -488,13 +605,10 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profil
 source "$HOME/.cargo/env"
 ```
 
-Готовый бинарник: `target/release/yazi2d` (≈2 МБ). Можно скопировать его в
-`~/.local/bin` или `/usr/local/bin` и запускать как `yazi2d`.
-
 ### Приложение с иконкой для macOS
 
 ```sh
-./packaging/macos/build-app.sh
+bash packaging/macos/build-app.sh
 ```
 
 Собирает **Yazi2D.app** с иконкой и устанавливает в `/Applications` — приложение
@@ -514,6 +628,25 @@ Ghostty → kitty → WezTerm → iTerm2 → Terminal.app (крайний слу
 
 Иконка генерируется из `packaging/icon-source.png`; перерисовать её можно
 командой `python3 packaging/render-icon.py` (без зависимостей, только stdlib).
+
+### Приложение в меню Linux
+
+```sh
+bash packaging/linux/build-desktop.sh
+```
+
+Кладёт бинарник в `~/.local/bin/yazi2d`, иконку в
+`~/.local/share/icons/hicolor/*/apps/` и ярлык
+`~/.local/share/applications/yazi2d.desktop`. После этого Yazi2D запускается из
+меню приложений (GNOME, KDE, XFCE, Cinnamon) или командой `yazi2d` — будет
+открыт ваш терминал. Флаг `--no-install` собирает файлы в `dist/linux/` без
+установки.
+
+Если `~/.local/bin` не в `PATH`, добавьте в `~/.bashrc` или `~/.zshrc`:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
 
 ### Windows
 
@@ -772,6 +905,13 @@ tail -f ~/Library/Application\ Support/yazi2d/yazi2d.log
 ## Разработка
 
 ```sh
+y2d test        # fmt + clippy -D warnings + юнит-тесты + PTY-тест
+y2d run         # собрать debug и запустить здесь же
+```
+
+Те же проверки вручную:
+
+```sh
 source "$HOME/.cargo/env"
 
 cargo fmt --check
@@ -781,6 +921,9 @@ cargo build --release
 
 python3 scripts/e2e_pty.py target/debug/yazi2d   # сквозной тест в настоящем PTY
 ```
+
+Комментарии для агента складываются в [`docs/FEEDBACK.md`](docs/FEEDBACK.md)
+командой `y2d note "текст"`.
 
 Лицензия MIT — см. [`LICENSE`](LICENSE). Решения описаны в
 [`docs/DECISIONS.md`](docs/DECISIONS.md), карта модулей — в

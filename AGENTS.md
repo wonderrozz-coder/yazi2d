@@ -60,6 +60,25 @@ Known limitations and the next steps are in `docs/STATUS.md` and
 
 ## Quick start
 
+**The only command you need to remember:** `y2d`
+
+```sh
+y2d                  # list every command
+y2d run [args]       # build (debug) and start it — the everyday path
+y2d app              # build release + install the icon app
+y2d update           # git pull + rebuild + reinstall (after work elsewhere)
+y2d test             # fmt + clippy + tests + PTY e2e — the quality gates
+y2d note "text"      # leave a comment for the next agent
+y2d notes            # read the comments in docs/FEEDBACK.md
+y2d status           # version, git state, binary paths
+y2d log [lines]      # tail the runtime log
+```
+
+Install the entry point once per machine with `y2d setup` (it also builds and
+installs the app). Details per platform in `README.md` → «Быстрый старт».
+
+The manual equivalents still work:
+
 ```sh
 # Rust stable is required (rust-toolchain.toml pins the channel).
 source "$HOME/.cargo/env"
@@ -84,11 +103,28 @@ If the repo lives in a synced folder (Nextcloud/Dropbox), set
 export CARGO_TARGET_DIR="$HOME/.cache/yazi2d-target"
 ```
 
+`y2d` does this automatically when it recognises a synced path, and it reads the
+real target directory from `cargo metadata`, so an existing
+`CARGO_TARGET_DIR` keeps working.
+
+### Two pitfalls on a synced/repo folder
+
+- **The sync client strips the executable bit.** Nextcloud rewrites modes to
+  `644`, so `./y2d` fails with `permission denied` and `git status` shows
+  phantom mode changes (`packaging/windows/build-windows.sh`). Run scripts as
+  `bash y2d …` / `bash packaging/...`, and keep `git config core.filemode false`
+  in such a checkout. `y2d setup` installs a small wrapper in `~/.local/bin/y2d`
+  for exactly this reason.
+- **`CARGO_TARGET_DIR` must be honoured.** `packaging/macos/build-app.sh` and
+  `packaging/linux/build-desktop.sh` ask `cargo metadata` for the target
+  directory instead of assuming `target/`.
+
 ## Repository map
 
 ```
 Cargo.toml                 dependencies + release profile
 rust-toolchain.toml        stable toolchain
+y2d                        ONE entry point: run / app / update / test / note / status
 src/main.rs                CLI, terminal setup/restore, event loop, --help
 src/app.rs                 App state, key dispatch, prompts, jobs, favorites actions
 src/panel.rs               Panel state, modes, navigation, background directory loads
@@ -104,13 +140,16 @@ src/transfer.rs            background copy/move/delete engine + progress channel
 src/trash.rs               system trash (freedesktop, macOS ~/.Trash, Windows recycle bin)
 src/favorites.rs           favorites: ordered path/separator rows, TOML persistence
 src/ui.rs                  ratatui rendering, layout, overlays, preview/thumbnails, UI tests
+src/testutil.rs            test-only env lock + temporary environment variables
 packaging/render-icon.py   draws packaging/icon-source.png (stdlib only)
 packaging/macos/build-app.sh  builds and installs Yazi2D.app with the icon
 packaging/macos/launcher.sh   picks a truecolor terminal and starts the binary
+packaging/linux/build-desktop.sh  release binary + .desktop entry for Linux
 scripts/e2e_pty.py         end-to-end test in a real pseudo-terminal
 docs/CONCEPT.md            product concept and UX spec (Russian)
 docs/ARCHITECTURE.md       module/data-flow/design details (English)
 docs/DECISIONS.md          ADR-style decisions and rationale
+docs/FEEDBACK.md           comment inbox written by 'y2d note'
 docs/ROADMAP.md            staged plan (Russian)
 docs/STATUS.md             current state, known issues, next tasks
 README.md                  user-facing docs, keys, config (Russian)
@@ -195,6 +234,15 @@ Detailed invariants and data flow: `docs/ARCHITECTURE.md`.
 - `KeyEventKind::Repeat` must be handled exactly like `Press`: with keyboard
   enhancement enabled, held keys arrive as `Repeat` and dropping them breaks
   key repeat.
+- Key acceleration must never outlive the key press. `tick_key_repeat` only
+  moves the cursor once `releases_seen` is set (the terminal has proven it
+  reports releases) and clears the hold after `LOST_KEY_RELEASE` (600 ms) of
+  silence. Without both guards a lost release walked the cursor onto `..` and
+  made the next file operation report "Nothing selected" (ADR-056).
+- Assertions in `scripts/e2e_pty.py` read the reconstructed `Screen`, never the
+  raw byte stream, and wait with `until(...)` instead of sleeping — ratatui
+  repaints only changed cells, so a word can arrive in pieces, and previews and
+  listings finish on worker threads (ADR-057).
 - Shortcuts must be layout-independent: `App::on_key` normalizes Cyrillic
   characters through `keys::normalize` **before** dispatch, but never while a
   prompt is open (prompts need the raw character).

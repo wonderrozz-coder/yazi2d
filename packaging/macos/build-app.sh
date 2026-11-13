@@ -32,7 +32,14 @@ cd "$ROOT"
 source "$HOME/.cargo/env" 2>/dev/null || true
 cargo build --release
 
-BINARY="$ROOT/target/release/yazi2d"
+# The binary may live outside the repo when CARGO_TARGET_DIR is set (a synced
+# folder must not receive build artifacts), so ask cargo where it went.
+TARGET_DIR="$(cargo metadata --no-deps --format-version 1 2>/dev/null \
+  | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
+if [ -z "$TARGET_DIR" ]; then
+  TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
+fi
+BINARY="$TARGET_DIR/release/yazi2d"
 if [ ! -x "$BINARY" ]; then
   echo "release binary not found at $BINARY" >&2
   exit 1
