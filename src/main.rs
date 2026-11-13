@@ -183,7 +183,15 @@ fn run(
                     KeyEventKind::Release if keyboard_enhanced => app.on_key_release(key),
                     _ => {}
                 },
-                Event::Resize(_, _) => app.dirty = true,
+                Event::Resize(_, _) => {
+                    // The cell size in pixels changes with the window, and all
+                    // native preview sizes are derived from it. Encoded payloads
+                    // sized for the old cell are dropped with the size change.
+                    if graphics::refresh_cell_size() {
+                        app.image_cache.invalidate_protocols();
+                    }
+                    app.dirty = true;
+                }
                 // Trackpad scrolling moves the list, and the pointer is fully
                 // routed now: a click selects a row, a double click opens it, a
                 // click on the path bar copies the path, and a right click opens

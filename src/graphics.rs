@@ -30,7 +30,19 @@ use image::DynamicImage;
 use ratatui::layout::Rect;
 use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::Protocol;
-use ratatui_image::Resize;
+use ratatui_image::{FilterType, Resize};
+
+/// How an image is fitted into the area it is drawn in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fit {
+    /// Shrink to the area, never enlarge: a 64×64 icon must not be blown up to
+    /// a whole tile. Used by the thumbnail grids.
+    Inside,
+    /// Fill the area and enlarge when needed: a photo preview is bound to the
+    /// size of the preview pane, not to its own pixel size. Used by the single
+    /// image preview.
+    Fill,
+}
 
 /// Terminal we are drawing into.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +59,8 @@ struct Graphics {
     picker: Option<Picker>,
     /// Protocol chosen for this terminal; `None` until [`init`] runs.
     protocol: Option<ProtocolType>,
+    /// Pixels in one character cell, measured from the terminal.
+    cell: (u16, u16),
 }
 
 thread_local! {
@@ -54,9 +68,20 @@ thread_local! {
         RefCell::new(Graphics {
             picker: None,
             protocol: None,
+            cell: FALLBACK_CELL,
         })
     };
 }
+
+/// Cell size used when the terminal does not report its window in pixels.
+///
+/// Ghostty used to be given this guess as the real font size. Everything the
+/// picker computes is derived from it — an image is resized to
+/// `cells * cell_pixels` — so a guess that is half the truth (a Retina cell is
+/// about 18×36 px, not 8×16) makes every native preview come out half the size
+/// it should be, while the half-block fallback, which works in cells only,
+/// keeps filling the pane.
+const FALLBACK_CELL: (u16, u16) = (8, 16);
 
 /// Start-up probe.
 ///
@@ -77,13 +102,15 @@ pub mod probe {
 /// escape-sequence query is exactly what broke input handling before.
 pub fn init() {
     let protocol = forced_protocol().unwrap_or_else(detect_protocol);
-    let picker = Picker::from_fontsize((8, 16));
-    let mut picker = picker;
+    let cell = measured_cell().unwrap_or(FALLBACK_CELL);
+    let mut picker = Picker::from_fontsize(cell);
     picker.set_protocol_type(protocol);
 
     crate::logging::info(format!(
-        "image protocol: {} (TERM={:?}, TERM_PROGRAM={:?})",
+        "image protocol: {} (cell {}×{} px, TERM={:?}, TERM_PROGRAM={:?})",
         protocol_name(protocol),
+        cell.0,
+        cell.1,
         std::env::var("TERM").unwrap_or_default(),
         std::env::var("TERM_PROGRAM").unwrap_or_default(),
     ));
@@ -92,7 +119,80 @@ pub fn init() {
         let mut graphics = graphics.borrow_mut();
         graphics.picker = Some(picker);
         graphics.protocol = Some(protocol);
+        graphics.cell = cell;
     });
+}
+
+/// Re-measure the cell size after the window changed.
+///
+/// `Resize::Fit` turns the pane into pixels with this number, so a terminal that
+/// was resized to a bigger font must be measured again or the preview stays
+/// bound to the old cell size. Returns `true` when the size really changed, so
+/// the caller can drop already encoded payloads: they were sized for the old
+/// cell and would be drawn at the wrong scale.
+pub fn refresh_cell_size() -> bool {
+    let Some(cell) = measured_cell() else {
+        return false;
+    };
+    GRAPHICS.with(|graphics| {
+        let mut graphics = graphics.borrow_mut();
+        if graphics.cell == cell {
+            return false;
+        }
+        graphics.cell = cell;
+        let protocol = graphics.protocol.unwrap_or(ProtocolType::Halfblocks);
+        if let Some(picker) = graphics.picker.as_mut() {
+            *picker = Picker::from_fontsize(cell);
+            picker.set_protocol_type(protocol);
+        }
+        true
+    })
+}
+
+/// Pixels in one cell, as reported by the terminal's window size.
+///
+/// This is a `TIOCGWINSZ` ioctl, not an escape-sequence query: it never reads
+/// stdin, so it cannot swallow keystrokes the way `Picker::from_query_stdio`
+/// does. Returns `None` when the terminal leaves the pixel fields at zero
+/// (tmux, some multiplexers, a pty without a real window).
+fn measured_cell() -> Option<(u16, u16)> {
+    if let Some(cell) = forced_cell() {
+        return Some(cell);
+    }
+    let size = crossterm::terminal::window_size().ok()?;
+    cell_from_window(size.columns, size.rows, size.width, size.height)
+}
+
+/// Cell size requested through `YAZI2D_CELL_SIZE`, as `WIDTHxHEIGHT`.
+///
+/// The escape hatch for a terminal that reports its window without pixel data
+/// (or lies about it), and the way the tests pin a deterministic size.
+fn forced_cell() -> Option<(u16, u16)> {
+    let value = std::env::var("YAZI2D_CELL_SIZE").ok()?;
+    let (width, height) = value
+        .split_once(['x', 'X', '*', ':', ' '])
+        .map(|(width, height)| (width.trim(), height.trim()))?;
+    let cell = (width.parse().ok()?, height.parse().ok()?);
+    (cell.0 >= 4 && cell.1 >= 8).then_some(cell)
+}
+
+/// Cell size from a window size, or `None` when it carries no pixel data.
+fn cell_from_window(columns: u16, rows: u16, width: u16, height: u16) -> Option<(u16, u16)> {
+    if columns == 0 || rows == 0 || width == 0 || height == 0 {
+        return None;
+    }
+    let cell = ((width / columns).max(1), (height / rows).max(1));
+    // A terminal that reports a few pixels per cell is reporting garbage
+    // (or a window measured before a resize); the guess is closer.
+    if cell.0 < 4 || cell.1 < 8 {
+        return None;
+    }
+    Some(cell)
+}
+
+/// Pixels in one cell, for captions that report what is really drawn.
+pub fn cell() -> (u16, u16) {
+    GRAPHICS.with(|graphics| graphics.borrow().cell)
 }
 
 /// Protocol requested through `YAZI2D_IMAGE_PROTOCOL`, if any.
@@ -165,12 +265,52 @@ pub fn native() -> bool {
 ///
 /// Returns `None` when graphics were never initialised (tests), so callers can
 /// fall back to the half-block renderer.
-pub fn render(image: DynamicImage, area: Rect) -> Option<Protocol> {
+pub fn render(image: DynamicImage, area: Rect, fit: Fit) -> Option<Protocol> {
     GRAPHICS.with(|graphics| {
         let graphics = graphics.borrow();
         let picker = graphics.picker.as_ref()?;
-        picker.new_protocol(image, area, Resize::Fit(None)).ok()
+        let resize = match fit {
+            Fit::Inside => Resize::Fit(Some(FilterType::Lanczos3)),
+            Fit::Fill => Resize::Scale(Some(FilterType::Lanczos3)),
+        };
+        // `ratatui-image` pads the encoded image to the whole area and then
+        // draws it into the fitted rectangle, so passing the pane itself
+        // squeezes the picture by the ratio between the pane's aspect and the
+        // image's. Fitting the cell rectangle first removes that padding.
+        //
+        // Half blocks are the exception: they carry two pixel rows per cell and
+        // encode the pane themselves, so they get the area untouched.
+        let size = if graphics.protocol == Some(ProtocolType::Halfblocks) {
+            area
+        } else {
+            fitted_cells(image.width(), image.height(), area, graphics.cell)
+        };
+        picker.new_protocol(image, size, resize).ok()
     })
+}
+
+/// The largest cell rectangle inside `area` that keeps the image's aspect.
+///
+/// A cell is not square — 8×16 px by default, about 18×36 on a Retina display —
+/// so the scale has to go through pixels, exactly like the picker does.
+fn fitted_cells(width: u32, height: u32, area: Rect, cell: (u16, u16)) -> Rect {
+    if width == 0 || height == 0 || area.width == 0 || area.height == 0 {
+        return area;
+    }
+    let cell_width = cell.0.max(1) as f64;
+    let cell_height = cell.1.max(1) as f64;
+    let box_width = area.width as f64 * cell_width;
+    let box_height = area.height as f64 * cell_height;
+    let scale = (box_width / width as f64).min(box_height / height as f64);
+
+    let columns = ((width as f64 * scale) / cell_width).ceil();
+    let rows = ((height as f64 * scale) / cell_height).ceil();
+    Rect::new(
+        0,
+        0,
+        (columns.max(1.0) as u16).min(area.width),
+        (rows.max(1.0) as u16).min(area.height),
+    )
 }
 
 /// What the terminal can do with truecolor half blocks.
@@ -220,24 +360,105 @@ mod tests {
         DynamicImage::ImageRgb8(RgbImage::from_pixel(120, 80, Rgb([10, 200, 40])))
     }
 
+    /// A fixed cell size, so no test depends on the terminal it runs in.
+    fn fixed_cell() -> crate::testutil::EnvGuard {
+        crate::testutil::EnvGuard::set(&[
+            ("YAZI2D_IMAGE_PROTOCOL", "halfblocks"),
+            ("YAZI2D_CELL_SIZE", "8x16"),
+        ])
+    }
+
     #[test]
     fn a_picker_produces_a_protocol_for_an_area() {
-        let _env = EnvGuard::set(&[("YAZI2D_IMAGE_PROTOCOL", "halfblocks")]);
+        let _env = fixed_cell();
         init();
-        let encoded = render(image(), Rect::new(0, 0, 40, 20));
+        let encoded = render(image(), Rect::new(0, 0, 40, 20), Fit::Inside);
         assert!(encoded.is_some(), "no protocol even for half blocks");
     }
 
     #[test]
     fn half_blocks_encode_a_fitted_area() {
-        let _env = EnvGuard::set(&[("YAZI2D_IMAGE_PROTOCOL", "halfblocks")]);
+        let _env = fixed_cell();
         init();
         // The source is 120×80 (3:2). Fitted into 10×5 cells the result keeps
         // that ratio, so it fills the width and is 4 rows tall, not 5.
-        let encoded = render(image(), Rect::new(0, 0, 10, 5)).unwrap();
+        let encoded = render(image(), Rect::new(0, 0, 10, 5), Fit::Inside).unwrap();
         assert_eq!(encoded.area().width, 10);
         assert_eq!(encoded.area().height, 4);
         assert!(encoded.area().height <= 5);
+    }
+
+    #[test]
+    fn inside_never_enlarges_a_small_image() {
+        let _env = fixed_cell();
+        init();
+        // A 30×20 icon in a 40×20 cell tile: the pixels are bound by the font
+        // size (8×16 by default), so it stays small — a tile must not blur a
+        // small icon up to its own size.
+        let icon = DynamicImage::ImageRgb8(RgbImage::from_pixel(30, 20, Rgb([200, 10, 10])));
+        let inside = render(icon.clone(), Rect::new(0, 0, 40, 20), Fit::Inside).unwrap();
+        let fill = render(icon, Rect::new(0, 0, 40, 20), Fit::Fill).unwrap();
+        assert!(
+            inside.area().width < fill.area().width,
+            "inside {:?} did not stay below fill {:?}",
+            inside.area(),
+            fill.area()
+        );
+        assert_eq!(fill.area().width, 40, "fill did not use the whole tile");
+    }
+
+    #[test]
+    fn a_preview_is_bound_to_the_pane_not_to_the_file() {
+        let _env = fixed_cell();
+        init();
+        // The same 120×80 (3:2) photo in two panes: the drawn size follows the
+        // pane instead of the file's own pixels. Half blocks carry two pixel
+        // rows per cell, so 3:2 becomes 60 cells wide by 20 rows tall.
+        let small = render(image(), Rect::new(0, 0, 20, 10), Fit::Fill).unwrap();
+        let big = render(image(), Rect::new(0, 0, 60, 30), Fit::Fill).unwrap();
+        assert_eq!(small.area().width, 20, "narrow pane was not filled");
+        assert_eq!(big.area().width, 60, "wide pane was not filled");
+        assert_eq!(big.area().height, 20, "aspect ratio was not kept");
+        assert!(big.area().height > small.area().height);
+    }
+
+    #[test]
+    fn fitted_cells_keep_the_aspect_ratio_of_the_image() {
+        let cell = (8, 16);
+        // A 3:2 photo in a square-ish pane: 3:2 in cells is 6:4, because a cell
+        // is twice as tall as it is wide.
+        assert_eq!(
+            fitted_cells(1200, 800, Rect::new(0, 0, 40, 20), cell),
+            Rect::new(0, 0, 40, 14)
+        );
+        // A tall image is bound by the pane's height.
+        assert_eq!(
+            fitted_cells(800, 1200, Rect::new(0, 0, 40, 20), cell),
+            Rect::new(0, 0, 27, 20)
+        );
+        // Never larger than the pane, never smaller than one cell.
+        assert_eq!(
+            fitted_cells(4000, 10, Rect::new(0, 0, 12, 9), cell),
+            Rect::new(0, 0, 12, 1)
+        );
+        // A zero-sized pane or image returns the pane untouched.
+        let pane = Rect::new(0, 0, 10, 5);
+        assert_eq!(fitted_cells(0, 0, pane, cell), pane);
+        assert_eq!(
+            fitted_cells(100, 100, Rect::new(0, 0, 0, 5), cell),
+            Rect::new(0, 0, 0, 5)
+        );
+    }
+
+    #[test]
+    fn cell_size_is_measured_from_the_window_or_left_to_the_guess() {
+        // A Retina Ghostty window: 2400×1300 device pixels over 150×36 cells.
+        assert_eq!(cell_from_window(150, 36, 2400, 1260), Some((16, 35)));
+        // tmux and plain ptys report zero pixels; the guess stays.
+        assert_eq!(cell_from_window(150, 36, 0, 0), None);
+        assert_eq!(cell_from_window(0, 0, 2400, 1260), None);
+        // Nonsense values (a window measured mid-resize) are rejected.
+        assert_eq!(cell_from_window(400, 100, 800, 400), None);
     }
 
     #[test]

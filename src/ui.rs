@@ -439,7 +439,7 @@ fn draw_preview(
 
     if is_image_path(path) {
         match image_cache.decoded(path) {
-            Some(image) => {
+            Some(_) => {
                 // Without truecolor half blocks are just a dithered mess, which
                 // is the "huge pixels" complaint. macOS Terminal gets a warning
                 // that points at a terminal which draws the preview properly.
@@ -459,24 +459,42 @@ fn draw_preview(
                     return;
                 }
                 let native = crate::graphics::native();
-                // With a native protocol the terminal draws real pixels, so the
-                // result is roughly `area.width * 8` pixels across; half blocks
-                // give one pixel per cell column. Report what is really shown.
-                let pixels_wide = if native {
-                    image.width().saturating_mul(8)
+                // A preview is bound to the pane: native graphics enlarge the
+                // image to fill it, and half blocks do the same in cells.
+                let protocol = if native {
+                    image_cache.protocol(path, area, crate::graphics::Fit::Fill)
                 } else {
-                    image.width()
+                    None
                 };
-                let dimensions = format!(
-                    " {name}  ·  image {}×{}  ·  {} ",
-                    pixels_wide,
-                    image.height().div_ceil(2),
-                    human_size(size)
-                );
+                let halfblocks = if protocol.is_none() {
+                    // This also starts a background decode on a cache miss.
+                    image_cache.render(path, area.width, area.height)
+                } else {
+                    None
+                };
+                // Report the size really drawn, in pixels of this terminal's
+                // cells — not the file's size, which the pane ignores.
+                let (cell_width, cell_height) = crate::graphics::cell();
+                let drawn = match (&protocol, &halfblocks) {
+                    (Some(protocol), _) => Some((
+                        protocol.area().width as u32 * cell_width as u32,
+                        protocol.area().height as u32 * cell_height as u32,
+                    )),
+                    // Half blocks are one pixel per column and two per row, so
+                    // the cached bitmap already is the drawn pixel size.
+                    (None, Some(image)) => Some((image.width(), image.height())),
+                    (None, None) => None,
+                };
+                let dimensions = match drawn {
+                    Some((width, height)) => format!(
+                        " {name}  ·  image {width}×{height}  ·  {} ",
+                        human_size(size)
+                    ),
+                    None => format!(" {name}  ·  image  ·  {} ", human_size(size)),
+                };
                 draw_caption(frame, header, &dimensions);
                 clamp_preview(panel, 0, 0);
-                if !draw_native(frame, area, image_cache.protocol(path, area)) {
-                    let halfblocks = image_cache.render(path, area.width, area.height);
+                if !draw_native(frame, area, protocol) {
                     if let Some(halfblocks) = halfblocks {
                         render_halfblocks(frame, &halfblocks, area);
                     }
@@ -913,7 +931,11 @@ fn draw_file_icon(
 /// Falls back to half blocks, then to a "loading" ellipsis. Keeps the three
 /// call sites (folder preview grid, thumbnail grid, single preview) identical.
 fn draw_tile_image(frame: &mut Frame, cache: &mut ImageCache, path: &Path, body: Rect) -> bool {
-    if draw_native(frame, body, cache.protocol(path, body)) {
+    if draw_native(
+        frame,
+        body,
+        cache.protocol(path, body, crate::graphics::Fit::Inside),
+    ) {
         return true;
     }
     match cache.render(path, body.width, body.height) {
@@ -2975,6 +2997,31 @@ mod tests {
             text.contains("▀"),
             "image preview was not drawn with half blocks"
         );
+    }
+
+    #[test]
+    fn an_image_preview_caption_reports_what_the_pane_draws() {
+        let _env = truecolor_halfblocks();
+        let tmp = tempfile::tempdir().unwrap();
+        // 400×300 is wider than the preview pane, so the drawn size must be
+        // smaller than the file — the caption used to multiply the file size by
+        // a hard-coded 8 px per cell and print nonsense.
+        let image = RgbImage::from_pixel(400, 300, image::Rgb([30, 120, 220]));
+        image.save(tmp.path().join("wide.png")).unwrap();
+
+        let mut app = App::new(vec![tmp.path().to_path_buf(), tmp.path().to_path_buf()]);
+        app.panels[0].select_name("wide.png");
+        app.panels[0].set_mode(PanelMode::Preview);
+        app.panels[1].select_name("wide.png");
+
+        let text = render_until(&mut app, 100, 30, |text| text.contains("▀"));
+        assert!(text.contains("wide.png"));
+        assert!(
+            !text.contains("400×300") && !text.contains("3200×"),
+            "caption reported the file instead of the drawn image: {text:?}"
+        );
+        assert!(text.contains("image "), "no image caption: {text:?}");
+        assert!(text.contains('×'), "caption has no drawn size: {text:?}");
     }
 
     /// Flatten a rendered buffer into lines, so a test can look at the footer.

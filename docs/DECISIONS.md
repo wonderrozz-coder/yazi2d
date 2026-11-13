@@ -1649,3 +1649,41 @@ incidental path lead to the same kind of row.
 
 **Consequences:** The gap is one key press away and shows up in the footer and in
 `Ctrl+E`, which is where a user looks to find out what exists.
+
+## ADR-072 — The preview is bound to the pane, and the cell is measured
+
+**Status:** accepted (2026-11-13, `0.6.12`)
+
+**Context:** Images in the quick preview looked half their size on macOS and
+normal on Linux. The pane is sized in cells, and a native protocol is sized in
+pixels, so something has to translate between them. `graphics::init` passed
+`Picker::from_fontsize((8, 16))` — a guess. On a 1× display that guess is close
+to a real cell; on a Retina display a cell is about 18×36 device pixels, so the
+picker resized every image to half the pixels the pane covers. The half-block
+fallback works in cells only and therefore kept filling the pane, which is why
+the two protocols disagreed.
+
+`Resize::Fit` also never enlarges: `needs_resize_pixels` clamps the target to
+`min(box, image pixels)`. A small image stayed at its own size no matter how
+large the pane was, which is the same complaint from the other direction.
+
+**Decision:**
+
+- The cell size in pixels comes from the terminal's window size
+  (`crossterm::terminal::window_size`, a `TIOCGWINSZ` ioctl — no stdin read, so
+  ADR-042 still holds), divided by its cell count. Zeros (tmux, a bare pty) or a
+  nonsense value (`< 4×8 px`) fall back to `(8, 16)`. `YAZI2D_CELL_SIZE=9x19`
+  pins it explicitly. A window resize re-measures and drops the encoded payloads
+  of the whole `ImageCache`, because a payload is a function of cell size too.
+- `graphics::render` takes a `Fit`: `Inside` (shrink only) for the thumbnail
+  grids, `Fill` (`Resize::Scale`) for the single image preview. `Fill` keeps the
+  aspect ratio and uses the whole pane, enlarging when the file is smaller.
+- The caption under a preview reports the size actually drawn, derived from
+  `protocol.area()` and the measured cell, instead of multiplying the file's
+  pixel width by a hard-coded 8.
+
+**Consequences:** Preview size now depends on the pane and on the real cell
+size, not on the monitor's DPI or on the file's own resolution. A 64×64 icon
+previewed alone is enlarged to the pane; the same icon in a tile keeps its
+pixels. `YAZI2D_CELL_SIZE` is the escape hatch for a terminal that reports its
+window without pixel data.

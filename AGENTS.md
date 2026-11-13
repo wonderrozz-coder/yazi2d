@@ -16,16 +16,17 @@ non-negotiable and define the project:
 3. A persistent favorites sidebar for folders the user bookmarked.
 
 Non-goals for now: full Yazi feature parity, plugin system, tabs, remote
-filesystems, a GUI, sixel/Kitty image protocols.
+filesystems, a GUI.
 
-## Current status (2026-11-11)
+## Current status (2026-11-13)
 
-Version `0.6.6` — MVP + quick view, thumbnails, background loading, logging,
+Version `0.6.12` — MVP + quick view, thumbnails, background loading, logging,
 sorting, type colours, bulk rename, trackpad gestures, a live footer, a
 polished thumbnail grid, full mouse support (click, double click, path-bar
 copy, right-click menu), recursive search, Windows builds, native image
 protocols (kitty/iTerm2/sixel), Yazi-style Nerd Font icons, accelerated arrow
-repeat with wrap-around, and a chip footer with a screen per modifier.
+repeat with wrap-around, a chip footer with a screen per modifier, and
+previews bound to the pane with a measured cell size.
 
 - [x] Two panels, independent cwd/cursor/selection, active-panel highlighting.
 - [x] Path bar at the top of both panels (left-truncated, tail always visible).
@@ -52,7 +53,7 @@ repeat with wrap-around, and a chip footer with a screen per modifier.
 - [x] Copy/move confirmation, Alt-based cross-panel keys, footer recovery.
 - [x] Shift opens / Alt previews; modifier-safe file ops; full key menu.
 - [x] macOS `.app` bundle with a generated icon, installed to /Applications.
-- [x] 93 unit tests + a real-PTY end-to-end test, all green.
+- [x] 203 unit tests + a real-PTY end-to-end test, all green.
 - [x] `cargo fmt`, `cargo clippy -D warnings`, release build (≈2 MB binary).
 
 Known limitations and the next steps are in `docs/STATUS.md` and
@@ -231,6 +232,10 @@ Detailed invariants and data flow: `docs/ARCHITECTURE.md`.
   draw function: on cloud mounts those block for hundreds of milliseconds.
 - Previews and image decoding must stay asynchronous; the UI thread only reads
   caches.
+- The single image preview is bound to the pane (`graphics::Fit::Fill`) and the
+  thumbnail grids are not (`Fit::Inside`), and the pixel size of a cell comes
+  from the terminal window (`YAZI2D_CELL_SIZE` overrides it) rather than from a
+  hard-coded guess — see ADR-072. Never hard-code `(8, 16)` as the real cell.
 - `KeyEventKind::Repeat` must be handled exactly like `Press`: with keyboard
   enhancement enabled, held keys arrive as `Repeat` and dropping them breaks
   key repeat.

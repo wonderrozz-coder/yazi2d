@@ -315,6 +315,16 @@ Override the choice when a multiplexer hides the terminal's identity:
 YAZI2D_IMAGE_PROTOCOL=kitty yazi2d      # or iterm2, sixel, halfblocks
 ```
 
+Previews are bound to the pane, not to the file: an image is enlarged to fill
+the preview area. The scale is computed from the size of one character cell in
+pixels, which is taken from the terminal's own window size (a `TIOCGWINSZ`
+ioctl — no stdin query). If the terminal reports no pixel size, or you want to
+pin it, give it explicitly:
+
+```sh
+YAZI2D_CELL_SIZE=9x19 yazi2d            # width x height of one cell, in pixels
+```
+
 Icons come from Yazi's default theme: 713 mappings — folder names (`Documents`,
 `Downloads`, `.git`…), exact file names (`.gitignore`, `README`…) and
 extensions (`*.rs`, `*.png`, `*.tar.gz`…). They need a **Nerd Font**; without
@@ -857,6 +867,16 @@ key.toggle_preview.1 = "q"   # …и её занял просмотр
 
 ```sh
 YAZI2D_IMAGE_PROTOCOL=kitty yazi2d      # или iterm2, sixel, halfblocks
+```
+
+Превью привязано к панели, а не к файлу: картинка увеличивается до размеров
+области просмотра. Масштаб считается из размера одной клетки в пикселях —
+он берётся из размера окна терминала (`TIOCGWINSZ`, stdin не опрашивается).
+Если терминал не сообщает размер в пикселях или вы хотите зафиксировать его
+сами, задайте явно:
+
+```sh
+YAZI2D_CELL_SIZE=9x19 yazi2d            # ширина x высота клетки в пикселях
 ```
 
 Иконки взяты из темы Yazi по умолчанию: 713 соответствий — имена каталогов

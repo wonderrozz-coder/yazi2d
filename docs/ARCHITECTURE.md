@@ -217,6 +217,17 @@ Two caches, both keyed by path and validated by mtime + size:
 Both caches are bounded: when they grow past 64 entries they are cleared
 wholesale (simple, predictable, avoids an LRU dependency).
 
+`ImageCache::protocol(path, area, fit)` returns the image encoded for the
+terminal's own graphics protocol (kitty/iTerm2/sixel), cached per
+`(width, height, fill)` — the four newest sizes per image. `Fit::Inside`
+shrinks only (thumbnail tiles), `Fit::Fill` also enlarges, so the single image
+preview is bound to the pane rather than to the file's resolution (ADR-072).
+The pixel size of a cell comes from `graphics::cell()`, which is measured from
+the terminal window (`TIOCGWINSZ`) and re-measured on `Event::Resize`; a change
+drops the cached payloads via `ImageCache::invalidate_protocols`.
+`preview::MAX_PROTOCOL_SIZES` bounds that cache, `MAX_SOURCE_EDGE` (1600 px)
+keeps the final resize cheap.
+
 `is_image_path()` is the single extension check used by previews and tiles.
 
 ### `transfer.rs`

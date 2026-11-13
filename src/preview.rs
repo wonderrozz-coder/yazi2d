@@ -268,8 +268,9 @@ struct ImageEntry {
     source: Option<DynamicImage>,
     resized: HashMap<(u32, u32), Arc<RgbImage>>,
     /// Encoded native-graphics payloads (kitty/iTerm2/sixel), keyed by the
-    /// terminal area. Encoding is expensive, so it is done once per size.
-    protocols: HashMap<(u16, u16), Rc<ratatui_image::protocol::Protocol>>,
+    /// terminal area and the fitting mode. Encoding is expensive, so it is done
+    /// once per size.
+    protocols: HashMap<(u16, u16, bool), Rc<ratatui_image::protocol::Protocol>>,
 }
 
 /// Outcome of a background decode.
@@ -294,6 +295,9 @@ pub struct ImageCache {
 
 /// How many image decodes may run at once.
 const MAX_PENDING_DECODES: usize = 4;
+
+/// How many encoded payloads are kept per image (one per distinct size).
+const MAX_PROTOCOL_SIZES: usize = 4;
 
 impl Default for ImageCache {
     fn default() -> Self {
@@ -399,6 +403,7 @@ impl ImageCache {
         &mut self,
         path: &Path,
         area: ratatui::layout::Rect,
+        fit: crate::graphics::Fit,
     ) -> Option<Rc<ratatui_image::protocol::Protocol>> {
         self.poll();
         if !crate::graphics::native() || area.width == 0 || area.height == 0 {
@@ -419,15 +424,53 @@ impl ImageCache {
 
         let entry = self.entries.get_mut(path)?;
         let source = entry.source.clone()?;
-        let key = (area.width, area.height);
+        let key = (area.width, area.height, fit == crate::graphics::Fit::Fill);
         if let Some(protocol) = entry.protocols.get(&key) {
             return Some(protocol.clone());
         }
 
-        let protocol = crate::graphics::render(source, area)?;
-        let protocol = Rc::new(protocol);
+        let started = Instant::now();
+        let protocol = Rc::new(crate::graphics::render(source, area, fit)?);
+        let elapsed = started.elapsed();
+        if elapsed.as_millis() >= 50 {
+            logging::info(format!(
+                "image encode took {} ms: {} ({}×{} cells, {})",
+                elapsed.as_millis(),
+                path.display(),
+                area.width,
+                area.height,
+                if key.2 { "fill" } else { "inside" }
+            ));
+        }
+        // A fill payload covers the whole pane at real pixel size, which is
+        // megabytes, so a preview keeps a couple of sizes at most while tiles
+        // (a few hundred bytes each) may keep more.
+        let limit = if key.2 { 1 } else { MAX_PROTOCOL_SIZES };
+        if entry.protocols.len() >= limit {
+            entry.protocols.clear();
+        }
         entry.protocols.insert(key, protocol.clone());
+        if key.2 {
+            // Only the image on screen is worth a full-pane payload: scrolling
+            // through previews must not accumulate one per file.
+            for (other_path, other) in self.entries.iter_mut() {
+                if other_path != path {
+                    other.protocols.retain(|size, _| !size.2);
+                }
+            }
+        }
         Some(protocol)
+    }
+
+    /// Drop the encoded payloads of every image, keeping the decodes.
+    ///
+    /// Called when the terminal's cell size changed: a payload is a function of
+    /// the pane size *and* the cell size, and re-encoding is much cheaper than
+    /// decoding a photo again.
+    pub fn invalidate_protocols(&mut self) {
+        for entry in self.entries.values_mut() {
+            entry.protocols.clear();
+        }
     }
 
     /// True when at least one decode is in flight.
