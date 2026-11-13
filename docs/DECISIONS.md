@@ -1315,3 +1315,105 @@ second key arrives while nothing is pending and is ignored.
 **Consequences:** The suite is green run after run and failures now mean a real
 behaviour change. The checks are also stronger than before, which is how the
 `..`-cursor bug in ADR-056 surfaced.
+
+## ADR-058 — Tests must never share the user's config directory
+
+**Status:** accepted (2026-11-13, `0.6.7`)
+
+**Context:** The reported symptom was "every rebuild loses my key bindings and
+favorites". Nothing was wrong with `Settings::save` — the files were on disk and
+a manual restart read them back. The damage came from `cargo test`: `App::new`
+loads the real `settings.toml` and `favorites.toml`, several tests press
+`Ctrl+E`, `Ctrl+B` or `PageDown` and therefore save, and `config_dir()` returned
+`~/Library/Application Support/yazi2d` in a test binary too. Measured directly:
+`shasum` of both files changed across a test run.
+
+**Decision:** `config_dir()` returns a process-wide temp directory
+(`$TMPDIR/yazi2d-test-config-<pid>`) when compiled with `cfg(test)`. Explicit
+`YAZI2D_CONFIG_DIR` still wins, so a test can pin its own location. A regression
+test asserts the path is inside `std::env::temp_dir()`, and that both
+`favorites.toml` and `settings.toml` resolve under it.
+
+**Consequences:** A test run can no longer destroy user data, which also makes
+the suite safe on a developer machine with real settings. The alternative — a
+guard in every test — was rejected because it is exactly the kind of rule a new
+test forgets; making the *path* wrong by construction cannot be forgotten.
+
+## ADR-059 — Documentation is a specification, so `Ctrl+D` had to work
+
+**Status:** accepted (2026-11-13, `0.6.7`)
+
+**Context:** `Ctrl+D` was printed in `README.md` (both languages), `--help`,
+`F1`, `AGENTS.md` and the in-app status hint. `Action::FocusFavorites` carried
+only `Shift+Tab` and `§`. The key the app advertised most widely did nothing,
+which is why the separator "did not work" for the reporter: they never reached
+the sidebar.
+
+**Decision:** `Ctrl+D` is the second editable slot of `FocusFavorites`;
+`Shift+Tab` is the first. `§` moves out of the slots into a fixed alias inside
+`Settings::action_for`, because it cannot be typed into the rebinding prompt
+(Option+6 on a US layout) and would otherwise be an uneditable binding.
+
+**Consequences:** What the docs say and what the app does are one list again.
+The alias is the one deliberate exception, and it is documented as such.
+
+## ADR-060 — One cursor for bookmarks and disks
+
+**Status:** accepted (2026-11-13, `0.6.7`)
+
+**Context:** The Disks section was drawn under the bookmarks but could not be
+reached: `move_favorite` only entered it when the cursor was already *past* the
+last bookmark, which cannot happen because the cursor is clamped. Pressing `↓`
+on the last bookmark did nothing, and `Enter` — `Action::OpenHere` — called
+`open_favorite()` directly, so even a reachable row would have opened a
+bookmark.
+
+**Decision:** The two lists share one cursor. `↓` past the last bookmark sets
+`disks_focus` and moves onto the first volume; `↑` from the first volume clears
+it and returns to the last bookmark; `Enter`/`→` dispatch on `disks_focus`; and
+an empty favorites list starts with `disks_focus` already set, because otherwise
+the sidebar has nothing the cursor can land on.
+
+**Consequences:** The sidebar behaves like one list, which is what it looks
+like. `disks_focus` is cleared when the sidebar loses focus, so the next visit
+starts on the bookmarks.
+
+## ADR-061 — The disk name outranks the disk usage
+
+**Status:** accepted (2026-11-13, `0.6.7`)
+
+**Context:** Two separate problems in one row. The layout gave the usage
+`width - 6` and the label whatever was left, which was one character: the
+sidebar read `Ro…`, `Da…`, `Re…`. And the numbers were nonsense — `16777216T
+free of 16777216T` — because the hand-written `struct statvfs` does not match
+macOS's layout, so `f_blocks` was read from the wrong offset.
+
+**Decision:** Two changes. On macOS `free_space` uses `statfs`, whose layout is
+stable, instead of `statvfs`. And `Disk::compact_usage(budget)` degrades the
+detail (`64G free of 228G` → `64G/228G` → `64G`) while the label keeps up to two
+thirds of the width.
+
+**Consequences:** Rows read `Root  64G free of 228G` and match `df`. A unit test
+asserts the numbers are plausible (`free <= total`, total between 1 GB and
+100 TB), which is what would have caught the offset bug immediately.
+
+## ADR-062 — Reordering is an action, not a hardcoded key
+
+**Status:** accepted (2026-11-13, `0.6.7`)
+
+**Context:** `PageUp`/`PageDown` were matched inline in `handle_favorites_key`,
+so they could not be rebound, and they do not exist on a MacBook keyboard in any
+form a terminal receives (`Fn+↑` is consumed by the terminal itself). The
+sidebar's most useful editing action was therefore unreachable on the platform
+the project is developed on.
+
+**Decision:** `Action::FavoriteUp` and `Action::FavoriteDown` are ordinary
+actions with two slots each: `PageUp`/`K` and `PageDown`/`J`. `K`/`J` were free —
+the browsing keys are the lowercase ones — and they sit next to `j`/`k` so the
+"hold a modifier to move the row instead of the cursor" idea reads clearly.
+`Enter` on them in a panel does nothing.
+
+**Consequences:** Reordering shows up in `Ctrl+E`, in `F1` and in the footer on
+Macs, and any key can be assigned. The inline `PageUp`/`PageDown` branches are
+gone, so there is one source of truth.
+

@@ -354,9 +354,15 @@ path = "/Users/me/notes.md"     # files can be bookmarked too
 ```
 
 In the sidebar: `↑↓` browse (the active panel follows the cursor — a folder
-opens, a file is previewed), `Enter`/`→` commit, `PageUp/PageDown` move the row,
-`S` add a separator, `Del` remove. A flat `favorites = ["/a", "/b"]` list from
-older versions still loads.
+opens, a file is previewed), `Enter`/`→` commit, `PageUp/PageDown` (or `K`/`J`,
+because a Mac has no reachable PgUp/PgDn) move the row, `S` add a separator,
+`Del` remove. A flat `favorites = ["/a", "/b"]` list from older versions still
+loads.
+
+**Mounted volumes** sit under the bookmarks and share the same cursor: `↓` past
+the last bookmark steps into the Disks section, `↑↓` walk the volumes, `Enter`
+opens one in the active panel, and `↑` from the first volume returns to the
+bookmarks.
 
 Settings: `$YAZI2D_CONFIG_DIR/settings.toml`.
 
@@ -870,8 +876,14 @@ path = "/Users/me/notes.md"     # файлы тоже можно добавля�
 
 В панели избранного: `↑↓` — листать (активная панель следует за курсором:
 папка открывается, файл показывается в превью), `Enter`/`→` — перейти,
-`PageUp/PageDown` — переставить строку, `S` — добавить разделитель,
-`Del` — удалить. Старый плоский список `favorites = ["/a", "/b"]` тоже читается.
+`PageUp/PageDown` (или `K`/`J` — на маке PgUp/PgDn неудобны) — переставить
+строку, `S` — добавить разделитель, `Del` — удалить.
+Старый плоский список `favorites = ["/a", "/b"]` тоже читается.
+
+**Смонтированные диски** показаны внизу сайдбара, сразу под избранным, и это
+часть той же навигации: `↓` с последней закладки переводит курсор на первый
+диск, `↑↓` листают диски, `Enter` открывает том в активной панели, `↑` с
+первого диска возвращает к закладкам.
 
 При первом запуске в избранное попадают `~`, `Desktop`, `Documents`, `Downloads`,
 если они существуют.

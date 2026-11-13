@@ -32,16 +32,38 @@ pub struct Disk {
 }
 
 impl Disk {
-    /// `"120G free of 500G"`, or empty when sizes are unknown.
-    pub fn usage(&self) -> String {
-        match (self.free, self.total) {
-            (Some(free), Some(total)) if total > 0 => format!(
-                "{} free of {}",
-                crate::ui::human_size(free),
-                crate::ui::human_size(total)
-            ),
-            _ => String::new(),
+    /// The usage, shortened to fit `budget` columns.
+    ///
+    /// The sidebar is narrow and the disk name matters more than the exact
+    /// wording, so the detail degrades: `64G free of 228G` → `64G/228G` →
+    /// `64G free` → `64G`. Returning an empty string means "show only the
+    /// name", which is what happens in a very narrow sidebar.
+    pub fn compact_usage(&self, budget: usize) -> String {
+        if budget < 3 {
+            return String::new();
         }
+        let free = self.free.map(crate::ui::human_size);
+        let total = self.total.map(crate::ui::human_size);
+
+        let mut candidates: Vec<String> = Vec::new();
+        if let (Some(free), Some(total)) = (&free, &total) {
+            candidates.push(format!("{free} free of {total}"));
+            candidates.push(format!("{free}/{total}"));
+            candidates.push(format!("{free} free"));
+        }
+        if let Some(free) = &free {
+            candidates.push(free.clone());
+        }
+        if self.free.is_none() && self.total.is_none() && !self.kind.is_empty() {
+            candidates.push(self.kind.clone());
+        }
+
+        for candidate in candidates {
+            if candidate.chars().count() <= budget {
+                return candidate;
+            }
+        }
+        String::new()
     }
 }
 
@@ -61,18 +83,38 @@ pub fn list() -> Vec<Disk> {
 
 /// Free and total bytes of the filesystem holding `path`.
 ///
-/// Uses `statvfs` on Unix; Windows falls back to `None`, where the sidebar then
-/// shows the mount point only.
-#[cfg(unix)]
+/// `f_bavail`/`f_blocks` are what `df` reports on the *current* file system, so
+/// they need the platform's real struct. Hand-writing `statvfs` was wrong on
+/// macOS: its members sit at different offsets and the sidebar printed
+/// "16777216T free of …", which also squeezed the disk name to one character.
+/// `statfs` has a stable arrangement on both macOS and Linux, so it is used
+/// there instead.
+#[cfg(target_os = "macos")]
 fn free_space(path: &std::path::Path) -> Option<(u64, u64)> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
     let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
-    // `statvfs` is stable and available on every Unix we target.
+    let mut stats: libc_statfs_macos = unsafe { std::mem::zeroed() };
+    if unsafe { statfs(c_path.as_ptr(), &mut stats) } != 0 {
+        return None;
+    }
+    let block = stats.f_bsize.max(1) as u64;
+    let total = stats.f_blocks.saturating_mul(block);
+    // `f_bavail` is what a user can actually write, which is what a file
+    // manager should show.
+    let free = stats.f_bavail.saturating_mul(block);
+    Some((free, total))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn free_space(path: &std::path::Path) -> Option<(u64, u64)> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
     let mut stats: libc_statvfs = unsafe { std::mem::zeroed() };
-    let result = unsafe { statvfs(c_path.as_ptr(), &mut stats) };
-    if result != 0 {
+    if unsafe { statvfs(c_path.as_ptr(), &mut stats) } != 0 {
         return None;
     }
     let block = stats.f_frsize.max(1);
@@ -86,8 +128,39 @@ fn free_space(_path: &std::path::Path) -> Option<(u64, u64)> {
     None
 }
 
-/// `struct statvfs` with the layout every Linux/macOS target shares.
-#[cfg(unix)]
+/// `struct statfs` as macOS declares it.
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct libc_statfs_macos {
+    f_bsize: u32,
+    f_iosize: i32,
+    f_blocks: u64,
+    f_bfree: u64,
+    f_bavail: u64,
+    f_files: u64,
+    f_ffree: u64,
+    f_fsid: [i32; 2],
+    f_owner: u32,
+    f_type: i32,
+    f_flags: u32,
+    f_fssubtype: u32,
+    f_fstypename: [u8; 16],
+    f_mntonname: [u8; 1024],
+    f_mntfromname: [u8; 1024],
+    f_flags_ext: u32,
+    f_reserved: [u32; 7],
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn statfs(path: *const std::os::raw::c_char, buffer: *mut libc_statfs_macos) -> i32;
+}
+
+/// `struct statvfs` as Linux declares it.
+///
+/// Linux-only on purpose: macOS spells some members differently and the shared
+/// definition read `f_blocks` from the wrong offset there.
+#[cfg(all(unix, not(target_os = "macos")))]
 #[repr(C)]
 struct libc_statvfs {
     f_bsize: u64,
@@ -104,7 +177,7 @@ struct libc_statvfs {
     f_spare: [i32; 6],
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 unsafe extern "C" {
     fn statvfs(path: *const std::os::raw::c_char, buffer: *mut libc_statvfs) -> i32;
 }
@@ -382,7 +455,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_usage_line_is_readable() {
+    fn the_usage_line_shortens_before_the_name_does() {
         let disk = Disk {
             mount: PathBuf::from("/"),
             label: "Root".to_string(),
@@ -390,14 +463,50 @@ mod tests {
             free: Some(120 * 1024 * 1024 * 1024),
             total: Some(500 * 1024 * 1024 * 1024),
         };
-        assert_eq!(disk.usage(), "120G free of 500G");
 
+        // Wide enough: the full sentence.
+        assert_eq!(disk.compact_usage(40), "120G free of 500G");
+        // Narrower: the separator form is the shortest way to keep both numbers.
+        assert_eq!(disk.compact_usage(12), "120G/500G");
+        assert_eq!(disk.compact_usage(9), "120G/500G");
+        // Not even that fits: free space alone, then just the number.
+        assert_eq!(disk.compact_usage(8), "120G");
+        assert_eq!(disk.compact_usage(4), "120G");
+        // No room at all: the name keeps the row.
+        assert_eq!(disk.compact_usage(2), "");
+
+        // Without sizes the filesystem type is shown instead.
         let unknown = Disk {
             free: None,
             total: None,
-            ..disk
+            ..disk.clone()
         };
-        assert!(unknown.usage().is_empty());
+        assert_eq!(unknown.compact_usage(20), "ext4");
+
+        let nothing = Disk {
+            kind: String::new(),
+            ..unknown
+        };
+        assert!(nothing.compact_usage(20).is_empty());
+    }
+
+    #[test]
+    fn free_space_reports_plausible_numbers() {
+        // The hand-written `statvfs` struct was wrong on macOS and produced
+        // "16777216T free of …" — an impossible size that also squeezed the
+        // disk name to a single character in the sidebar. A real filesystem
+        // always has a handful of gigabytes, never petabytes.
+        let (free, total) = free_space(std::path::Path::new("/")).expect("no space report for /");
+        assert!(total > 0, "total size is zero");
+        assert!(
+            free <= total,
+            "free space exceeds the volume: {free} > {total}"
+        );
+        let total_gb = total / (1024 * 1024 * 1024);
+        assert!(
+            (1..=100_000).contains(&total_gb),
+            "implausible volume size: {total_gb} GB"
+        );
     }
 
     #[cfg(target_os = "linux")]

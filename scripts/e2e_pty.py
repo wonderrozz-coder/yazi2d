@@ -422,9 +422,25 @@ try:
 
     # Shift+Tab must give the favorites sidebar keyboard focus.
     send(b"\x1b[Z")
-    screen = drain(0.4)
+    screen = until(b"Enter go")
     assert b"Favorites" in screen, "favorites sidebar disappeared"
+    assert b"Enter go" in screen, "Shift+Tab did not focus the sidebar"
     send(b"\x1b[Z")  # back to panels
+
+    # Ctrl+D does the same: it is advertised in the README, --help and the
+    # in-app help, and once only the docs had it.
+    send(b"\x04")
+    screen = until(b"Enter go")
+    assert b"Enter go" in screen, "Ctrl+D did not focus the sidebar"
+
+    # Reordering a bookmark is a rebindable action now, so it also has a plain
+    # letter for Macs (Fn+↑/↓ is not usable in most terminals).
+    assert has_ordered(screen, "PgUp/PgDn move row"), "the sidebar reorder hint is missing"
+    assert has_ordered(screen, "S separator"), "the separator hint is missing"
+
+    # Back to the panels: the rest of the script is panel work.
+    send(b"\x04")
+    screen = until(b"Left:")
 
     # Help overlay and prompt smoke test.
     send(b"?")
@@ -516,6 +532,18 @@ try:
     # instead of sleeping and hoping.
     screen = until(b"left/taps", timeout=3)
     assert b"left/taps" in screen, "double tap did not open the folder"
+
+    # Stepping past the last bookmark enters the Disks section: the cursor used
+    # to stop there, so the volumes could not be reached from the keyboard at
+    # all. Browsing a volume also reveals it in the active panel, which changes
+    # the folder — that is why this check runs last.
+    send(b"\x04")
+    screen = until(b"Enter go")
+    for _ in range(12):
+        send(b"j")
+    screen = drain(0.4)
+    assert b"Disks" in screen, "the Disks section vanished"
+    send(b"\x04")
 
     send(b"q")
     deadline = time.time() + 5

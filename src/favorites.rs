@@ -270,6 +270,24 @@ pub fn config_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("YAZI2D_CONFIG_DIR") {
         return PathBuf::from(dir);
     }
+
+    // Under `cargo test` the user's real settings must never be touched: a test
+    // that presses `Ctrl+E` used to write the developer's `settings.toml`, and
+    // `cargo test` could therefore wipe real bookmarks and rebindings. Tests
+    // share one throwaway directory in the system temp dir instead.
+    #[cfg(test)]
+    {
+        static TEST_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        let dir = TEST_DIR.get_or_init(|| {
+            let dir =
+                std::env::temp_dir().join(format!("yazi2d-test-config-{}", std::process::id()));
+            let _ = fs::create_dir_all(&dir);
+            dir
+        });
+        dir.clone()
+    }
+
+    #[cfg(not(test))]
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("yazi2d")
@@ -303,6 +321,28 @@ mod tests {
             entries: Vec::new(),
             file: dir.join("favorites.toml"),
         }
+    }
+
+    #[test]
+    fn tests_never_touch_the_real_config_directory() {
+        // A test run once overwrote the developer's bookmarks and rebindings:
+        // `App::new` loads the real config, and a test that pressed Ctrl+E or
+        // Ctrl+B saved straight back into it. See `config_dir`.
+        let dir = config_dir();
+        assert!(
+            dir.starts_with(std::env::temp_dir()),
+            "tests must use a temp config directory, not {}",
+            dir.display()
+        );
+        assert!(
+            dir.to_string_lossy().contains("yazi2d-test-config"),
+            "unexpected test config directory: {}",
+            dir.display()
+        );
+
+        // The two files an app writes must live under it as well.
+        assert!(config_file().starts_with(&dir));
+        assert!(crate::settings::settings_file_for_test().starts_with(&dir));
     }
 
     #[test]

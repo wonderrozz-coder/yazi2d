@@ -243,6 +243,22 @@ Detailed invariants and data flow: `docs/ARCHITECTURE.md`.
   raw byte stream, and wait with `until(...)` instead of sleeping — ratatui
   repaints only changed cells, so a word can arrive in pieces, and previews and
   listings finish on worker threads (ADR-057).
+- Tests must never write outside their own temp directories. `config_dir()`
+  returns a throwaway directory under `cfg(test)` for exactly this reason: a
+  test that presses `Ctrl+E` saves settings, and before ADR-058 that landed in
+  the developer's real files and wiped their rebindings and bookmarks. Never
+  add a test that writes to a hardcoded path under `$HOME`.
+- The sidebar is one cursor over two lists: bookmarks and mounted disks
+  (`disks_focus`). `↓` past the last bookmark enters Disks, `↑` from the first
+  disk returns, `Enter`/`→` dispatch on `disks_focus`, and losing sidebar focus
+  clears it (ADR-060). Do not give disks a separate navigation model.
+- `Ctrl+D`, `Shift+Tab` and `§` all focus the sidebar. The first two are the
+  editable slots; `§` is a fixed alias in `Settings::action_for` because it
+  cannot be typed into the rebinding prompt. Every key printed in `README.md`,
+  `--help` and `F1` must exist in the resolved binding list (ADR-059).
+- Disk usage must come from `statfs` on macOS and `statvfs` on Linux. A single
+  hand-written struct shared by both read `f_blocks` from the wrong offset on
+  macOS and printed "16777216T free of …" (ADR-061).
 - Shortcuts must be layout-independent: `App::on_key` normalizes Cyrillic
   characters through `keys::normalize` **before** dispatch, but never while a
   prompt is open (prompts need the raw character).
@@ -265,12 +281,11 @@ thumbnails; `Ctrl+O` opens the cursor folder in the other panel;
 there. Preview: arrows/`hjkl` scroll, `Esc`/`Ctrl+Q`/`Ctrl+P` closes.
 Thumbnails: arrows/`hjkl` move, `Enter` opens, `Ctrl+T` returns to the list.
 
-Favorites focus: arrows/`jk`, `Enter` navigate, `Del`/`d` remove,
-`Esc`/`Shift+Tab` close.
-
-Chord: `F9` arms a leader; the next arrow opens the cursor folder in that
-panel (`←`/`→`) or toggles thumbnails (`↑`/`↓`). `Esc` or an unrelated key
-cancels it. This is the fallback for terminals that swallow Ctrl/Alt+arrow.
+Favorites focus: arrows/`jk` browse, `PgUp`/`PgDn` (or `K`/`J` on a Mac) move the
+row, `Enter`/`→` navigate, `Del`/`d` remove, `S` add a separator,
+`Esc`/`Shift+Tab` close. `↓` past the last bookmark steps into the mounted Disks
+section, where `↑↓` walk the volumes and `Enter` opens one in the active panel;
+`↑` from the first volume returns to the bookmarks.
 
 Cross-panel: `Shift+←/→` opens the cursor folder in that panel; `Alt+←/→`
 quick-previews there (also `Alt+b`/`Alt+f`, because Ghostty and iTerm2 encode

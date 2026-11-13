@@ -182,8 +182,11 @@ fn draw_panel(
     folder_sizes: &std::collections::HashMap<PathBuf, u64>,
 ) {
     let mode = panel.mode;
+    // The active panel is outlined in the same colour as the focused sidebar, so
+    // "where am I" has one answer everywhere: yellow means this is the part that
+    // takes the keys.
     let border_color = if active {
-        Color::Cyan
+        Color::Yellow
     } else {
         Color::Rgb(90, 90, 100)
     };
@@ -1189,42 +1192,36 @@ fn draw_disks(frame: &mut Frame, app: &mut App, area: Rect, active: bool) {
     let room = area.height.saturating_sub(1) as usize;
     for (index, disk) in app.disks.iter().enumerate().take(room) {
         let focused = app.disks_focus && index == app.disk_cursor;
-
-        // The detail is built first, so the label gets whatever is left. The old
-        // order let the detail column eat the name, which left rows that read
-        // "10G free of 100G" with no disk at all.
-        let usage = disk.usage();
-        let detail = if usage.is_empty() {
-            disk.kind.clone()
-        } else {
-            usage
-        };
-        let detail = truncate_right(&detail, width.saturating_sub(6).max(4));
-        let label_width = width.saturating_sub(2 + detail.width() + 1);
-        let label = truncate_right(&disk.label, label_width.max(1));
-
-        let style = if focused {
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
         let background = if focused {
             SELECT_BG_ACTIVE
         } else {
             Color::Reset
         };
+        let style = if focused {
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+                .bg(background)
+        } else {
+            Style::default().fg(Color::Gray).bg(background)
+        };
 
+        // The name identifies the row, so it wins: the usage gets whatever is
+        // left and shrinks first ("64G free of 228G" → "64G/228G" → "64G").
+        // The old order handed the detail `width - 6` and left the label a
+        // single character, which is why disks read "Ro…" and "Da…".
+        let name_budget = (width.saturating_sub(2) * 2 / 3).max(1);
+        let label = truncate_right(&disk.label, name_budget);
+        let detail_budget = width.saturating_sub(2 + label.width() + 1);
+        let detail = disk.compact_usage(detail_budget);
+
+        let fill = width.saturating_sub(2 + label.width() + detail.width());
         lines.push(Line::from(vec![
             Span::styled("  ", Style::default().fg(Color::Magenta).bg(background)),
-            Span::styled(label.clone(), style.bg(background)),
+            Span::styled(label, style),
+            Span::styled(" ".repeat(fill), Style::default().bg(background)),
             Span::styled(
-                format!(
-                    "{}{} ",
-                    " ".repeat(width.saturating_sub(2 + label.width() + detail.width() + 1)),
-                    detail
-                ),
+                detail,
                 Style::default()
                     .fg(if focused {
                         Color::LightYellow
@@ -1233,6 +1230,7 @@ fn draw_disks(frame: &mut Frame, app: &mut App, area: Rect, active: bool) {
                     })
                     .bg(background),
             ),
+            Span::styled(" ", Style::default().bg(background)),
         ]));
     }
 
@@ -1362,6 +1360,8 @@ fn short_label(action: crate::settings::Action) -> &'static str {
         A::PreviewThere => "preview there",
         A::Confirm => "confirm",
         A::Cancel => "cancel",
+        A::FavoriteUp => "move up",
+        A::FavoriteDown => "move down",
     }
 }
 
@@ -1399,6 +1399,8 @@ fn footer_rank(action: crate::settings::Action) -> u8 {
         // `Ctrl+C` is the terminal's interrupt and `Enter`/`Esc` only confirm a
         // prompt; `hints_for` drops all three before ranking.
         A::Confirm | A::Cancel | A::Quit => 250,
+        // Sidebar-only actions stay out of a panel footer.
+        A::FavoriteUp | A::FavoriteDown => 251,
     }
 }
 
@@ -1548,7 +1550,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 label: "browse",
             },
             Hint {
-                key: "PgUp/PgDn".to_string(),
+                key: "PgUp/PgDn · K/J".to_string(),
                 label: "move row",
             },
             Hint {
@@ -1724,6 +1726,22 @@ fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
             key,
         ),
         Line::from(Span::styled("FAVORITES & MISC", header)),
+        help_line(
+            &format!("  {}", live(Action::FavoriteUp)),
+            "move the bookmark row up (PgUp · K)",
+            key,
+        ),
+        help_line(
+            &format!("  {}", live(Action::FavoriteDown)),
+            "move the bookmark row down (PgDn · J)",
+            key,
+        ),
+        help_line("  S", "add a named separator (in the sidebar)", key),
+        help_line(
+            "  ↓ past the last bookmark",
+            "step into the mounted Disks section",
+            key,
+        ),
         help_line(
             &format!("  {}", live(Action::FocusFavorites)),
             "focus favorites / back to panels",
@@ -3163,8 +3181,11 @@ mod tests {
         // the cursor: the list stays and the preview follows.
         app.panels[0].set_mode(crate::panel::PanelMode::List);
 
+        // Enter on the bookmark reveals the file: the folder is already shown,
+        // so only the label changes. (`Down` cannot be used to "step onto" the
+        // row any more: from the last bookmark it steps into the Disks section.)
         app.on_key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Down,
+            crossterm::event::KeyCode::Enter,
             crossterm::event::KeyModifiers::NONE,
         ));
         app.tick();

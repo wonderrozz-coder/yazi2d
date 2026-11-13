@@ -1845,6 +1845,18 @@ impl App {
             Action::Cancel => {
                 self.clear_selection();
             }
+            // Reordering belongs to the sidebar; in a panel these keys do
+            // nothing so they cannot move a bookmark by accident.
+            Action::FavoriteUp => {
+                if self.focus == Focus::Favorites && !self.disks_focus {
+                    self.shift_favorite(-1);
+                }
+            }
+            Action::FavoriteDown => {
+                if self.focus == Focus::Favorites && !self.disks_focus {
+                    self.shift_favorite(1);
+                }
+            }
         }
     }
 
@@ -2013,7 +2025,28 @@ impl App {
                     return;
                 }
                 Action::OpenHere => {
-                    self.open_favorite();
+                    // `Enter` is the same "open what the cursor is on" gesture
+                    // as the `Enter/→` branch below, so it has to honour the
+                    // Disks section too. Calling `open_favorite` directly made
+                    // a disk row unopenable: the cursor was visibly on the
+                    // volume, and Enter jumped to the last bookmark instead.
+                    if self.disks_focus {
+                        self.open_disk();
+                    } else {
+                        self.open_favorite();
+                    }
+                    return;
+                }
+                Action::FavoriteUp => {
+                    if !self.disks_focus {
+                        self.shift_favorite(-1);
+                    }
+                    return;
+                }
+                Action::FavoriteDown => {
+                    if !self.disks_focus {
+                        self.shift_favorite(1);
+                    }
                     return;
                 }
                 Action::Delete => {
@@ -2037,8 +2070,10 @@ impl App {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => self.move_favorite(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_favorite(1),
-            KeyCode::PageUp => self.shift_favorite(-1),
-            KeyCode::PageDown => self.shift_favorite(1),
+            // PgUp/PgDn now come through `Action::FavoriteUp/Down`, so they are
+            // rebindable and a Mac (which has no reachable PgUp/PgDn) can use
+            // `K`/`J`. `Home`/`End` stay hardcoded: they are navigation, not a
+            // reorder action.
             KeyCode::Home | KeyCode::Char('g') => {
                 self.fav_cursor = 0;
                 self.select_favorite_row();
@@ -2047,7 +2082,10 @@ impl App {
                 self.fav_cursor = self.favorites.len().saturating_sub(1);
                 self.select_favorite_row();
             }
-            KeyCode::Char('S') => self.begin_separator(),
+            // Both cases add a separator here. `s` is the sort menu in a panel,
+            // but the sidebar has nothing to sort, so it used to be a silent
+            // no-op — indistinguishable from "the separator key is broken".
+            KeyCode::Char('S') | KeyCode::Char('s') => self.begin_separator(),
             // Enter *and* `→`/`l` open the bookmark: `→` used to work and must
             // keep working, `Enter` is the discoverable one.
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
@@ -2069,22 +2107,18 @@ impl App {
     fn move_favorite(&mut self, delta: i32) {
         // Moving into the Disks section is a *step past the end*, not a step
         // onto the last bookmark: the bookmark rows must be reachable first.
+        // Moving down past the last bookmark steps into the Disks section. The
+        // cursor is *on* the last bookmark when the user presses `j`, so the
+        // check has to be "there is nothing below this row", not "the cursor is
+        // already past the end" — the old form was unreachable and the volumes
+        // could not be selected from the keyboard at all.
         if delta > 0 && !self.disks_focus {
-            let last_bookmark = self
-                .favorites
-                .entries
-                .iter()
-                .rposition(|entry| !entry.is_separator());
-            let past_the_end = match last_bookmark {
-                Some(last) => self.fav_cursor > last,
-                None => true,
-            };
-            if past_the_end {
-                if !self.disks.is_empty() {
-                    self.disks_focus = true;
-                    self.disk_cursor = 0;
-                    self.reveal_disk();
-                }
+            let next_bookmark = ((self.fav_cursor + 1)..self.favorites.len())
+                .find(|index| !self.favorites.entries[*index].is_separator());
+            if next_bookmark.is_none() && !self.disks.is_empty() {
+                self.disks_focus = true;
+                self.disk_cursor = 0;
+                self.reveal_disk();
                 return;
             }
         }
@@ -2732,7 +2766,17 @@ impl App {
         {
             self.fav_cursor = index;
         }
-        self.fav_cursor = self.fav_cursor.min(self.favorites.len().saturating_sub(1));
+
+        // With no bookmarks the sidebar still has a Disks section, and that is
+        // what the cursor has to land on: otherwise `j` past an empty list does
+        // nothing and the volumes look dead.
+        if self.favorites.entries.is_empty() && !self.disks.is_empty() {
+            self.disks_focus = true;
+            self.disk_cursor = self.disk_cursor.min(self.disks.len().saturating_sub(1));
+            self.reveal_disk();
+        } else {
+            self.fav_cursor = self.fav_cursor.min(self.favorites.len().saturating_sub(1));
+        }
         self.status = "Favorites: Enter go, Del remove, Ctrl+B add, Esc back to panels".to_string();
     }
 
@@ -2760,6 +2804,10 @@ impl App {
         self.refresh_disks();
         if self.show_favorites && self.focus == Focus::Favorites {
             self.focus = Focus::Panels;
+            // Leaving the sidebar hands the keys back to the panel, so the
+            // Disks section must stop claiming the cursor: otherwise the next
+            // visit starts on a volume instead of on the bookmarks.
+            self.disks_focus = false;
             self.status = "Favorites unfocused (still visible)".to_string();
         } else if !self.show_favorites {
             self.show_favorites = true;
@@ -4840,9 +4888,9 @@ mod tests {
         app.fav_cursor = 0;
         app.active = 0;
 
-        // Browsing to a file shows its folder with the cursor on it.
-        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
-        // (a single row cannot move; reveal through Enter instead)
+        // Browsing to a file shows its folder with the cursor on it. The cursor
+        // is already on the only bookmark, so no Down is sent: a step past the
+        // last bookmark now lands in the Disks section on purpose.
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         wait_for_loads(&mut app);
 
@@ -5007,5 +5055,186 @@ mod tests {
             "the status must point at the sidebar: {}",
             app.status
         );
+    }
+
+    // ---- regression: focus keys, disks, sidebar targets ----
+
+    /// Two fake volumes for the sidebar tests.
+    ///
+    /// The mounts are created as real directories: opening one runs a real
+    /// `list_dir`, and a missing path would fail the load and leave the panel
+    /// on its previous folder.
+    fn fake_disks(tmp: &Path) -> Vec<crate::disks::Disk> {
+        let one = tmp.join("volume-one");
+        let two = tmp.join("volume-two");
+        fs::create_dir_all(&two).unwrap();
+        fs::create_dir_all(&one).unwrap();
+        vec![
+            crate::disks::Disk {
+                mount: one,
+                label: "One".to_string(),
+                kind: "apfs".to_string(),
+                free: Some(64 * 1024 * 1024 * 1024),
+                total: Some(228 * 1024 * 1024 * 1024),
+            },
+            crate::disks::Disk {
+                mount: two,
+                label: "Two".to_string(),
+                kind: "apfs".to_string(),
+                free: Some(10 * 1024 * 1024 * 1024),
+                total: Some(20 * 1024 * 1024 * 1024),
+            },
+        ]
+    }
+
+    #[test]
+    fn ctrl_d_focuses_the_sidebar() {
+        // `Ctrl+D` is printed in the README, `--help`, the in-app help and the
+        // status hint, but the action only carried `Shift+Tab` and `§` — the key
+        // the app advertises everywhere did nothing.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+        app.show_favorites = false;
+
+        press(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert!(app.show_favorites, "Ctrl+D did not open the sidebar");
+        assert_eq!(app.focus, Focus::Favorites, "Ctrl+D did not focus it");
+
+        press(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert_eq!(app.focus, Focus::Panels, "Ctrl+D did not come back");
+    }
+
+    #[test]
+    fn the_section_sign_still_focuses_the_sidebar() {
+        // `§` was dropped from the editable slots (it cannot be typed into the
+        // rebinding prompt) but stays a documented alias.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+        press(&mut app, KeyCode::Char('§'), KeyModifiers::NONE);
+        assert_eq!(app.focus, Focus::Favorites);
+    }
+
+    #[test]
+    fn a_separator_can_be_added_with_either_case_and_layout() {
+        // The sidebar keys go through `keys::normalize`, so the physical key
+        // matters, not the letter the layout produces. Lowercase `ы` is the
+        // Russian layout's `S`; it used to do nothing at all.
+        for (label, key) in [
+            // Uppercase is the separator; lowercase `s` stays the sort menu.
+            // A Cyrillic `Ы` is the physical `S` key on a Russian layout, and
+            // `keys::normalize` maps it before dispatch.
+            ("latin S", KeyCode::Char('S')),
+            ("russian Ы", KeyCode::Char('Ы')),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut app = favourites_app(tmp.path());
+            app.favorites.set_file(tmp.path().join("favorites.toml"));
+            app.fav_cursor = 0;
+
+            press(&mut app, key, KeyModifiers::NONE);
+            assert!(
+                matches!(app.prompt, Some(Prompt::Separator { .. })),
+                "{label} did not start the separator prompt"
+            );
+        }
+    }
+
+    #[test]
+    fn the_cursor_steps_from_the_last_bookmark_into_the_disks_section() {
+        // The old check asked whether the cursor was already *past* the end,
+        // which never happened: `j` on the last bookmark did nothing and the
+        // volumes could not be reached with the keyboard.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = favourites_app(tmp.path());
+        for name in ["a", "b"] {
+            let path = tmp.path().join(name);
+            fs::create_dir_all(&path).unwrap();
+            app.favorites
+                .entries
+                .push(crate::favorites::Entry::Path(path));
+        }
+        app.disks = fake_disks(tmp.path());
+        app.fav_cursor = 1;
+        assert!(!app.disks_focus);
+
+        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert!(
+            app.disks_focus,
+            "the cursor did not enter the Disks section"
+        );
+        assert_eq!(app.disk_cursor, 0);
+
+        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(app.disk_cursor, 1, "the cursor did not move between disks");
+
+        // And back up leaves the section for the last bookmark.
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::NONE);
+        assert!(
+            !app.disks_focus,
+            "the cursor did not leave the Disks section"
+        );
+        assert_eq!(app.fav_cursor, 1);
+    }
+
+    #[test]
+    fn enter_on_a_disk_opens_it_in_the_active_panel() {
+        // `Enter` is `Action::OpenHere`, which called `open_favorite()`
+        // directly and ignored the Disks section: the row was visibly
+        // highlighted and Enter jumped to the last bookmark instead.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = favourites_app(tmp.path());
+        app.disks = fake_disks(tmp.path());
+        app.disks_focus = true;
+        app.disk_cursor = 1;
+        let expected = app.disks[1].mount.clone();
+
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        wait_for_loads(&mut app);
+
+        assert_eq!(app.panels[0].cwd, expected);
+        assert_eq!(app.focus, Focus::Panels, "the panel did not take the keys");
+    }
+
+    #[test]
+    fn with_no_bookmarks_the_sidebar_starts_on_the_disks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+        app.favorites.entries.clear();
+        app.disks = fake_disks(tmp.path());
+        app.show_favorites = false;
+
+        press(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert_eq!(app.focus, Focus::Favorites);
+        assert!(app.disks_focus, "an empty sidebar left the cursor nowhere");
+    }
+
+    #[test]
+    fn pgeup_pagedown_and_the_mac_letters_reorder_bookmarks() {
+        // A MacBook has no reachable PageUp/PageDown, so each slot also carries
+        // a plain letter. Both are rebindable like every other action.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = favourites_app(tmp.path());
+        for name in ["a", "b", "c"] {
+            let path = tmp.path().join(name);
+            fs::create_dir_all(&path).unwrap();
+            app.favorites
+                .entries
+                .push(crate::favorites::Entry::Path(path));
+        }
+        app.fav_cursor = 2;
+
+        press(&mut app, KeyCode::PageUp, KeyModifiers::NONE);
+        assert_eq!(app.fav_cursor, 1, "PageUp did not move the row");
+
+        press(&mut app, KeyCode::PageDown, KeyModifiers::NONE);
+        assert_eq!(app.fav_cursor, 2, "PageDown did not move the row");
+
+        // The Mac alternative, `K`/`J` (uppercase, opposite the browsing keys).
+        press(&mut app, KeyCode::Char('K'), KeyModifiers::NONE);
+        assert_eq!(app.fav_cursor, 1, "K did not move the row");
+
+        press(&mut app, KeyCode::Char('J'), KeyModifiers::NONE);
+        assert_eq!(app.fav_cursor, 2, "J did not move the row");
     }
 }

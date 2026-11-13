@@ -52,6 +52,10 @@ pub enum Action {
     SwitchPanel,
     Confirm,
     Cancel,
+    /// Move the highlighted bookmark (or separator) up one row.
+    FavoriteUp,
+    /// Move the highlighted bookmark (or separator) down one row.
+    FavoriteDown,
 }
 
 impl Action {
@@ -59,7 +63,7 @@ impl Action {
     ///
     /// `Settings` is deliberately absent: rebinding the key that opens the
     /// settings menu would make the menu unreachable.
-    pub const ALL: [Action; 29] = [
+    pub const ALL: [Action; 31] = [
         Action::Quit,
         Action::Help,
         Action::Copy,
@@ -89,6 +93,8 @@ impl Action {
         Action::PreviewThere,
         Action::Confirm,
         Action::Cancel,
+        Action::FavoriteUp,
+        Action::FavoriteDown,
     ];
 
     /// Stable identifier used in the settings file.
@@ -125,6 +131,8 @@ impl Action {
             Action::PreviewThere => "preview_there",
             Action::Confirm => "confirm",
             Action::Cancel => "cancel",
+            Action::FavoriteUp => "favorite_up",
+            Action::FavoriteDown => "favorite_down",
         }
     }
 
@@ -161,6 +169,8 @@ impl Action {
             Action::PreviewThere => "Preview there",
             Action::Confirm => "Confirm prompt",
             Action::Cancel => "Cancel / clear",
+            Action::FavoriteUp => "Move bookmark up",
+            Action::FavoriteDown => "Move bookmark down",
         }
     }
 
@@ -216,7 +226,7 @@ impl Action {
             Action::AddFavorite => [Some(KeySpec::ctrl('b')), None],
             Action::FocusFavorites => [
                 Some(KeySpec::code(KeyCode::BackTab)),
-                Some(KeySpec::plain_char('§')),
+                Some(KeySpec::ctrl('d')),
             ],
             Action::ToggleSidebar => [Some(KeySpec::ctrl('f')), None],
             Action::CopyPath => [Some(KeySpec::ctrl('l')), None],
@@ -239,6 +249,18 @@ impl Action {
             ],
             // `Confirm` has no key of its own: Enter/Ctrl+E are prompt keys, and
             // giving Confirm the same `Enter` made "open" lose its only slot.
+            // PageUp/PageDown are the documented keys, but a MacBook has no
+            // reachable PageUp/PageDown (Fn+↑/↓ is swallowed by most terminals),
+            // so each slot also carries a plain letter opposite to the arrow
+            // that browses: `K` and `J` are the up/down moves of the row itself.
+            Action::FavoriteUp => [
+                Some(KeySpec::code(KeyCode::PageUp)),
+                Some(KeySpec::plain_char('K')),
+            ],
+            Action::FavoriteDown => [
+                Some(KeySpec::code(KeyCode::PageDown)),
+                Some(KeySpec::plain_char('J')),
+            ],
             Action::Confirm => [None, None],
             // Esc is reserved (it closes overlays), so Cancel needs no slot.
             Action::Cancel => [None, None],
@@ -343,6 +365,7 @@ fn action_rank(action: Action) -> u8 {
         Action::SwitchPanel => 24,
         Action::ColourMenu => 23,
         Action::Confirm | Action::Cancel => 26,
+        Action::FavoriteUp | Action::FavoriteDown => 27,
     }
 }
 
@@ -825,10 +848,27 @@ impl Settings {
     /// Reads the resolved list, so a rebound key resolves to its new action and
     /// the old one stops firing.
     pub fn action_for(&self, key: KeyEvent) -> Option<Action> {
-        self.shortcuts()
+        if let Some(shortcut) = self
+            .shortcuts()
             .into_iter()
             .find(|shortcut| shortcut.spec.matches(key))
-            .map(|shortcut| shortcut.action)
+        {
+            return Some(shortcut.action);
+        }
+
+        // Fixed aliases for focusing the sidebar. `§` cannot be typed into the
+        // rebinding prompt (Option+6 on a US layout) and `Ctrl+D` is printed in
+        // the README, `--help` and `F1`; both must work whatever the two
+        // editable slots hold. A user binding wins, because the resolved list
+        // is consulted first.
+        if key.modifiers.is_empty() && key.code == KeyCode::Char('§') {
+            return Some(Action::FocusFavorites);
+        }
+        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('d') {
+            return Some(Action::FocusFavorites);
+        }
+
+        None
     }
 }
 
@@ -842,6 +882,12 @@ pub fn is_reserved(spec: KeySpec) -> bool {
 
 fn settings_file() -> PathBuf {
     crate::favorites::config_dir().join("settings.toml")
+}
+
+/// The settings path, for the test that checks config isolation.
+#[cfg(test)]
+pub fn settings_file_for_test() -> PathBuf {
+    settings_file()
 }
 
 /// Minimal `key = value` reader.
@@ -1124,5 +1170,44 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn ctrl_d_and_the_section_sign_focus_the_sidebar_even_when_rebound() {
+        // `settings.toml` in the wild already holds `key.focus_favorites.1 = "f"`,
+        // so changing the defaults alone would not have fixed the reported bug:
+        // an explicit slot wins over a default. `Ctrl+D` and `§` are therefore
+        // fixed aliases, resolved after the user's own bindings.
+        let mut settings = Settings::defaults();
+        settings.slots.insert(
+            "focus_favorites".to_string(),
+            [
+                Some(KeySpec::plain_char('f')),
+                Some(KeySpec::plain_char('§')),
+            ],
+        );
+
+        let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert_eq!(settings.action_for(ctrl_d), Some(Action::FocusFavorites));
+
+        let section = KeyEvent::new(KeyCode::Char('§'), KeyModifiers::NONE);
+        assert_eq!(settings.action_for(section), Some(Action::FocusFavorites));
+
+        // The user's own binding still works.
+        let f = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE);
+        assert_eq!(settings.action_for(f), Some(Action::FocusFavorites));
+    }
+
+    #[test]
+    fn a_user_binding_still_wins_over_the_aliases() {
+        // Aliases are a fallback, not an override: pressing Ctrl+D on an action
+        // the user assigned to it must run that action.
+        let mut settings = Settings::defaults();
+        settings.slots.insert(
+            "sort_menu".to_string(),
+            [Some(KeySpec::ctrl('d')), Some(KeySpec::ctrl('s'))],
+        );
+        let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert_eq!(settings.action_for(ctrl_d), Some(Action::SortMenu));
     }
 }
