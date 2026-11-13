@@ -35,19 +35,26 @@ use serde::{Deserialize, Serialize};
 pub enum Entry {
     /// A bookmarked folder or file.
     Path(PathBuf),
-    /// A named separator, drawn as a caption. Not selectable as a folder.
+    /// A named separator, drawn as a caption.
     Separator(String),
+    /// An empty spacer row.
+    ///
+    /// Blanks are how a group is separated from the next one without inventing a
+    /// title: moving a bookmark down past the end creates one, and moving it back
+    /// up removes the gap again. They are rows like any other, so they can be
+    /// moved and deleted with the same keys.
+    Blank,
 }
 
 impl Entry {
     pub fn path(&self) -> Option<&Path> {
         match self {
             Entry::Path(path) => Some(path),
-            Entry::Separator(_) => None,
+            Entry::Separator(_) | Entry::Blank => None,
         }
     }
 
-    /// Display name: the file name, or the separator title.
+    /// Display name: the file name, the separator title, or nothing for a blank.
     pub fn label(&self) -> String {
         match self {
             Entry::Path(path) => path
@@ -55,11 +62,17 @@ impl Entry {
                 .map(|name| name.to_string_lossy().to_string())
                 .unwrap_or_else(|| path.display().to_string()),
             Entry::Separator(title) => title.clone(),
+            Entry::Blank => String::new(),
         }
     }
 
+    #[cfg(test)]
     pub fn is_separator(&self) -> bool {
         matches!(self, Entry::Separator(_))
+    }
+
+    pub fn is_blank(&self) -> bool {
+        matches!(self, Entry::Blank)
     }
 }
 
@@ -131,6 +144,9 @@ impl Favorites {
                     let title = row.title.unwrap_or_default();
                     return (!title.trim().is_empty()).then_some(Entry::Separator(title));
                 }
+                if row.kind == "blank" {
+                    return Some(Entry::Blank);
+                }
                 row.path.map(|path| Entry::Path(PathBuf::from(path)))
             })
             .collect();
@@ -164,6 +180,11 @@ impl Favorites {
                     kind: "separator".to_string(),
                     path: None,
                     title: Some(title.clone()),
+                },
+                Entry::Blank => GroupRow {
+                    kind: "blank".to_string(),
+                    path: None,
+                    title: None,
                 },
             })
             .collect();
@@ -248,6 +269,22 @@ impl Favorites {
         let entry = self.entries.remove(index);
         self.entries.insert(target, entry);
         Some(target)
+    }
+
+    /// Drop the spacer rows at the very end of the list.
+    ///
+    /// Blanks exist to separate groups, and a trailing blank separates nothing —
+    /// it would just add empty lines to the sidebar forever. Called after the
+    /// cursor leaves the free space below the list.
+    pub fn trim_trailing_blanks(&mut self) {
+        while self.entries.last().is_some_and(Entry::is_blank) {
+            self.entries.pop();
+        }
+    }
+
+    /// Append a blank spacer, so there is always a row below the last group.
+    pub fn push_blank(&mut self) {
+        self.entries.push(Entry::Blank);
     }
 
     pub fn contains(&self, path: &Path) -> bool {

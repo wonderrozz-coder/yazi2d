@@ -1521,3 +1521,45 @@ test asserts the path is inside `std::env::temp_dir()`, and that both
 the suite safe on a developer machine with real settings. The alternative — a
 guard in every test — was rejected because it is exactly the kind of rule a new
 test forgets; making the *path* wrong by construction cannot be forgotten.
+
+## ADR-066 — Blank rows are the arranging space in the sidebar
+
+**Status:** accepted (2026-11-13, `0.6.9`)
+
+**Context:** Groups in the sidebar could only be separated by named separators,
+and the separator itself could not be moved: `move_favorite` skipped every
+`is_separator()` row, so the cursor never landed on one. Reordering was limited
+to swapping neighbours, with no way to pull a bookmark down and leave a gap.
+
+**Decision:** Two changes.
+
+1. Every row is a cursor stop — bookmark, separator, blank. `Enter` on a
+   non-target explains itself in the status line instead of doing nothing
+   silently.
+2. `Entry::Blank` is a real row, persisted as `kind = "blank"`. `↓` below the
+   last row appends one (up to `MAX_TRAILING_BLANKS`), which is what turns "move
+   a row" into "move a row anywhere and leave space behind it". Trailing blanks
+   are trimmed when the cursor steps into the Disks section, so the gap never
+   accumulates on its own.
+
+**Consequences:** Groups are arranged by pushing rows apart, which needs no
+titles and works for the separators too. The old behaviour — arrows skipping
+separators so `Enter` could never land on one — was the reason a separator felt
+like a decoration rather than a row.
+
+## ADR-067 — Shifted letters in a prompt keep their case
+
+**Status:** accepted (2026-11-13, `0.6.9`)
+
+**Context:** A separator could only be named with a lowercase first letter.
+Terminals that report modifiers (the kitty keyboard protocol, used by Ghostty and
+kitty) send `Shift+P` as `Char('p')` plus `SHIFT`; the prompt pushed the raw
+character, so the capital was lost. Terminals that fold shift into the character
+(`Char('P')`) were fine, which is why this survived earlier testing.
+
+**Decision:** `handle_prompt_key` uppercases an `ascii_lowercase` character when
+SHIFT is set. Applies to every text prompt (mkdir, rename, bulk rename,
+separator), because the bug is in the shared path.
+
+**Consequences:** Names can be typed with capitals in every terminal. The
+companion fix in ADR-064 handles the same disagreement for key *bindings*.

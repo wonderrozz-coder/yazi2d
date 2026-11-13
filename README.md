@@ -363,6 +363,13 @@ because a Mac has no reachable PgUp/PgDn) move the row, `S` add a separator,
 `Del` remove. A flat `favorites = ["/a", "/b"]` list from older versions still
 loads.
 
+**Rows move over the whole field.** The cursor stops on every row — bookmark,
+separator or blank — and any of them can be reordered with the same keys. `↓`
+below the last row (or `Shift+J` on the last bookmark) opens a blank row: a
+bookmark can be pulled down and left there, which is how groups are formed
+without inventing separator titles. Trailing blanks are trimmed automatically
+when the cursor moves into the Disks section.
+
 **Mounted volumes** sit under the bookmarks and share the same cursor: `↓` past
 the last bookmark steps into the Disks section, `↑↓` walk the volumes, `Enter`
 opens one in the active panel, and `↑` from the first volume returns to the
@@ -899,6 +906,13 @@ path = "/Users/me/notes.md"     # файлы тоже можно добавля�
 `PageUp/PageDown` (или `K`/`J` — на маке PgUp/PgDn неудобны) — переставить
 строку, `S` — добавить разделитель, `Del` — удалить.
 Старый плоский список `favorites = ["/a", "/b"]` тоже читается.
+
+**Строки двигаются по всему полю.** Курсор останавливается на любой строке —
+закладке, разделителе и пустой строке, — и любую из них можно двигать теми же
+клавишами. `↓` с последней строки (или `Shift+J` на последней закладке) добавляет
+пустую строку: закладку можно опустить вниз и оставить там, а над ней останется
+промежуток. Так формируются группы — без придумывания названий. Хвостовые пустые
+строки сами убираются, когда курсор уходит в раздел дисков.
 
 **Смонтированные диски** показаны внизу сайдбара, сразу под избранным, и это
 часть той же навигации: `↓` с последней закладки переводит курсор на первый

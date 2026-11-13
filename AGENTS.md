@@ -248,10 +248,13 @@ Detailed invariants and data flow: `docs/ARCHITECTURE.md`.
   test that presses `Ctrl+E` saves settings, and before ADR-058 that landed in
   the developer's real files and wiped their rebindings and bookmarks. Never
   add a test that writes to a hardcoded path under `$HOME`.
-- The sidebar is one cursor over two lists: bookmarks and mounted disks
-  (`disks_focus`). `↓` past the last bookmark enters Disks, `↑` from the first
-  disk returns, `Enter`/`→` dispatch on `disks_focus`, and losing sidebar focus
-  clears it (ADR-060). Do not give disks a separate navigation model.
+- The sidebar is one cursor over two lists: rows (bookmarks, separators,
+  blanks) and mounted disks (`disks_focus`). Every row is a cursor stop, so a
+  separator can be moved like a bookmark (ADR-066). `↓` below the last row opens
+  a blank row — the arranging space that lets a bookmark be left anywhere — and
+  only a step past `MAX_TRAILING_BLANKS` trimmed blanks enters Disks; `↑` from
+  the first disk returns to the last real row. Losing sidebar focus clears
+  `disks_focus`. Do not give disks a separate navigation model.
 - `Ctrl+D`, `Shift+Tab` and `§` all focus the sidebar. They are ordinary
   bindings — `Ctrl+D` and `Shift+Tab` are the two default slots, `§` works
   because it can be assigned like any character. Every key printed in
@@ -294,9 +297,10 @@ Thumbnails: arrows/`hjkl` move, `Enter` opens, `Ctrl+T` returns to the list.
 
 Favorites focus: arrows/`jk` browse, `PgUp`/`PgDn` (or `K`/`J` on a Mac) move the
 row, `Enter`/`→` navigate, `Del`/`d` remove, `S` add a separator,
-`Esc`/`Shift+Tab` close. `↓` past the last bookmark steps into the mounted Disks
-section, where `↑↓` walk the volumes and `Enter` opens one in the active panel;
-`↑` from the first volume returns to the bookmarks.
+`Esc`/`Shift+Tab` close. Every row is a stop, so separators and blanks move too.
+`↓` below the last row opens a blank row (the arranging space); a step past the
+trailing blanks enters the mounted Disks section, where `↑↓` walk the volumes and
+`Enter` opens one in the active panel.
 
 Cross-panel: `Shift+←/→` opens the cursor folder in that panel; `Alt+←/→`
 quick-previews there (also `Alt+b`/`Alt+f`, because Ghostty and iTerm2 encode

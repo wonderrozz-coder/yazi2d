@@ -152,6 +152,13 @@ pub struct App {
 
 /// After the arrow has been held this long, the app moves the cursor itself.
 const REPEAT_DELAY: Duration = Duration::from_millis(320);
+
+/// How many spacer rows may pile up below the last group.
+///
+/// The free space under the bookmarks is what lets a row be dragged down and
+/// left there; a handful of rows is enough to arrange groups, and without a cap
+/// a held `↓` would append blanks forever.
+const MAX_TRAILING_BLANKS: usize = 3;
 /// Interval between two automatic moves at the first repeat speed.
 const REPEAT_START: Duration = Duration::from_millis(55);
 /// Fastest automatic repeat interval.
@@ -2103,31 +2110,21 @@ impl App {
     /// This is the "browse without committing" behaviour: the panel follows the
     /// cursor (a folder is opened, a file is previewed), while Enter chooses.
     fn move_favorite(&mut self, delta: i32) {
-        // Moving into the Disks section is a *step past the end*, not a step
-        // onto the last bookmark: the bookmark rows must be reachable first.
-        // Moving down past the last bookmark steps into the Disks section. The
-        // cursor is *on* the last bookmark when the user presses `j`, so the
-        // check has to be "there is nothing below this row", not "the cursor is
-        // already past the end" — the old form was unreachable and the volumes
-        // could not be selected from the keyboard at all.
-        if delta > 0 && !self.disks_focus {
-            let next_bookmark = ((self.fav_cursor + 1)..self.favorites.len())
-                .find(|index| !self.favorites.entries[*index].is_separator());
-            if next_bookmark.is_none() && !self.disks.is_empty() {
-                self.disks_focus = true;
-                self.disk_cursor = 0;
-                self.reveal_disk();
-                return;
-            }
-        }
+        // Moving into the Disks section happens only from the *free space*
+        // below the last row, which is where the blanks live: a step down from
+        // the last bookmark creates a blank instead of jumping to the volumes,
+        // so a bookmark can be moved to any position in the field.
         if delta < 0 && self.disks_focus && self.disk_cursor == 0 {
             self.disks_focus = false;
-            self.fav_cursor = self
+            // Land on the last row that is not padding: it is what the user
+            // was looking at before stepping into the volumes.
+            let last_real = self
                 .favorites
                 .entries
                 .iter()
-                .rposition(|entry| !entry.is_separator())
+                .rposition(|entry| !entry.is_blank())
                 .unwrap_or(0);
+            self.fav_cursor = last_real.min(self.favorites.len().saturating_sub(1));
             self.select_favorite_row();
             return;
         }
@@ -2141,22 +2138,52 @@ impl App {
             return;
         }
 
-        let len = self.favorites.len();
-        if len == 0 {
+        // Every row is a stop now: separators and blanks can be selected and
+        // moved like a bookmark. `Enter` on one is a no-op, so nothing breaks.
+        let len = self.favorites.len() as i32;
+        let next = self.fav_cursor as i32 + delta;
+
+        if next < 0 {
             return;
         }
-        let mut index = self.fav_cursor as i32;
-        loop {
-            index += delta;
-            if index < 0 || index >= len as i32 {
+        if next >= len {
+            // Stepping below the last row adds a spacer, up to a small limit:
+            // that is the "free space" a group is arranged in.
+            let blanks_below = self
+                .favorites
+                .entries
+                .iter()
+                .rev()
+                .take_while(|entry| entry.is_blank())
+                .count();
+            if blanks_below >= MAX_TRAILING_BLANKS {
+                // The list is as long as the field allows; from here a further
+                // step enters the Disks section instead of doing nothing.
+                if !self.disks.is_empty() {
+                    self.favorites.trim_trailing_blanks();
+                    self.disks_focus = true;
+                    self.disk_cursor = 0;
+                    self.reveal_disk();
+                }
                 return;
             }
-            if !self.favorites.entries[index as usize].is_separator() {
-                break;
-            }
+            self.favorites.push_blank();
+            self.fav_cursor = self.favorites.len() - 1;
+            self.reveal_blank_row();
+            return;
         }
-        self.fav_cursor = index as usize;
+
+        self.fav_cursor = next as usize;
         self.select_favorite_row();
+    }
+
+    /// Show the row the cursor is on without leaving the sidebar.
+    ///
+    /// A blank has nothing to reveal, so this only keeps the highlight visible.
+    fn reveal_blank_row(&mut self) {
+        // The sidebar list scrolls itself (`fav_offset` is set while drawing),
+        // and a blank has no panel to point at, so nothing else is needed.
+        self.status.clear();
     }
 
     /// Show the highlighted disk in the active panel, keeping the sidebar focus.
@@ -2260,6 +2287,12 @@ impl App {
 
     /// `PageUp`/`PageDown`: move the cursor row itself, not the view.
     fn shift_favorite(&mut self, delta: i32) {
+        // A row can be moved past the end of the list: that is what drags a
+        // bookmark down into the free space and opens a gap between groups. The
+        // blank row is appended first, then the entry is moved into it.
+        if delta > 0 && self.fav_cursor + 1 >= self.favorites.len() {
+            self.favorites.push_blank();
+        }
         let Some(index) = self.favorites.move_row(self.fav_cursor, delta) else {
             self.status = "Already at the edge of the list".to_string();
             return;
@@ -2267,7 +2300,11 @@ impl App {
         self.fav_cursor = index;
         self.persist_favorites();
         let label = self.favorites.entries[index].label();
-        self.status = format!("{label}: moved {}", if delta < 0 { "up" } else { "down" });
+        self.status = if label.is_empty() {
+            format!("Empty row: moved {}", if delta < 0 { "up" } else { "down" })
+        } else {
+            format!("{label}: moved {}", if delta < 0 { "up" } else { "down" })
+        };
     }
 
     fn begin_separator(&mut self) {
@@ -2383,6 +2420,17 @@ impl App {
                     if !key.modifiers.contains(KeyModifiers::CONTROL)
                         && !key.modifiers.contains(KeyModifiers::ALT) =>
                 {
+                    // Terminals disagree about a shifted letter: most send
+                    // `Char('P')`, the kitty protocol (Ghostty, kitty) sends
+                    // `Char('p')` plus SHIFT. The second form used to type a
+                    // lowercase letter, so a separator could never start with a
+                    // capital.
+                    let c = if key.modifiers.contains(KeyModifiers::SHIFT) && c.is_ascii_lowercase()
+                    {
+                        c.to_ascii_uppercase()
+                    } else {
+                        c
+                    };
                     buffer.push(c);
                 }
                 _ => {}
@@ -3223,7 +3271,13 @@ impl App {
             return;
         };
         let Some(path) = entry.path() else {
-            // A separator is not a target; Enter on it does nothing.
+            // A separator and a blank are not targets. Say so instead of doing
+            // nothing, because the cursor can rest on them now.
+            self.status = if entry.is_blank() {
+                "An empty row: move a bookmark here with Shift+J, or Del to drop it".to_string()
+            } else {
+                "A separator: move bookmarks around it, or Del to remove it".to_string()
+            };
             return;
         };
         let path = path.to_path_buf();
@@ -4979,22 +5033,74 @@ mod tests {
     }
 
     #[test]
-    fn arrows_skip_a_separator() {
+    fn arrows_stop_on_a_separator_so_it_can_be_moved() {
+        // The cursor used to skip separators, which made them impossible to
+        // select and therefore impossible to reorder — the sidebar could only
+        // ever grow separators in place.
         let tmp = tempfile::tempdir().unwrap();
         let mut app = favourites_app(tmp.path());
-        app.favorites
-            .entries
-            .push(crate::favorites::Entry::Path(tmp.path().to_path_buf()));
-        app.favorites
-            .entries
-            .push(crate::favorites::Entry::Separator("Group".to_string()));
-        app.favorites
-            .entries
-            .push(crate::favorites::Entry::Path(tmp.path().to_path_buf()));
+        for entry in [
+            crate::favorites::Entry::Path(tmp.path().to_path_buf()),
+            crate::favorites::Entry::Separator("Group".to_string()),
+            crate::favorites::Entry::Path(tmp.path().to_path_buf()),
+        ] {
+            app.favorites.entries.push(entry);
+        }
         app.fav_cursor = 0;
 
         press(&mut app, KeyCode::Down, KeyModifiers::NONE);
-        assert_eq!(app.fav_cursor, 2, "the separator is not a target");
+        assert_eq!(app.fav_cursor, 1, "the separator is a row now");
+
+        // `Enter` on it explains instead of silently doing nothing.
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.status.contains("separator"), "status: {}", app.status);
+    }
+
+    #[test]
+    fn a_separator_can_be_moved_with_the_reorder_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = favourites_app(tmp.path());
+        for entry in [
+            crate::favorites::Entry::Path(tmp.path().join("a")),
+            crate::favorites::Entry::Separator("Group".to_string()),
+            crate::favorites::Entry::Path(tmp.path().join("b")),
+        ] {
+            app.favorites.entries.push(entry);
+        }
+        app.fav_cursor = 1;
+
+        // `FavoriteDown` is `PgDn`/`J`: the separator swaps with the row below.
+        press(&mut app, KeyCode::Char('J'), KeyModifiers::SHIFT);
+        assert_eq!(
+            app.favorites.entries[2],
+            crate::favorites::Entry::Separator("Group".to_string())
+        );
+        assert_eq!(app.fav_cursor, 2, "the cursor follows the moved row");
+    }
+
+    #[test]
+    fn moving_a_row_past_the_end_opens_a_gap() {
+        // The free space below the last row is what lets groups be pulled apart
+        // without inventing a separator title.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = favourites_app(tmp.path());
+        let path = tmp.path().join("only");
+        fs::create_dir_all(&path).unwrap();
+        app.favorites
+            .entries
+            .push(crate::favorites::Entry::Path(path));
+        app.favorites.set_file(tmp.path().join("favorites.toml"));
+        app.fav_cursor = 0;
+
+        press(&mut app, KeyCode::Char('J'), KeyModifiers::SHIFT);
+        assert_eq!(app.favorites.len(), 2, "no gap was opened");
+        assert!(app.favorites.entries[0].is_blank());
+        assert_eq!(app.fav_cursor, 1, "the row did not move down");
+
+        // The gap survives a reload.
+        app.persist_favorites();
+        let reloaded = crate::favorites::Favorites::load_from_dir(tmp.path());
+        assert_eq!(reloaded.entries, app.favorites.entries);
     }
 
     #[test]
@@ -5138,10 +5244,10 @@ mod tests {
     }
 
     #[test]
-    fn the_cursor_steps_from_the_last_bookmark_into_the_disks_section() {
-        // The old check asked whether the cursor was already *past* the end,
-        // which never happened: `j` on the last bookmark did nothing and the
-        // volumes could not be reached with the keyboard.
+    fn the_cursor_reaches_the_disks_past_the_free_space() {
+        // Reaching the volumes is a deliberate step now: `j` below the last row
+        // opens a gap (that is the arranging space), and only after the gap is
+        // full does the next step enter the Disks section.
         let tmp = tempfile::tempdir().unwrap();
         let mut app = favourites_app(tmp.path());
         for name in ["a", "b"] {
@@ -5153,26 +5259,45 @@ mod tests {
         }
         app.disks = fake_disks(tmp.path());
         app.fav_cursor = 1;
-        assert!(!app.disks_focus);
 
-        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        for _ in 0..=(MAX_TRAILING_BLANKS) {
+            press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        }
         assert!(
             app.disks_focus,
             "the cursor did not enter the Disks section"
         );
         assert_eq!(app.disk_cursor, 0);
+        assert_eq!(
+            app.favorites.entries.len(),
+            2,
+            "the trailing gap must be trimmed when the section is entered"
+        );
 
         press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
         assert_eq!(app.disk_cursor, 1, "the cursor did not move between disks");
 
-        // And back up leaves the section for the last bookmark.
+        // Two steps back: one to the first volume, one out of the section.
         press(&mut app, KeyCode::Char('k'), KeyModifiers::NONE);
+        assert_eq!(app.disk_cursor, 0);
         press(&mut app, KeyCode::Char('k'), KeyModifiers::NONE);
         assert!(
             !app.disks_focus,
             "the cursor did not leave the Disks section"
         );
-        assert_eq!(app.fav_cursor, 1);
+        // It lands on the last real row, not on padding.
+        assert_eq!(
+            app.fav_cursor,
+            app.favorites.len()
+                - 1
+                - app
+                    .favorites
+                    .entries
+                    .iter()
+                    .rev()
+                    .take_while(|entry| entry.is_blank())
+                    .count()
+        );
     }
 
     #[test]

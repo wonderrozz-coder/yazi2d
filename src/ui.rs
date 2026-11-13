@@ -1112,6 +1112,14 @@ fn draw_bookmarks(frame: &mut Frame, app: &mut App, area: Rect, active: bool) {
         .entries()
         .iter()
         .map(|entry| match entry {
+            crate::favorites::Entry::Blank => {
+                // A spacer: it occupies a row so the cursor can rest there and
+                // groups can be pulled apart. Nothing to draw.
+                ListItem::new(Line::from(Span::styled(
+                    " ".repeat(width),
+                    Style::default(),
+                )))
+            }
             crate::favorites::Entry::Separator(title) => {
                 ListItem::new(Line::from(vec![Span::styled(
                     truncate_right(&format!("── {title} "), width),
@@ -1739,6 +1747,11 @@ fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
         help_line("  S", "add a named separator (in the sidebar)", key),
         help_line(
             "  ↓ past the last bookmark",
+            "open an empty row (space between groups)",
+            key,
+        ),
+        help_line(
+            "  ↓ past the empty rows",
             "step into the mounted Disks section",
             key,
         ),
