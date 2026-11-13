@@ -1417,3 +1417,107 @@ the browsing keys are the lowercase ones — and they sit next to `j`/`k` so the
 Macs, and any key can be assigned. The inline `PageUp`/`PageDown` branches are
 gone, so there is one source of truth.
 
+## ADR-063 — No privileged keys: every binding lives in the settings menu
+
+**Status:** accepted (2026-11-13, `0.6.8`)
+
+**Context:** Keys kept accumulating exceptions, and each one became a report of
+"a key I cannot change". The audit found six:
+
+1. `Esc` could not be assigned (`is_reserved`).
+2. `Ctrl+E` could not be assigned (`is_reserved`), so the settings key could
+   never move.
+3. The settings menu's **first slot** was frozen — the second could change, the
+   first could not, for no reason a user could see.
+4. `Ctrl+D` and `§` were fixed aliases added in `0.6.7` on top of the binding
+   list, so they worked *regardless* of what the menu showed.
+5. `?`/`F1` were handled before dispatch, so the `Help` action's own slots were
+   decorative.
+6. `F1` opened help from inside the settings menu, which meant it could not be
+   recorded while rebinding.
+
+**Decision:** All six are gone. `is_reserved` returns `false`, `Esc` is an
+ordinary binding again (`Action::Cancel` gets it back as a default), the
+settings menu's `Action::Settings` joins `Action::ALL` so both its slots are
+editable, the aliases are removed, and help goes through the binding list like
+every other action.
+
+The two escape hatches that justified the old exceptions are not keys:
+
+* **The pointer.** A right click opens the context menu, which reaches settings
+  and every file operation. A user who clears both settings slots can still get
+  back into the menu with the mouse.
+* **`Ctrl+C`.** The terminal's interrupt. It is not a binding and cannot be one:
+  the process would have to swallow `SIGINT`, and then a wedged app could not be
+  stopped at all. It is documented as the one key the app does not own.
+
+**Consequences:** `Ctrl+E` in the settings menu can assign itself to something
+else; the row is still in the list, so it can be put back. Documentation that
+promised fixed keys is updated to say "default", and the settings screen is the
+single source of truth for what a key does.
+
+## ADR-064 — A capital-letter binding accepts both shift spellings
+
+**Status:** accepted (2026-11-13, `0.6.8`)
+
+**Context:** `K`/`J` were added as Mac alternatives for reordering a bookmark
+row, and they did not reorder anything — they moved the cursor, exactly like the
+plain `j`/`k`. Two different terminals spell the same key differently:
+`Char('J')` with no modifier (most), or `Char('j')` plus `SHIFT` (kitty keyboard
+protocol, which Ghostty uses). `KeySpec::matches` compared `self.code != key.code`
+first, so the second spelling never reached any binding and fell through to the
+hard-coded `Char('j')` navigation.
+
+**Decision:** When the *binding* is an uppercase letter and the incoming key is
+the lowercase letter plus `SHIFT`, the key is folded onto the capital before the
+comparison. Only the key side is folded. Folding the binding would make
+`Shift+C` match the plain `c` (copy), which is precisely the accident the
+modifier rules exist to prevent — and it *did*, breaking three tests until the
+fold was made one-sided.
+
+The "ignore a stray Shift" tolerance that symbols rely on (`?` is Shift+/) is
+now limited to non-alphabetic characters for the same reason.
+
+**Consequences:** `Shift+J`/`Shift+K` reorder in every terminal, plain `j`/`k`
+still browse, and `Shift+letter` can never trigger a plain-letter file
+operation. A regression test covers both spellings and the `Shift+C` case.
+
+## ADR-065 — Tests wait for a helper's output, not for the file to exist
+
+**Status:** accepted (2026-11-13, `0.6.8`)
+
+**Context:** Two tests hand text to a shell script and read the result back. The
+clipboard path deliberately does not wait for a helper that outlives the grace
+period — that is what keeps `wl-copy` serving the selection — so both tests
+polled for the output file. `sh` creates that file when it opens the redirect,
+before any text is written, so "the file exists" was true immediately and the
+read still raced. It failed roughly once in ten full runs.
+
+**Decision:** `testutil::read_when_written` polls for the *content*, with a
+deadline, and both tests use it.
+
+**Consequences:** The suite is deterministic under load. The helper's real
+contract — the text eventually arrives — is what the test asserts, without
+changing the production behaviour that exists for a platform reason.
+
+
+**Status:** accepted (2026-11-13, `0.6.7`)
+
+**Context:** The reported symptom was "every rebuild loses my key bindings and
+favorites". Nothing was wrong with `Settings::save` — the files were on disk and
+a manual restart read them back. The damage came from `cargo test`: `App::new`
+loads the real `settings.toml` and `favorites.toml`, several tests press
+`Ctrl+E`, `Ctrl+B` or `PageDown` and therefore save, and `config_dir()` returned
+`~/Library/Application Support/yazi2d` in a test binary too. Measured directly:
+`shasum` of both files changed across a test run.
+
+**Decision:** `config_dir()` returns a process-wide temp directory
+(`$TMPDIR/yazi2d-test-config-<pid>`) when compiled with `cfg(test)`. Explicit
+`YAZI2D_CONFIG_DIR` still wins, so a test can pin its own location. A regression
+test asserts the path is inside `std::env::temp_dir()`, and that both
+`favorites.toml` and `settings.toml` resolve under it.
+
+**Consequences:** A test run can no longer destroy user data, which also makes
+the suite safe on a developer machine with real settings. The alternative — a
+guard in every test — was rejected because it is exactly the kind of rule a new
+test forgets; making the *path* wrong by construction cannot be forgotten.

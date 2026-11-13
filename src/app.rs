@@ -192,6 +192,9 @@ pub enum MenuItem {
     AddSeparator,
     Thumbnails,
     Search,
+    /// Always present: the pointer is the escape hatch when both settings-menu
+    /// slots have been cleared (ADR-063).
+    Settings,
 }
 
 impl MenuItem {
@@ -213,6 +216,7 @@ impl MenuItem {
             MenuItem::AddSeparator => "Add a separator to favorites",
             MenuItem::Thumbnails => "Thumbnails on / off",
             MenuItem::Search => "Find (Alt+F7)",
+            MenuItem::Settings => "Settings (key bindings)",
         }
     }
 }
@@ -757,6 +761,9 @@ impl App {
             self.held_keys.clear();
         }
 
+        // `Ctrl+C` is the terminal's interrupt and cannot be taken away from it:
+        // it is the one key that must work even when the UI is confused. Every
+        // other key, including quit, comes from the binding list (ADR-063).
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
             return;
@@ -788,12 +795,8 @@ impl App {
         }
 
         if self.settings_menu {
-            // `F1` still opens help from here: it is the documented escape hatch
-            // and the only key that is never rebindable.
-            if key.code == KeyCode::F(1) {
-                self.help = true;
-                return;
-            }
+            // No key is special here either: while rebinding, the next key is
+            // the new binding (ADR-063). Help is reachable by its own binding.
             self.handle_settings_key(key);
             return;
         }
@@ -834,25 +837,17 @@ impl App {
             return;
         }
 
-        // `?` and `F1` are the two keys that always work: F1 is never
-        // rebindable, `?` is the documented alias.
-        if matches!(key.code, KeyCode::Char('?') | KeyCode::F(1)) && key.modifiers.is_empty() {
-            self.help = true;
-            return;
+        // Help is an ordinary action now: `?` and `F1` are its two default
+        // slots, and both can be changed in `Ctrl+E` (ADR-063).
+        if let Some(action) = self.settings.action_for(key) {
+            if action == Action::Help {
+                self.help = true;
+                return;
+            }
         }
 
-        // The settings menu has its own slot outside `Action::ALL` (it must stay
-        // reachable), so it is checked before the general dispatch.
-        if self
-            .settings
-            .stored_slots(Action::Settings)
-            .iter()
-            .flatten()
-            .any(|spec| spec.matches(key))
-        {
-            self.open_settings();
-            return;
-        }
+        // The settings menu's own slot is checked by the general dispatch below
+        // like every other action; it needs no special case.
 
         // The favorites sidebar has its own key map: focus decides what a key
         // means, so `Del` removes a bookmark there and a file in the panels.
@@ -1469,6 +1464,7 @@ impl App {
                     items.push(MenuItem::Delete);
                     items.push(MenuItem::DeletePermanent);
                 }
+                items.push(MenuItem::Settings);
             }
             None => {
                 items.push(MenuItem::CopyPath);
@@ -1477,6 +1473,7 @@ impl App {
                 items.push(MenuItem::AddSeparator);
                 items.push(MenuItem::Thumbnails);
                 items.push(MenuItem::Search);
+                items.push(MenuItem::Settings);
             }
         }
 
@@ -1627,6 +1624,7 @@ impl App {
             }
             MenuItem::Thumbnails => self.toggle_thumbnails_in(panel),
             MenuItem::Search => self.begin_search_in(panel),
+            MenuItem::Settings => self.open_settings(),
         }
     }
 
@@ -3441,16 +3439,16 @@ mod tests {
     }
 
     #[test]
-    fn section_sign_opens_favorites() {
+    fn section_sign_focuses_the_sidebar_when_bound() {
+        // `§` is not privileged: it works because anyone can assign it in
+        // `Ctrl+E`, which is the whole point of ADR-063.
         let tmp = tempfile::tempdir().unwrap();
         let mut app = app_for(tmp.path(), tmp.path());
-
+        app.settings
+            .assign(Action::FocusFavorites, 1, KeySpec::plain_char('§'))
+            .unwrap();
         press(&mut app, KeyCode::Char('§'), KeyModifiers::NONE);
         assert_eq!(app.focus, Focus::Favorites);
-        assert!(app.show_favorites);
-
-        press(&mut app, KeyCode::Char('§'), KeyModifiers::NONE);
-        assert_eq!(app.focus, Focus::Panels);
     }
 
     #[test]
@@ -3777,30 +3775,25 @@ mod tests {
     }
 
     #[test]
-    fn settings_menu_cannot_be_rebound_and_reserved_keys_are_refused() {
+    fn every_key_is_rebindable_in_the_settings_menu() {
         let tmp = tempfile::tempdir().unwrap();
         let mut app = app_for(tmp.path(), tmp.path());
         app.settings_menu = true;
 
-        // The settings *slot 1* is not offered for rebinding: it is the only
-        // way into the menu. Its second slot exists, and F1 also works.
+        // ADR-063: the settings key itself is editable now…
         assert!(app
             .settings
             .assign(Action::Settings, 0, KeySpec::f(2))
-            .is_err());
-
-        // Ctrl+E belongs to settings, and reserved combos are refused outright.
+            .is_ok());
+        // …and so is anything else, including `Esc` and `Ctrl+E`.
         assert!(app
             .settings
             .assign(Action::Copy, 0, KeySpec::ctrl('e'))
-            .is_err());
+            .is_ok());
         assert!(app
             .settings
-            .assign(Action::Copy, 0, KeySpec::code(KeyCode::Esc))
-            .is_err());
-        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
-        press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL);
-        assert!(app.settings_menu, "Ctrl+E must still open settings");
+            .assign(Action::Copy, 1, KeySpec::code(KeyCode::Esc))
+            .is_ok());
     }
 
     #[test]
@@ -4287,8 +4280,10 @@ mod tests {
             &app.panels[0].cwd.display().to_string(),
         );
         assert!(copied.is_ok(), "helper failed: {copied:?}");
+        // The helper is not waited for (see the clipboard module), so the test
+        // waits for the text instead of assuming it is already on disk.
         assert_eq!(
-            fs::read_to_string(&out).unwrap(),
+            crate::testutil::read_when_written(&out, &app.panels[0].cwd.display().to_string()),
             app.panels[0].cwd.display().to_string()
         );
 
@@ -5105,11 +5100,14 @@ mod tests {
     }
 
     #[test]
-    fn the_section_sign_still_focuses_the_sidebar() {
-        // `§` was dropped from the editable slots (it cannot be typed into the
-        // rebinding prompt) but stays a documented alias.
+    fn the_section_sign_focuses_the_sidebar_when_bound() {
+        // `§` is an ordinary binding now (ADR-063): it is not in the default
+        // slots, but assigning it works and nothing else claims it.
         let tmp = tempfile::tempdir().unwrap();
         let mut app = app_for(tmp.path(), tmp.path());
+        app.settings
+            .assign(Action::FocusFavorites, 1, KeySpec::plain_char('§'))
+            .unwrap();
         press(&mut app, KeyCode::Char('§'), KeyModifiers::NONE);
         assert_eq!(app.focus, Focus::Favorites);
     }
@@ -5236,5 +5234,37 @@ mod tests {
 
         press(&mut app, KeyCode::Char('J'), KeyModifiers::NONE);
         assert_eq!(app.fav_cursor, 2, "J did not move the row");
+    }
+
+    #[test]
+    fn the_context_menu_reaches_settings_when_both_slots_are_cleared() {
+        // ADR-063 removed every privileged key, including the settings key. The
+        // safety net is the pointer: with both slots empty, the only way back
+        // into `Ctrl+E` is the right-click menu, which must offer Settings.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+        app.settings.clear_slot(Action::Settings, 0);
+        app.settings.clear_slot(Action::Settings, 1);
+        assert_eq!(
+            app.settings
+                .action_for(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL)),
+            None,
+            "the settings key must really be gone for this test to mean anything"
+        );
+
+        app.open_context_menu(0, None, 5, 5);
+        let items = app
+            .context_menu
+            .as_ref()
+            .expect("no context menu")
+            .items
+            .clone();
+        assert!(
+            items.contains(&MenuItem::Settings),
+            "the pointer cannot reopen settings: {items:?}"
+        );
+
+        app.run_menu_item(MenuItem::Settings, 0, None);
+        assert!(app.settings_menu, "the menu did not open");
     }
 }

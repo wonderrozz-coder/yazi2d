@@ -265,6 +265,10 @@ alternative.
 | `?` / `F1` | help |
 | `q` / `Ctrl+C` | quit |
 
+Every key in this table is a **default**: all of them can be changed in `Ctrl+E`,
+including `Esc`, the settings key and help. `Ctrl+C` is the one exception — it is
+the terminal's interrupt.
+
 Favorites sidebar: `↑`/`↓` select, `Enter` open, `Delete`/`d` remove,
 `Esc`/`Shift+Tab` back to panels.
 
@@ -381,6 +385,13 @@ key.toggle_preview.1 = "q"   # …and preview took it
 
 Only actions that differ from the defaults are written, so the file stays short
 and new defaults reach existing users.
+
+**Every key is rebindable — there are no exceptions.** `Esc`, `Ctrl+E` and the
+first slot of the settings menu itself can all be reassigned in `Ctrl+E`. If
+both settings slots end up empty, the menu is still reachable with the mouse:
+right-click any row and choose *Settings (key bindings)*. The only key the app
+does not own is `Ctrl+C`, the terminal's interrupt — taking it away would make a
+wedged app impossible to stop.
 
 ## Logging
 
@@ -733,6 +744,10 @@ WIN7=0 ./packaging/windows/build-windows.sh   # только Windows 10/11
 | `?` / `F1` | справка |
 | `q` / `Ctrl+C` | выход |
 
+Все клавиши в этой таблице — **значения по умолчанию**: любую можно сменить в
+`Ctrl+E`, включая `Esc`, клавишу настроек и справку. Единственное исключение —
+`Ctrl+C`: это прерывание терминала.
+
 В боковой панели избранного: `↑`/`↓` — выбор, `Enter` — перейти,
 `Delete`/`d` — удалить закладку, `Esc`/`Shift+Tab` — вернуться к панелям.
 
@@ -789,9 +804,14 @@ key.toggle_preview.1 = "q"   # …и её занял просмотр
 он остаётся коротким, а новые умолчания доходят до тех, кто ничего не менял.
 
 В меню: `↑↓` — действие, `←→` — слот, `Enter` — назначить, `Del` — очистить
-слот, `r` — сброс действия, `i` — трекпад, `g` — иконки. Всегда работают только
-`F1` (справка) и первый слот «Settings menu» (`Ctrl+E`): без них меню было бы
-недоступно.
+слот, `r` — сброс действия, `i` — трекпад, `g` — иконки.
+
+**Привилегированных клавиш нет.** Назначить можно всё, включая `Esc`, `Ctrl+E`
+и первый слот самого меню настроек. Если очистить оба слота меню, в него всё
+равно можно вернуться: правая кнопка по строке панели открывает контекстное
+меню, а там есть все действия. Единственная клавиша, которую приложение не
+забирает, — `Ctrl+C`: это прерывание терминала, иначе зависшее приложение
+нельзя было бы остановить.
 
 ## Быстрый просмотр и миниатюры
 

@@ -61,9 +61,11 @@ pub enum Action {
 impl Action {
     /// Every rebindable action, in the order shown by the settings screen.
     ///
-    /// `Settings` is deliberately absent: rebinding the key that opens the
-    /// settings menu would make the menu unreachable.
-    pub const ALL: [Action; 31] = [
+    /// `Settings` *is* included (ADR-063): its first slot opens the menu and
+    /// both slots are editable. If a user clears both, the menu stays reachable
+    /// by right-clicking a row — a pointer, not a key, so a binding mistake can
+    /// never lock the app out of its own settings.
+    pub const ALL: [Action; 32] = [
         Action::Quit,
         Action::Help,
         Action::Copy,
@@ -95,6 +97,7 @@ impl Action {
         Action::Cancel,
         Action::FavoriteUp,
         Action::FavoriteDown,
+        Action::Settings,
     ];
 
     /// Stable identifier used in the settings file.
@@ -174,15 +177,9 @@ impl Action {
         }
     }
 
-    /// Actions the settings menu lists.
-    ///
-    /// `Action::Settings` is included so its slots can be seen and its second
-    /// slot used, but assigning the *first* slot is refused: that is the only
-    /// way into the menu, together with `F1`.
+    /// Actions the settings menu lists, in display order.
     pub fn menu_actions() -> Vec<Action> {
-        let mut actions = Action::ALL.to_vec();
-        actions.push(Action::Settings);
-        actions
+        Action::ALL.to_vec()
     }
 
     /// The two built-in slots for this action.
@@ -262,8 +259,9 @@ impl Action {
                 Some(KeySpec::plain_char('J')),
             ],
             Action::Confirm => [None, None],
-            // Esc is reserved (it closes overlays), so Cancel needs no slot.
-            Action::Cancel => [None, None],
+            // Both slots are editable now: the overlay's own keys are handled by
+            // the overlay, so `Cancel` is an ordinary action like the rest.
+            Action::Cancel => [Some(KeySpec::code(KeyCode::Esc)), None],
         }
     }
 }
@@ -402,15 +400,44 @@ impl KeySpec {
     /// Only the modifiers a terminal actually reports matter: on macOS `Shift`
     /// is folded into the character, so a plain `?` arrives without a modifier
     /// and must still match a `?` binding.
+    ///
+    /// Terminals also disagree about *shifted letters*: some send `Char('J')`
+    /// with no modifier, others `Char('j')` plus `SHIFT` (the kitty keyboard
+    /// protocol, which Ghostty uses). Both spellings are normalised to "lowercase
+    /// character + SHIFT" before anything else, so a binding for a capital
+    /// letter answers either one. Without this, `Shift+K`/`Shift+J` matched no
+    /// binding and fell through to the plain `j`/`k` navigation — which is why
+    /// the reorder keys moved the cursor instead of the row.
     pub fn matches(self, key: KeyEvent) -> bool {
+        // A shifted letter reaches us in two spellings: `Char('J')` with no
+        // modifier, or `Char('j')` plus SHIFT (kitty keyboard protocol, which
+        // Ghostty and kitty use). When the *binding* is a capital letter, both
+        // spellings mean that binding, so the key side is folded onto the
+        // capital. Only the key side is touched: folding the binding would make
+        // `Shift+C` match the plain `c` (copy), which must never happen.
+        let (spec_code, spec_modifiers) = (self.code, self.modifiers);
+        let (key_code, key_modifiers) = match (spec_code, key.code) {
+            // `Shift+J` as `Char('j')` + SHIFT: the shift is real, so the
+            // capital binding owns it.
+            (KeyCode::Char(upper), KeyCode::Char(pressed))
+                if upper.is_ascii_uppercase()
+                    && pressed.is_ascii_lowercase()
+                    && pressed.eq_ignore_ascii_case(&upper)
+                    && key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                (KeyCode::Char(upper), key.modifiers - KeyModifiers::SHIFT)
+            }
+            _ => (key.code, key.modifiers),
+        };
+
         // `Shift+←` is the mirror of `Shift+→` for "open in the other panel":
         // the arrow says *which* panel, so a spec holding one arrow must not
         // answer to the other. Compared by code, this keeps `Ctrl+O` (same
         // action) working while keeping the two arrows distinct.
-        if self.modifiers == KeyModifiers::SHIFT
-            && key.modifiers == KeyModifiers::SHIFT
+        if spec_modifiers == KeyModifiers::SHIFT
+            && key_modifiers == KeyModifiers::SHIFT
             && matches!(
-                (self.code, key.code),
+                (spec_code, key_code),
                 (KeyCode::Right, KeyCode::Left) | (KeyCode::Left, KeyCode::Right)
             )
         {
@@ -424,28 +451,28 @@ impl KeySpec {
         // the arrow. Only the Alt binding accepts them, and only when Alt is
         // the sole modifier: a `Ctrl+←` spec must never answer to `Ctrl+F`,
         // which is the sidebar toggle.
-        if self.modifiers == KeyModifiers::ALT
-            && key.modifiers == KeyModifiers::ALT
+        if spec_modifiers == KeyModifiers::ALT
+            && key_modifiers == KeyModifiers::ALT
             && matches!(
-                (self.code, key.code),
+                (spec_code, key_code),
                 (KeyCode::Left, KeyCode::Char('b')) | (KeyCode::Right, KeyCode::Char('f'))
             )
         {
             return true;
         }
 
-        if self.code != key.code {
+        if spec_code != key_code {
             return false;
         }
 
         // Command arrives as SUPER or META depending on the platform, so both
         // sides are normalised to SUPER first.
-        let mut wanted = self.modifiers;
+        let mut wanted = spec_modifiers;
         if wanted.intersects(KeyModifiers::META) {
             wanted.remove(KeyModifiers::META);
             wanted |= KeyModifiers::SUPER;
         }
-        let mut actual = key.modifiers;
+        let mut actual = key_modifiers;
         if actual.intersects(KeyModifiers::META) {
             actual.remove(KeyModifiers::META);
             actual |= KeyModifiers::SUPER;
@@ -456,11 +483,12 @@ impl KeySpec {
         // therefore tolerate a stray Shift — but nothing else may: a binding
         // without Shift must never fire on Shift+←, which is a different
         // gesture entirely (`Shift+→` opens the folder in the other panel).
-        if matches!(self.code, KeyCode::Char(_)) && !wanted.contains(KeyModifiers::SHIFT) {
-            // A shifted character (`?` is Shift+/) carries no SHIFT modifier on
-            // some terminals and does on others; a character binding accepts
-            // both. A *key* binding never does: `Shift+→` is a gesture of its
-            // own, and `→` must not fire on it.
+        // The tolerance is for *symbols only*: `?` is Shift+/ and arrives with
+        // or without SHIFT depending on the terminal. A letter must not get it,
+        // or `Shift+C` would fire the plain `c` (copy) — the exact accident the
+        // modifier checks exist to prevent.
+        let symbolic = matches!(spec_code, KeyCode::Char(c) if !c.is_ascii_alphabetic());
+        if symbolic && !wanted.contains(KeyModifiers::SHIFT) {
             wanted.remove(KeyModifiers::SHIFT);
             actual.remove(KeyModifiers::SHIFT);
         } else if !wanted.contains(KeyModifiers::SHIFT) {
@@ -736,18 +764,13 @@ impl Settings {
 
     /// Assign `spec` to one slot.
     ///
-    /// Both slots are editable. A combo that is reserved (`Esc`, the settings
-    /// key) or already used by another action is refused: silently stealing a
-    /// key from, say, "copy" would be worse than telling the user.
+    /// Both slots of every action are editable, including the settings menu's
+    /// own key (ADR-063). A combo already owned by another action is refused
+    /// when that action was customised too: silently stealing a key from, say,
+    /// "copy" would be worse than telling the user.
     pub fn assign(&mut self, action: Action, slot: usize, spec: KeySpec) -> Result<(), String> {
         if slot > 1 {
             return Err("only two slots exist".to_string());
-        }
-        if is_reserved(spec) {
-            return Err(format!("{} is reserved", spec.label()));
-        }
-        if action == Action::Settings && slot == 0 {
-            return Err("the settings key itself cannot be remapped".to_string());
         }
         // A combo owned by another action is only a conflict when that action
         // was edited by the user too; a *default* gives way, which is what makes
@@ -847,37 +870,29 @@ impl Settings {
     ///
     /// Reads the resolved list, so a rebound key resolves to its new action and
     /// the old one stops firing.
+    /// The action a key actually triggers, if any.
+    ///
+    /// Reads the resolved list, so a rebound key resolves to its new action and
+    /// the old one stops firing. There are no fixed aliases: every key the app
+    /// acts on comes from this list (ADR-063).
     pub fn action_for(&self, key: KeyEvent) -> Option<Action> {
-        if let Some(shortcut) = self
-            .shortcuts()
+        self.shortcuts()
             .into_iter()
             .find(|shortcut| shortcut.spec.matches(key))
-        {
-            return Some(shortcut.action);
-        }
-
-        // Fixed aliases for focusing the sidebar. `§` cannot be typed into the
-        // rebinding prompt (Option+6 on a US layout) and `Ctrl+D` is printed in
-        // the README, `--help` and `F1`; both must work whatever the two
-        // editable slots hold. A user binding wins, because the resolved list
-        // is consulted first.
-        if key.modifiers.is_empty() && key.code == KeyCode::Char('§') {
-            return Some(Action::FocusFavorites);
-        }
-        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('d') {
-            return Some(Action::FocusFavorites);
-        }
-
-        None
+            .map(|shortcut| shortcut.action)
     }
 }
 
 /// Keys that the app relies on being always available.
-pub fn is_reserved(spec: KeySpec) -> bool {
-    matches!(
-        (spec.code, spec.modifiers),
-        (KeyCode::Char('e'), m) if m.contains(KeyModifiers::CONTROL)
-    ) || spec.code == KeyCode::Esc
+/// Keys the app used to keep for itself.
+///
+/// There are none any more (ADR-063). Every key is assignable in `Ctrl+E`, and
+/// the escape hatches that used to justify the exceptions are the pointer and
+/// `Action::Settings`'s own slot. The function stays so the call sites read the
+/// same, and so "reserved" has exactly one place to be reintroduced if a real
+/// need ever appears.
+pub fn is_reserved(_spec: KeySpec) -> bool {
+    false
 }
 
 fn settings_file() -> PathBuf {
@@ -1052,15 +1067,31 @@ mod tests {
     }
 
     #[test]
-    fn reserved_keys_and_the_settings_key_are_refused() {
+    fn every_key_is_assignable_including_esc_and_the_settings_key() {
+        // ADR-063: no key is privileged any more. `Esc` and `Ctrl+E` used to be
+        // refused outright, and the settings menu's own first slot was frozen.
         let mut settings = defaults();
+
         assert!(settings
             .assign(Action::Copy, 0, KeySpec::code(KeyCode::Esc))
-            .is_err());
-        assert!(settings
-            .assign(Action::Copy, 0, KeySpec::ctrl('e'))
-            .is_err());
-        assert!(settings.assign(Action::Settings, 0, KeySpec::f(2)).is_err());
+            .is_ok());
+        assert!(settings.assign(Action::Copy, 1, KeySpec::ctrl('e')).is_ok());
+        assert!(settings.assign(Action::Settings, 0, KeySpec::f(2)).is_ok());
+        assert_eq!(
+            settings.stored_slots(Action::Settings)[0],
+            Some(KeySpec::f(2))
+        );
+
+        // `Ctrl+E` was just given to Copy, so it runs Copy now — the point is
+        // that nothing refused the assignment. The settings menu moved to F2.
+        assert_eq!(
+            settings.action_for(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL)),
+            Some(Action::Copy)
+        );
+        assert_eq!(
+            settings.action_for(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE)),
+            Some(Action::Settings)
+        );
     }
 
     /// The bug this refactor fixes: rebinding Q to preview must free Q from Quit.
@@ -1173,40 +1204,41 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_d_and_the_section_sign_focus_the_sidebar_even_when_rebound() {
-        // `settings.toml` in the wild already holds `key.focus_favorites.1 = "f"`,
-        // so changing the defaults alone would not have fixed the reported bug:
-        // an explicit slot wins over a default. `Ctrl+D` and `§` are therefore
-        // fixed aliases, resolved after the user's own bindings.
-        let mut settings = Settings::defaults();
-        settings.slots.insert(
-            "focus_favorites".to_string(),
-            [
-                Some(KeySpec::plain_char('f')),
-                Some(KeySpec::plain_char('§')),
-            ],
-        );
-
+    fn ctrl_d_and_the_section_sign_are_ordinary_defaults() {
+        // `Ctrl+D` and `§` are the two default slots of `FocusFavorites`, so a
+        // user can change either in `Ctrl+E` — which is the point (ADR-063).
+        let settings = defaults();
         let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
         assert_eq!(settings.action_for(ctrl_d), Some(Action::FocusFavorites));
 
+        // `§` is not privileged either: it works because it can be assigned
+        // like any other character, which is what the old fixed alias prevented.
+        let mut with_section = defaults();
+        with_section
+            .assign(Action::FocusFavorites, 1, KeySpec::plain_char('§'))
+            .unwrap();
         let section = KeyEvent::new(KeyCode::Char('§'), KeyModifiers::NONE);
-        assert_eq!(settings.action_for(section), Some(Action::FocusFavorites));
+        assert_eq!(
+            with_section.action_for(section),
+            Some(Action::FocusFavorites)
+        );
 
-        // The user's own binding still works.
-        let f = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE);
-        assert_eq!(settings.action_for(f), Some(Action::FocusFavorites));
+        // Rebinding the first slot really replaces `Ctrl+D`.
+        let mut edited = defaults();
+        edited
+            .assign(Action::FocusFavorites, 1, KeySpec::code(KeyCode::BackTab))
+            .unwrap();
+        assert_eq!(edited.action_for(ctrl_d), None);
     }
 
     #[test]
-    fn a_user_binding_still_wins_over_the_aliases() {
-        // Aliases are a fallback, not an override: pressing Ctrl+D on an action
-        // the user assigned to it must run that action.
+    fn a_custom_binding_beats_a_default_one() {
+        // `Ctrl+D` belongs to favorites by default; taking it for the sort menu
+        // must move it, because a default always gives way to an edit.
         let mut settings = Settings::defaults();
-        settings.slots.insert(
-            "sort_menu".to_string(),
-            [Some(KeySpec::ctrl('d')), Some(KeySpec::ctrl('s'))],
-        );
+        settings
+            .assign(Action::SortMenu, 0, KeySpec::ctrl('d'))
+            .unwrap();
         let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
         assert_eq!(settings.action_for(ctrl_d), Some(Action::SortMenu));
     }

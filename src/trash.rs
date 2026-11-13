@@ -267,12 +267,11 @@ mod tests {
 
     fn with_trash<T>(dir: &Path, run: impl FnOnce() -> T) -> T {
         // `YAZI2D_TRASH_DIR` is process-wide and `cargo test` runs these in
-        // parallel with every other module, so the shared env lock serialises
-        // them; without it one test could delete another's trash root mid-run.
-        let guard = crate::testutil::env_lock();
-        std::env::set_var(TRASH_DIR_ENV, dir);
+        // parallel with every other module. `EnvGuard` takes the shared env lock
+        // *and* restores whatever was there before, so a test in another module
+        // that happens to read the variable cannot see it vanish underneath it.
+        let guard = crate::testutil::EnvGuard::set(&[(TRASH_DIR_ENV, &dir.display().to_string())]);
         let result = run();
-        std::env::remove_var(TRASH_DIR_ENV);
         drop(guard);
         result
     }

@@ -265,13 +265,11 @@ mod tests {
         let (_dir, out, result) = fake_helper("/tmp/пример.txt");
         assert!(result.is_ok(), "custom helper failed: {result:?}");
         // `run_helper` does not wait for a helper that outlives the grace
-        // period (that is what keeps `wl-copy` alive), so on a loaded machine
-        // the shell may still be writing. Wait for the file instead of racing.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !out.exists() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert_eq!(std::fs::read_to_string(&out).unwrap(), "/tmp/пример.txt");
+        // period (that is what keeps `wl-copy` alive), so wait for the content.
+        assert_eq!(
+            crate::testutil::read_when_written(&out, "/tmp/пример.txt"),
+            "/tmp/пример.txt"
+        );
     }
 
     #[test]

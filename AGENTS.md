@@ -252,10 +252,21 @@ Detailed invariants and data flow: `docs/ARCHITECTURE.md`.
   (`disks_focus`). `↓` past the last bookmark enters Disks, `↑` from the first
   disk returns, `Enter`/`→` dispatch on `disks_focus`, and losing sidebar focus
   clears it (ADR-060). Do not give disks a separate navigation model.
-- `Ctrl+D`, `Shift+Tab` and `§` all focus the sidebar. The first two are the
-  editable slots; `§` is a fixed alias in `Settings::action_for` because it
-  cannot be typed into the rebinding prompt. Every key printed in `README.md`,
-  `--help` and `F1` must exist in the resolved binding list (ADR-059).
+- `Ctrl+D`, `Shift+Tab` and `§` all focus the sidebar. They are ordinary
+  bindings — `Ctrl+D` and `Shift+Tab` are the two default slots, `§` works
+  because it can be assigned like any character. Every key printed in
+  `README.md`, `--help` and `F1` must exist in the resolved binding list
+  (ADR-059).
+- **No key is privileged.** `is_reserved` returns `false`, `Action::Settings` is
+  in `Action::ALL` with both slots editable, and nothing is handled before the
+  binding list (`ADR-063`). `Ctrl+C` is the single exception because it is the
+  terminal's interrupt; the escape hatch for a lost settings key is the
+  right-click menu, which always offers Settings. Never add a hard-coded key
+  check — add an `Action` and a default slot instead.
+- A capital-letter binding must accept both shift spellings (`Char('J')` and
+  `Char('j')` + `SHIFT`), because terminals disagree. Only the key side is
+  folded: folding the binding would let `Shift+C` fire plain `c` (copy)
+  (`ADR-064`).
 - Disk usage must come from `statfs` on macOS and `statvfs` on Linux. A single
   hand-written struct shared by both read `f_blocks` from the wrong offset on
   macOS and printed "16777216T free of …" (ADR-061).
@@ -308,7 +319,7 @@ emits `ScrollLeft`/`ScrollRight` inside vertical gestures, and acting on them
 caused random navigation. The footer shows Ctrl/Alt/Shift chords while the
 modifier is held when the terminal supports key-release events.
 
-Global: `Ctrl+C` quits, `q` quits outside prompts/help, `?`/`F1` help.
+Global: `Ctrl+C` is the terminal interrupt (the one key the app does not own). `q` quits and `?`/`F1` open help as ordinary bindings, so all three are rebindable in `Ctrl+E`.
 
 macOS F-keys may require `Fn`; letter alternatives are intentional and must be
 kept. `Ctrl+←/→` and `Alt+←/→` may be intercepted by macOS/terminals — every

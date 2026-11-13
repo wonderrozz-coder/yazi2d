@@ -61,3 +61,25 @@ impl Drop for EnvGuard {
         }
     }
 }
+
+/// Read `path` once it holds exactly `expected`, or fail after five seconds.
+///
+/// Clipboard helpers are deliberately not waited for (`wl-copy` stays alive to
+/// serve the selection), so a test that hands text to a shell script has to wait
+/// for the *content*: the file exists the moment the shell opens the redirect,
+/// which made "wait until the file exists" race on a loaded machine.
+pub fn read_when_written(path: &std::path::Path, expected: &str) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            if text == expected {
+                return text;
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return std::fs::read_to_string(path)
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
