@@ -433,10 +433,24 @@ try:
     screen = until(b"Enter go")
     assert b"Enter go" in screen, "Ctrl+D did not focus the sidebar"
 
-    # Reordering a bookmark is a rebindable action now, so it also has a plain
-    # letter for Macs (Fn+↑/↓ is not usable in most terminals).
-    assert has_ordered(screen, "PgUp/PgDn move row"), "the sidebar reorder hint is missing"
+    # Browse mode shows its own keys, and `E` is how arranging starts.
+    assert has_ordered(screen, "browse"), "the browse hint is missing"
+    assert has_ordered(screen, "arrange"), "the arrange hint is missing"
+    assert b"Favorites \xc2\xb7 arranging" not in screen, "the sidebar started in arranging mode"
+
+    # `E` switches to arranging: the title and the footer change, so it is
+    # obvious which mode the arrows are in.
+    send(b"E")
+    screen = until(b"arranging")
+    assert b"arranging" in screen, "E did not enter arranging mode"
+    assert has_ordered(screen, "move row"), "the reorder hint is missing"
     assert has_ordered(screen, "S separator"), "the separator hint is missing"
+    assert has_ordered(screen, "done"), "the exit hint is missing"
+
+    # Deleting and moving belong here; back in browse mode they step aside.
+    send(b"E")
+    screen = until(b"browse")
+    assert b"arranging" not in screen, "E did not leave arranging mode"
 
     # Back to the panels: the rest of the script is panel work.
     send(b"\x04")

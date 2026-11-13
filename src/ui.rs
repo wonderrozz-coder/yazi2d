@@ -1036,15 +1036,25 @@ fn draw_favorites(frame: &mut Frame, app: &mut App, area: Rect) {
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(border_color))
         .title(Span::styled(
-            " Favorites ",
+            // The title carries the mode, so it is never ambiguous whether the
+            // arrows visit every row or only bookmarks.
+            if app.fav_edit {
+                " Favorites · arranging "
+            } else {
+                " Favorites "
+            },
             Style::default()
                 .fg(border_color)
                 .add_modifier(Modifier::BOLD),
         ))
         .title_bottom(
-            Line::from(" Ctrl+B add · S separator ")
-                .right_aligned()
-                .style(Style::default().fg(Color::DarkGray)),
+            Line::from(if app.fav_edit {
+                " K/J move · S separator · Del remove · E done "
+            } else {
+                " Ctrl+B add · E arrange "
+            })
+            .right_aligned()
+            .style(Style::default().fg(Color::DarkGray)),
         );
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1550,34 +1560,53 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     );
 
     let hints = if app.focus == Focus::Favorites {
-        // The sidebar has its own map: the arrows browse (the panel follows the
-        // cursor), PageUp/PageDown reorder the list, Enter commits.
-        let mut hints = vec![
-            Hint {
-                key: "↑↓".to_string(),
-                label: "browse",
-            },
-            Hint {
-                key: "PgUp/PgDn · K/J".to_string(),
-                label: "move row",
-            },
-            Hint {
-                key: "Enter/→".to_string(),
-                label: "open",
-            },
-            Hint {
-                key: "S".to_string(),
-                label: "separator",
-            },
-            Hint {
-                key: "Del".to_string(),
-                label: "remove",
-            },
-            Hint {
-                key: "Ctrl+B".to_string(),
-                label: "add",
-            },
-        ];
+        // The sidebar has two modes: browsing visits bookmarks only, arranging
+        // (`E`) visits every row so separators and blanks can be moved. The
+        // footer shows the mode's own keys, so what is on screen is what the
+        // keys do.
+        let mut hints = if app.fav_edit {
+            vec![
+                Hint {
+                    key: "↑↓".to_string(),
+                    label: "every row",
+                },
+                Hint {
+                    key: "PgUp/PgDn · K/J".to_string(),
+                    label: "move row",
+                },
+                Hint {
+                    key: "S".to_string(),
+                    label: "separator",
+                },
+                Hint {
+                    key: "Del".to_string(),
+                    label: "remove",
+                },
+                Hint {
+                    key: "E".to_string(),
+                    label: "done",
+                },
+            ]
+        } else {
+            vec![
+                Hint {
+                    key: "↑↓".to_string(),
+                    label: "browse",
+                },
+                Hint {
+                    key: "Enter/→".to_string(),
+                    label: "open",
+                },
+                Hint {
+                    key: "Ctrl+B".to_string(),
+                    label: "add",
+                },
+                Hint {
+                    key: "E".to_string(),
+                    label: "arrange",
+                },
+            ]
+        };
         // The exit key is whatever the user bound, not a hard-coded Esc.
         for shortcut in app.settings.shortcuts() {
             if shortcut.action == Action::FocusFavorites {

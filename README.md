@@ -363,12 +363,20 @@ because a Mac has no reachable PgUp/PgDn) move the row, `S` add a separator,
 `Del` remove. A flat `favorites = ["/a", "/b"]` list from older versions still
 loads.
 
-**Rows move over the whole field.** The cursor stops on every row — bookmark,
-separator or blank — and any of them can be reordered with the same keys. `↓`
-below the last row (or `Shift+J` on the last bookmark) opens a blank row: a
-bookmark can be pulled down and left there, which is how groups are formed
-without inventing separator titles. Trailing blanks are trimmed automatically
-when the cursor moves into the Disks section.
+**Two modes: browse and arrange.** `E` switches between them.
+
+- **Browse (default):** `↑↓` visit bookmarks only — separators and blanks are
+  skipped, so `Enter` always opens what is under the cursor. `Enter`/`→` open,
+  `Ctrl+B` adds, `E` starts arranging.
+- **Arrange** (`Favorites · arranging` in the title): `↑↓` stop on **every** row.
+  `PgUp`/`PgDn` (or `K`/`J`) move the row, `S` adds a separator, `Del` removes,
+  `↓` below the last row opens a blank (so a bookmark can be pulled down and left
+  there), and `E` returns to browsing.
+
+Moving and deleting work only while arranging; in browse mode those keys point at
+`E` instead of acting on a bookmark. Trailing blanks are trimmed when the cursor
+moves into the Disks section. A flat `favorites = ["/a", "/b"]` list from older
+versions still loads.
 
 **Mounted volumes** sit under the bookmarks and share the same cursor: `↓` past
 the last bookmark steps into the Disks section, `↑↓` walk the volumes, `Enter`
@@ -907,12 +915,19 @@ path = "/Users/me/notes.md"     # файлы тоже можно добавля�
 строку, `S` — добавить разделитель, `Del` — удалить.
 Старый плоский список `favorites = ["/a", "/b"]` тоже читается.
 
-**Строки двигаются по всему полю.** Курсор останавливается на любой строке —
-закладке, разделителе и пустой строке, — и любую из них можно двигать теми же
-клавишами. `↓` с последней строки (или `Shift+J` на последней закладке) добавляет
-пустую строку: закладку можно опустить вниз и оставить там, а над ней останется
-промежуток. Так формируются группы — без придумывания названий. Хвостовые пустые
-строки сами убираются, когда курсор уходит в раздел дисков.
+**Два режима: просмотр и редактирование.** `E` переключает.
+
+- **Просмотр (по умолчанию)**: `↑↓` ходят только по закладкам — сепараторы и
+  пустые строки пропускаются, поэтому `Enter` всегда открывает то, что под
+  курсором. `Enter`/`→` — перейти, `Ctrl+B` — добавить, `E` — редактировать.
+- **Редактирование** (`Favorites · arranging` в заголовке): `↑↓` останавливаются
+  на **каждой** строке. `PgUp`/`PgDn` (или `K`/`J`) — двигать строку, `S` —
+  добавить сепаратор, `Del` — удалить, `↓` с последней строки открывает пустую
+  (так закладку можно опустить вниз и оставить промежуток), `E` — выйти.
+
+Движение и удаление работают только в режиме редактирования: в просмотре они
+подсказывают нажать `E`. Хвостовые пустые строки убираются, когда курсор уходит
+в раздел дисков. Старый плоский список `favorites = ["/a", "/b"]` тоже читается.
 
 **Смонтированные диски** показаны внизу сайдбара, сразу под избранным, и это
 часть той же навигации: `↓` с последней закладки переводит курсор на первый

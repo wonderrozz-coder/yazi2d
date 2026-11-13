@@ -248,13 +248,21 @@ Detailed invariants and data flow: `docs/ARCHITECTURE.md`.
   test that presses `Ctrl+E` saves settings, and before ADR-058 that landed in
   the developer's real files and wiped their rebindings and bookmarks. Never
   add a test that writes to a hardcoded path under `$HOME`.
-- The sidebar is one cursor over two lists: rows (bookmarks, separators,
-  blanks) and mounted disks (`disks_focus`). Every row is a cursor stop, so a
-  separator can be moved like a bookmark (ADR-066). `↓` below the last row opens
-  a blank row — the arranging space that lets a bookmark be left anywhere — and
-  only a step past `MAX_TRAILING_BLANKS` trimmed blanks enters Disks; `↑` from
-  the first disk returns to the last real row. Losing sidebar focus clears
-  `disks_focus`. Do not give disks a separate navigation model.
+- The sidebar has **two modes** (`E`, ADR-068). Browse: the cursor visits only
+  rows that open something, so `Enter` always has a target. Arrange: every row
+  is a stop, so separators and blanks can be moved (`K`/`J`, `PgUp`/`PgDn`) and
+  removed (`Del`), and `↓` below the last row opens a blank — the arranging
+  space that lets a bookmark be left anywhere. Moving and deleting are refused
+  in browse mode with a status hint. The mode must stay visible: title
+  `Favorites · arranging`, footer chips per mode.
+- The sidebar and mounted disks share one cursor (`disks_focus`). In browse mode
+  a step down from the last bookmark enters Disks; in arrange mode only after
+  `MAX_TRAILING_BLANKS` blanks, which are then trimmed. `↑` from the first disk
+  returns to the last real row, and losing sidebar focus clears `disks_focus`.
+  Do not give disks a separate navigation model.
+- A held arrow must accelerate in the sidebar too (ADR-069): `handle_favorites_key`
+  arms it, and `tick_key_repeat` routes to `move_favorite` when the sidebar has
+  focus. A sidebar repeat must never move a panel cursor.
 - `Ctrl+D`, `Shift+Tab` and `§` all focus the sidebar. They are ordinary
   bindings — `Ctrl+D` and `Shift+Tab` are the two default slots, `§` works
   because it can be assigned like any character. Every key printed in
@@ -297,10 +305,11 @@ Thumbnails: arrows/`hjkl` move, `Enter` opens, `Ctrl+T` returns to the list.
 
 Favorites focus: arrows/`jk` browse, `PgUp`/`PgDn` (or `K`/`J` on a Mac) move the
 row, `Enter`/`→` navigate, `Del`/`d` remove, `S` add a separator,
-`Esc`/`Shift+Tab` close. Every row is a stop, so separators and blanks move too.
-`↓` below the last row opens a blank row (the arranging space); a step past the
-trailing blanks enters the mounted Disks section, where `↑↓` walk the volumes and
-`Enter` opens one in the active panel.
+`Esc`/`Shift+Tab` close. `E` toggles arranging: there every row (separator,
+blank) is a stop and can be moved with `K`/`J` and removed with `Del`, and `↓`
+below the last row opens a blank for spacing. A step past the trailing blanks
+enters the mounted Disks section, where `↑↓` walk the volumes and `Enter` opens
+one in the active panel.
 
 Cross-panel: `Shift+←/→` opens the cursor folder in that panel; `Alt+←/→`
 quick-previews there (also `Alt+b`/`Alt+f`, because Ghostty and iTerm2 encode

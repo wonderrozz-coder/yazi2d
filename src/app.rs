@@ -62,6 +62,14 @@ pub struct App {
     pub favorites: Favorites,
     pub show_favorites: bool,
     pub fav_cursor: usize,
+    /// True while the sidebar is in arranging mode (`E`).
+    ///
+    /// Browsing and arranging are different jobs, so they get different modes:
+    /// normally the cursor skips separators and blanks and lands only on
+    /// bookmarks, which is what makes `Enter` predictable. In edit mode every
+    /// row (including separators and blanks) is a stop, so it can be moved and
+    /// deleted, and `S` inserts a separator where the cursor is.
+    pub fav_edit: bool,
     /// Screen rectangle of the favorites list body (borders excluded).
     pub favorites_area: Rect,
     /// First favorites row currently drawn, so clicks map to the right bookmark.
@@ -379,6 +387,7 @@ impl App {
             favorites: Favorites::load_or_default(),
             show_favorites: true,
             fav_cursor: 0,
+            fav_edit: false,
             favorites_area: Rect::new(0, 0, 0, 0),
             fav_offset: 0,
             disks: crate::disks::list(),
@@ -992,6 +1001,14 @@ impl App {
         } else {
             1
         };
+        // The sidebar has its own cursor, so a held arrow there must move it —
+        // the panels must not scroll while the pointer is on a bookmark.
+        if self.focus == Focus::Favorites {
+            let step = self.repeat_step_for(held);
+            self.move_favorite(direction * step);
+            self.dirty = true;
+            return true;
+        }
         let cols = self.active().grid_cols.max(1) as i32;
         let step = if self.active().mode == PanelMode::Thumbnails {
             cols
@@ -2013,6 +2030,19 @@ impl App {
     }
 
     fn handle_favorites_key(&mut self, key: KeyEvent) {
+        // The sidebar needs the same held-arrow acceleration as the panels:
+        // without it a held `↓` only moved at the terminal's own repeat rate,
+        // which is why the cursor felt much slower here than in a panel.
+        if matches!(
+            key.code,
+            KeyCode::Up | KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('k')
+        ) && key.modifiers.is_empty()
+        {
+            self.arm_arrow(key.code);
+        } else {
+            self.release_arrow();
+        }
+
         // `Esc` deliberately does nothing here: the favorites panel is left with
         // the key that opened it, so a stray Esc cannot hide it mid-browse.
         if let Some(action) = self.settings.action_for(key) {
@@ -2055,7 +2085,14 @@ impl App {
                     return;
                 }
                 Action::Delete => {
-                    self.remove_favorite();
+                    // Arranging owns deletion: in browse mode `Del` on a
+                    // bookmark would be a surprise in a list where the cursor
+                    // is meant to browse, so it is edit-only (ADR-068).
+                    if self.fav_edit {
+                        self.remove_favorite();
+                    } else {
+                        self.status = "Deletion lives in arranging mode: press E".to_string();
+                    }
                     return;
                 }
                 Action::Quit => {
@@ -2091,6 +2128,9 @@ impl App {
             // but the sidebar has nothing to sort, so it used to be a silent
             // no-op — indistinguishable from "the separator key is broken".
             KeyCode::Char('S') | KeyCode::Char('s') => self.begin_separator(),
+            // `E` toggles arranging mode: in it every row is a stop, so
+            // separators and blanks can be moved and deleted.
+            KeyCode::Char('E') | KeyCode::Char('e') => self.toggle_fav_edit(),
             // Enter *and* `→`/`l` open the bookmark: `→` used to work and must
             // keep working, `Enter` is the discoverable one.
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
@@ -2110,10 +2150,6 @@ impl App {
     /// This is the "browse without committing" behaviour: the panel follows the
     /// cursor (a folder is opened, a file is previewed), while Enter chooses.
     fn move_favorite(&mut self, delta: i32) {
-        // Moving into the Disks section happens only from the *free space*
-        // below the last row, which is where the blanks live: a step down from
-        // the last bookmark creates a blank instead of jumping to the volumes,
-        // so a bookmark can be moved to any position in the field.
         if delta < 0 && self.disks_focus && self.disk_cursor == 0 {
             self.disks_focus = false;
             // Land on the last row that is not padding: it is what the user
@@ -2138,17 +2174,56 @@ impl App {
             return;
         }
 
-        // Every row is a stop now: separators and blanks can be selected and
-        // moved like a bookmark. `Enter` on one is a no-op, so nothing breaks.
+        if self.fav_edit {
+            self.move_favorite_edit(delta);
+        } else {
+            self.move_favorite_browse(delta);
+        }
+    }
+
+    /// Browsing: the cursor visits only bookmarks, so `Enter` always has a
+    /// target. Separators and blanks are skipped (ADR-068).
+    fn move_favorite_browse(&mut self, delta: i32) {
+        let len = self.favorites.len() as i32;
+        if len == 0 {
+            return;
+        }
+        if delta > 0 {
+            // Into the Disks section once there is nothing below.
+            let next = (self.fav_cursor as i32 + 1)..len;
+            let found =
+                next.filter(|index| self.favorites.entries[*index as usize].path().is_some());
+            match found.into_iter().next() {
+                Some(index) => {
+                    self.fav_cursor = index as usize;
+                    self.select_favorite_row();
+                }
+                None => self.enter_disks_section(),
+            }
+            return;
+        }
+
+        let mut index = self.fav_cursor as i32 - 1;
+        while index >= 0 {
+            if self.favorites.entries[index as usize].path().is_some() {
+                self.fav_cursor = index as usize;
+                self.select_favorite_row();
+                return;
+            }
+            index -= 1;
+        }
+    }
+
+    /// Arranging: every row is a stop, including separators and blanks.
+    fn move_favorite_edit(&mut self, delta: i32) {
         let len = self.favorites.len() as i32;
         let next = self.fav_cursor as i32 + delta;
-
         if next < 0 {
             return;
         }
         if next >= len {
-            // Stepping below the last row adds a spacer, up to a small limit:
-            // that is the "free space" a group is arranged in.
+            // The free space under the list: a blank row is opened there, up to
+            // a small cap, so a row can be dragged down and left.
             let blanks_below = self
                 .favorites
                 .entries
@@ -2157,33 +2232,69 @@ impl App {
                 .take_while(|entry| entry.is_blank())
                 .count();
             if blanks_below >= MAX_TRAILING_BLANKS {
-                // The list is as long as the field allows; from here a further
-                // step enters the Disks section instead of doing nothing.
-                if !self.disks.is_empty() {
-                    self.favorites.trim_trailing_blanks();
-                    self.disks_focus = true;
-                    self.disk_cursor = 0;
-                    self.reveal_disk();
-                }
+                self.enter_disks_section();
                 return;
             }
             self.favorites.push_blank();
             self.fav_cursor = self.favorites.len() - 1;
-            self.reveal_blank_row();
+            self.status.clear();
             return;
         }
-
         self.fav_cursor = next as usize;
         self.select_favorite_row();
     }
 
-    /// Show the row the cursor is on without leaving the sidebar.
-    ///
-    /// A blank has nothing to reveal, so this only keeps the highlight visible.
-    fn reveal_blank_row(&mut self) {
-        // The sidebar list scrolls itself (`fav_offset` is set while drawing),
-        // and a blank has no panel to point at, so nothing else is needed.
-        self.status.clear();
+    /// Step into the mounted volumes, dropping the padding that was only there
+    /// for arranging.
+    fn enter_disks_section(&mut self) {
+        if self.disks.is_empty() {
+            return;
+        }
+        self.favorites.trim_trailing_blanks();
+        self.fav_cursor = self.fav_cursor.min(self.favorites.len().saturating_sub(1));
+        self.disks_focus = true;
+        self.disk_cursor = 0;
+        self.reveal_disk();
+    }
+
+    /// `E`: switch between browsing and arranging the sidebar.
+    fn toggle_fav_edit(&mut self) {
+        self.fav_edit = !self.fav_edit;
+        if self.fav_edit {
+            self.status = "Arranging: ↑↓ every row · K/J move · S separator · Del remove · E done"
+                .to_string();
+        } else {
+            self.status = "Browsing: ↑↓ bookmarks · E to arrange".to_string();
+            // Leaving edit mode must leave the cursor on something Enter can
+            // act on, so a separator or blank under it is pushed aside.
+            self.snap_cursor_to_target();
+        }
+    }
+
+    /// Move the cursor to the nearest bookmark, if it is not already on one.
+    fn snap_cursor_to_target(&mut self) {
+        if self.favorites.entries.is_empty() {
+            self.fav_cursor = 0;
+            return;
+        }
+        if self
+            .favorites
+            .entries
+            .get(self.fav_cursor)
+            .is_some_and(|entry| entry.path().is_some())
+        {
+            return;
+        }
+        // Prefer the row above, then below: that is where the user came from.
+        let above = (0..self.fav_cursor)
+            .rev()
+            .find(|index| self.favorites.entries[*index].path().is_some());
+        let below = ((self.fav_cursor + 1)..self.favorites.len())
+            .find(|index| self.favorites.entries[*index].path().is_some());
+        if let Some(index) = above.or(below) {
+            self.fav_cursor = index;
+            self.select_favorite_row();
+        }
     }
 
     /// Show the highlighted disk in the active panel, keeping the sidebar focus.
@@ -2287,6 +2398,10 @@ impl App {
 
     /// `PageUp`/`PageDown`: move the cursor row itself, not the view.
     fn shift_favorite(&mut self, delta: i32) {
+        if !self.fav_edit {
+            self.status = "Moving lives in arranging mode: press E".to_string();
+            return;
+        }
         // A row can be moved past the end of the list: that is what drags a
         // bookmark down into the free space and opens a gap between groups. The
         // blank row is appended first, then the entry is moved into it.
@@ -4774,6 +4889,7 @@ mod tests {
             .entries
             .push(crate::favorites::Entry::Path(bookmarked.clone()));
         app.fav_cursor = 0;
+        app.fav_edit = true; // deletion lives in arranging mode (ADR-068)
         app.focus = Focus::Favorites;
         app.panels[0].select_name("a.txt");
 
@@ -4987,6 +5103,7 @@ mod tests {
         }
         app.favorites.set_file(tmp.path().join("favorites.toml"));
         app.fav_cursor = 1;
+        app.fav_edit = true;
 
         press(&mut app, KeyCode::PageUp, KeyModifiers::NONE);
         assert_eq!(app.fav_cursor, 0);
@@ -5033,10 +5150,10 @@ mod tests {
     }
 
     #[test]
-    fn arrows_stop_on_a_separator_so_it_can_be_moved() {
-        // The cursor used to skip separators, which made them impossible to
-        // select and therefore impossible to reorder — the sidebar could only
-        // ever grow separators in place.
+    fn browsing_skips_a_separator_and_arranging_stops_on_it() {
+        // The cursor used to jump onto every caption, which is what made it feel
+        // like it was "skipping around". Browsing now visits bookmarks only;
+        // arranging (`E`) stops on every row so it can be moved (ADR-068).
         let tmp = tempfile::tempdir().unwrap();
         let mut app = favourites_app(tmp.path());
         for entry in [
@@ -5049,7 +5166,11 @@ mod tests {
         app.fav_cursor = 0;
 
         press(&mut app, KeyCode::Down, KeyModifiers::NONE);
-        assert_eq!(app.fav_cursor, 1, "the separator is a row now");
+        assert_eq!(app.fav_cursor, 2, "browsing must skip the separator");
+
+        press(&mut app, KeyCode::Char('E'), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(app.fav_cursor, 1, "arranging stops on the separator");
 
         // `Enter` on it explains instead of silently doing nothing.
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
@@ -5068,6 +5189,7 @@ mod tests {
             app.favorites.entries.push(entry);
         }
         app.fav_cursor = 1;
+        app.fav_edit = true;
 
         // `FavoriteDown` is `PgDn`/`J`: the separator swaps with the row below.
         press(&mut app, KeyCode::Char('J'), KeyModifiers::SHIFT);
@@ -5091,6 +5213,7 @@ mod tests {
             .push(crate::favorites::Entry::Path(path));
         app.favorites.set_file(tmp.path().join("favorites.toml"));
         app.fav_cursor = 0;
+        app.fav_edit = true;
 
         press(&mut app, KeyCode::Char('J'), KeyModifiers::SHIFT);
         assert_eq!(app.favorites.len(), 2, "no gap was opened");
@@ -5259,6 +5382,9 @@ mod tests {
         }
         app.disks = fake_disks(tmp.path());
         app.fav_cursor = 1;
+        // Reaching Disks is a deliberate step: browse mode goes there directly
+        // from the last bookmark, arranging mode only after the gap is full.
+        app.fav_edit = true;
 
         for _ in 0..=(MAX_TRAILING_BLANKS) {
             press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
@@ -5346,6 +5472,7 @@ mod tests {
                 .push(crate::favorites::Entry::Path(path));
         }
         app.fav_cursor = 2;
+        app.fav_edit = true;
 
         press(&mut app, KeyCode::PageUp, KeyModifiers::NONE);
         assert_eq!(app.fav_cursor, 1, "PageUp did not move the row");
@@ -5391,5 +5518,153 @@ mod tests {
 
         app.run_menu_item(MenuItem::Settings, 0, None);
         assert!(app.settings_menu, "the menu did not open");
+    }
+
+    // ---- arranging mode (ADR-068) ----
+
+    /// Sidebar with a bookmark, a separator, a blank and a bookmark.
+    fn arranging_app(tmp: &Path) -> App {
+        let mut app = favourites_app(tmp);
+        app.favorites.entries.clear();
+        for entry in [
+            crate::favorites::Entry::Path(tmp.join("a")),
+            crate::favorites::Entry::Separator("Group".to_string()),
+            crate::favorites::Entry::Blank,
+            crate::favorites::Entry::Path(tmp.join("b")),
+        ] {
+            app.favorites.entries.push(entry);
+        }
+        app.favorites.set_file(tmp.join("favorites.toml"));
+        app.fav_cursor = 0;
+        app
+    }
+
+    #[test]
+    fn browsing_skips_separators_and_blanks() {
+        // The cursor jumping onto every caption was the complaint: in browse
+        // mode it must visit bookmarks only, so Enter always has a target.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = arranging_app(tmp.path());
+
+        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(app.fav_cursor, 3, "the cursor must land on the bookmark");
+
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::NONE);
+        assert_eq!(app.fav_cursor, 0, "back to the first bookmark");
+    }
+
+    #[test]
+    fn arranging_visits_every_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = arranging_app(tmp.path());
+
+        press(&mut app, KeyCode::Char('E'), KeyModifiers::NONE);
+        assert!(app.fav_edit, "E did not enter arranging mode");
+        assert!(app.status.contains("Arranging"));
+
+        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(app.fav_cursor, 1, "the separator is a row in edit mode");
+        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(app.fav_cursor, 2, "the blank is a row in edit mode");
+        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(app.fav_cursor, 3);
+
+        // Leaving edit mode moves the cursor off a non-target.
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char('E'), KeyModifiers::NONE);
+        assert!(!app.fav_edit, "E did not leave arranging mode");
+        assert!(
+            app.favorites.entries[app.fav_cursor].path().is_some(),
+            "the cursor stayed on a non-target: {:?}",
+            app.favorites.entries[app.fav_cursor]
+        );
+    }
+
+    #[test]
+    fn moving_and_deleting_are_arranging_only() {
+        // In browse mode `Del` on a bookmark would be a surprise in a list that
+        // is meant for navigating, so both actions say where they live.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = arranging_app(tmp.path());
+        let before = app.favorites.entries.clone();
+
+        press(&mut app, KeyCode::Char('J'), KeyModifiers::SHIFT); // FavoriteDown
+        assert_eq!(app.favorites.entries, before, "a row moved in browse mode");
+        assert!(app.status.contains("arranging"), "status: {}", app.status);
+
+        press(&mut app, KeyCode::Delete, KeyModifiers::NONE);
+        assert_eq!(app.favorites.entries, before, "a row was removed");
+        assert!(app.status.contains("arranging"), "status: {}", app.status);
+
+        // In arranging mode both work.
+        press(&mut app, KeyCode::Char('E'), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char('J'), KeyModifiers::SHIFT);
+        assert_ne!(
+            app.favorites.entries, before,
+            "a row did not move in arranging mode"
+        );
+        press(&mut app, KeyCode::Delete, KeyModifiers::NONE);
+        assert_eq!(app.favorites.len(), before.len() - 1);
+    }
+
+    #[test]
+    fn the_sidebar_cursor_accelerates_like_a_panel() {
+        // The sidebar never armed the held-arrow timer, so a held `j` only moved
+        // at the terminal's own repeat rate and felt much slower than a panel.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = favourites_app(tmp.path());
+        app.favorites.entries.clear();
+        for index in 0..40 {
+            let path = tmp.path().join(format!("d{index:02}"));
+            fs::create_dir_all(&path).unwrap();
+            app.favorites
+                .entries
+                .push(crate::favorites::Entry::Path(path));
+        }
+        app.releases_seen = true;
+        app.fav_cursor = 0;
+
+        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(app.fav_cursor, 1, "one press is one step");
+        assert!(app.held_arrow.is_some(), "the arrow was not armed");
+
+        // Pretend the key stays down.
+        app.held_arrow = Some((
+            KeyCode::Char('j'),
+            Instant::now() - Duration::from_millis(500),
+        ));
+        app.last_arrow_activity = Some(Instant::now());
+        let mut moves = 0;
+        for _ in 0..30 {
+            if app.tick_key_repeat() {
+                moves += 1;
+            }
+            app.last_auto_repeat = app
+                .last_auto_repeat
+                .map(|last| last - Duration::from_millis(100));
+        }
+        assert!(
+            moves > 5,
+            "the sidebar cursor produced only {moves} repeats"
+        );
+        assert!(app.fav_cursor > 1, "the sidebar cursor did not advance");
+    }
+
+    #[test]
+    fn the_sidebar_repeat_does_not_scroll_the_panels() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = favourites_app(tmp.path());
+        app.releases_seen = true;
+        let panel_cursor = app.panels[0].cursor;
+        app.held_arrow = Some((KeyCode::Down, Instant::now() - Duration::from_millis(500)));
+        app.last_arrow_activity = Some(Instant::now());
+
+        app.tick_key_repeat();
+
+        assert_eq!(
+            app.panels[0].cursor, panel_cursor,
+            "a held arrow in the sidebar moved the panel cursor"
+        );
     }
 }

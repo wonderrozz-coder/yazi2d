@@ -1563,3 +1563,50 @@ separator), because the bug is in the shared path.
 
 **Consequences:** Names can be typed with capitals in every terminal. The
 companion fix in ADR-064 handles the same disagreement for key *bindings*.
+
+## ADR-068 — Browsing and arranging are separate sidebar modes
+
+**Status:** accepted (2026-11-13, `0.6.10`)
+
+**Context:** `0.6.9` made every sidebar row a cursor stop so separators and blanks
+could be moved. That fixed arranging but broke browsing: the cursor jumped onto
+captions and empty rows, so `Enter` could land on a row that does nothing, and
+the movement itself felt erratic. Browsing and arranging are different jobs and
+they were sharing one key map.
+
+**Decision:** Two modes, `E` toggles.
+
+* **Browse** (default): the cursor visits only rows that open something, so
+  `Enter` always has a target and the arrows never land on a caption. A step
+  down from the last bookmark goes to the mounted volumes.
+* **Arrange** (`E`): every row is a stop, including separators and blanks.
+  `K`/`J` (and `PgUp`/`PgDn`) move a row, `Del` removes it, `S` adds a
+  separator, and stepping below the last row opens a blank. A step past
+  `MAX_TRAILING_BLANKS` blanks enters the volumes after trimming the padding.
+
+Moving and deleting are refused in browse mode with a status hint rather than
+silently acting on a bookmark — the same reasoning that once moved the
+settings key out of reach of a stray key press.
+
+**Consequences:** The mode has to be visible, so the sidebar title reads
+`Favorites · arranging` and the footer swaps its chips. Two behaviours that used
+to be one key map are now two explicit states, which is what makes "the cursor
+skips the decorations" and "I can move the decorations" both true.
+
+## ADR-069 — The sidebar accelerates like a panel
+
+**Status:** accepted (2026-11-13, `0.6.10`)
+
+**Context:** A held arrow in the sidebar moved at the terminal's own repeat rate,
+which felt much slower than a panel. `arm_arrow` was only called from
+`handle_panel_key`; the favorites branch returned before it. Worse, when the
+repeat *did* fire, `tick_key_repeat` moved the active panel's cursor — the
+sidebar's cursor never moved at all.
+
+**Decision:** `handle_favorites_key` arms the held arrow too, and
+`tick_key_repeat` routes to `move_favorite` when the sidebar has focus, using the
+same acceleration curve and step growth as a panel.
+
+**Consequences:** One cursor speed everywhere. The held-arrow path now has two
+destinations, so the focus check is the single place that decides which; a test
+asserts a sidebar repeat never moves the panel cursor.
