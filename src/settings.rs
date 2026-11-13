@@ -56,6 +56,12 @@ pub enum Action {
     FavoriteUp,
     /// Move the highlighted bookmark (or separator) down one row.
     FavoriteDown,
+    /// Add a named separator at the cursor (arranging mode).
+    FavoriteSeparator,
+    /// Add an empty row at the cursor (arranging mode).
+    FavoriteBlank,
+    /// Toggle arranging mode in the sidebar.
+    FavoriteArrange,
 }
 
 impl Action {
@@ -65,7 +71,7 @@ impl Action {
     /// both slots are editable. If a user clears both, the menu stays reachable
     /// by right-clicking a row — a pointer, not a key, so a binding mistake can
     /// never lock the app out of its own settings.
-    pub const ALL: [Action; 32] = [
+    pub const ALL: [Action; 35] = [
         Action::Quit,
         Action::Help,
         Action::Copy,
@@ -97,6 +103,9 @@ impl Action {
         Action::Cancel,
         Action::FavoriteUp,
         Action::FavoriteDown,
+        Action::FavoriteSeparator,
+        Action::FavoriteBlank,
+        Action::FavoriteArrange,
         Action::Settings,
     ];
 
@@ -136,6 +145,9 @@ impl Action {
             Action::Cancel => "cancel",
             Action::FavoriteUp => "favorite_up",
             Action::FavoriteDown => "favorite_down",
+            Action::FavoriteSeparator => "favorite_separator",
+            Action::FavoriteBlank => "favorite_blank",
+            Action::FavoriteArrange => "favorite_arrange",
         }
     }
 
@@ -174,6 +186,9 @@ impl Action {
             Action::Cancel => "Cancel / clear",
             Action::FavoriteUp => "Move bookmark up",
             Action::FavoriteDown => "Move bookmark down",
+            Action::FavoriteSeparator => "Add separator",
+            Action::FavoriteBlank => "Add empty row",
+            Action::FavoriteArrange => "Arrange favorites",
         }
     }
 
@@ -257,6 +272,12 @@ impl Action {
             Action::FavoriteDown => [
                 Some(KeySpec::code(KeyCode::PageDown)),
                 Some(KeySpec::plain_char('J')),
+            ],
+            Action::FavoriteSeparator => [Some(KeySpec::plain_char('S')), None],
+            Action::FavoriteBlank => [Some(KeySpec::plain_char('B')), None],
+            Action::FavoriteArrange => [
+                Some(KeySpec::plain_char('E')),
+                Some(KeySpec::plain_char('e')),
             ],
             Action::Confirm => [None, None],
             // Both slots are editable now: the overlay's own keys are handled by
@@ -364,6 +385,7 @@ fn action_rank(action: Action) -> u8 {
         Action::ColourMenu => 23,
         Action::Confirm | Action::Cancel => 26,
         Action::FavoriteUp | Action::FavoriteDown => 27,
+        Action::FavoriteSeparator | Action::FavoriteBlank | Action::FavoriteArrange => 28,
     }
 }
 

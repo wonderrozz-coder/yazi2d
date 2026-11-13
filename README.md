@@ -369,14 +369,16 @@ loads.
   skipped, so `Enter` always opens what is under the cursor. `Enter`/`→` open,
   `Ctrl+B` adds, `E` starts arranging.
 - **Arrange** (`Favorites · arranging` in the title): `↑↓` stop on **every** row.
-  `PgUp`/`PgDn` (or `K`/`J`) move the row, `S` adds a separator, `Del` removes,
-  `↓` below the last row opens a blank (so a bookmark can be pulled down and left
-  there), and `E` returns to browsing.
+  `PgUp`/`PgDn` (or `K`/`J`) move the row, `S` adds a separator, `B` adds an
+  empty row, `Del` removes, and `E` returns to browsing. The empty row is
+  inserted right after the cursor and behaves like any other row: it can be
+  moved and deleted.
 
 Moving and deleting work only while arranging; in browse mode those keys point at
 `E` instead of acting on a bookmark. Trailing blanks are trimmed when the cursor
-moves into the Disks section. A flat `favorites = ["/a", "/b"]` list from older
-versions still loads.
+moves into the Disks section. Every one of those keys is a default — the footer
+chips are built from your bindings, so they follow a rebind. A flat
+`favorites = ["/a", "/b"]` list from older versions still loads.
 
 **Mounted volumes** sit under the bookmarks and share the same cursor: `↓` past
 the last bookmark steps into the Disks section, `↑↓` walk the volumes, `Enter`
@@ -922,12 +924,15 @@ path = "/Users/me/notes.md"     # файлы тоже можно добавля�
   курсором. `Enter`/`→` — перейти, `Ctrl+B` — добавить, `E` — редактировать.
 - **Редактирование** (`Favorites · arranging` в заголовке): `↑↓` останавливаются
   на **каждой** строке. `PgUp`/`PgDn` (или `K`/`J`) — двигать строку, `S` —
-  добавить сепаратор, `Del` — удалить, `↓` с последней строки открывает пустую
-  (так закладку можно опустить вниз и оставить промежуток), `E` — выйти.
+  добавить сепаратор, `B` — добавить пустую строку, `Del` — удалить, `E` — выйти.
+  Пустая строка вставляется сразу после курсора и ведёт себя как обычная: её
+  можно двигать и удалять.
 
 Движение и удаление работают только в режиме редактирования: в просмотре они
 подсказывают нажать `E`. Хвостовые пустые строки убираются, когда курсор уходит
-в раздел дисков. Старый плоский список `favorites = ["/a", "/b"]` тоже читается.
+в раздел дисков. Все эти клавиши — значения по умолчанию; подсказки в футере
+строятся из ваших привязок, поэтому после переназначения показывают новое.
+Старый плоский список `favorites = ["/a", "/b"]` тоже читается.
 
 **Смонтированные диски** показаны внизу сайдбара, сразу под избранным, и это
 часть той же навигации: `↓` с последней закладки переводит курсор на первый

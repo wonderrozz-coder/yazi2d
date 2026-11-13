@@ -251,7 +251,7 @@ Detailed invariants and data flow: `docs/ARCHITECTURE.md`.
 - The sidebar has **two modes** (`E`, ADR-068). Browse: the cursor visits only
   rows that open something, so `Enter` always has a target. Arrange: every row
   is a stop, so separators and blanks can be moved (`K`/`J`, `PgUp`/`PgDn`) and
-  removed (`Del`), and `↓` below the last row opens a blank — the arranging
+  removed (`Del`), and `Add empty row` (`B`) inserts a blank — the arranging
   space that lets a bookmark be left anywhere. Moving and deleting are refused
   in browse mode with a status hint. The mode must stay visible: title
   `Favorites · arranging`, footer chips per mode.
@@ -263,6 +263,11 @@ Detailed invariants and data flow: `docs/ARCHITECTURE.md`.
 - A held arrow must accelerate in the sidebar too (ADR-069): `handle_favorites_key`
   arms it, and `tick_key_repeat` routes to `move_favorite` when the sidebar has
   focus. A sidebar repeat must never move a panel cursor.
+- Sidebar commands are `Action`s, never hard-coded keys — `Add separator`,
+  `Add empty row`, `Arrange favorites`, `Move bookmark up/down`. The footer
+  builds its chips from the resolved bindings and `chip_key` spells out
+  Ctrl/Alt/Shift/Cmd, so a chip always names a key that works (ADR-070). Never
+  write a literal `"Ctrl+B"`-style hint: add an `Action` instead.
 - `Ctrl+D`, `Shift+Tab` and `§` all focus the sidebar. They are ordinary
   bindings — `Ctrl+D` and `Shift+Tab` are the two default slots, `§` works
   because it can be assigned like any character. Every key printed in

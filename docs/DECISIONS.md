@@ -1610,3 +1610,42 @@ same acceleration curve and step growth as a panel.
 **Consequences:** One cursor speed everywhere. The held-arrow path now has two
 destinations, so the focus check is the single place that decides which; a test
 asserts a sidebar repeat never moves the panel cursor.
+
+## ADR-070 — Every footer chip comes from the binding list
+
+**Status:** accepted (2026-11-13, `0.6.11`)
+
+**Context:** The sidebar footer was a hard-coded vector of strings
+(`"PgUp/PgDn · K/J"`, `"S"`, `"E"`). Rebinding those keys left the chips
+advertising keys that no longer did anything, and the panel footer — which
+already generated chips from `Settings::shortcuts()` — disagreed with it. Worse,
+`chip_key` dropped modifiers entirely, so the sidebar printed `B` for `Ctrl+B`:
+a hint for a key that does nothing.
+
+**Decision:** The sidebar builds its chips the same way the panel does, from the
+resolved shortcuts, filtered by the current mode. `Add separator`, `Add empty
+row` and `Arrange favorites` became real `Action`s with two slots each, so they
+are rebindable like everything else (ADR-063). `chip_key` now spells out
+Ctrl/Alt/Shift/Cmd prefixes, skipping `Shift` for a capital letter (the capital
+already carries it).
+
+**Consequences:** One source of truth for hints and for dispatch. Anything a chip
+shows is a binding, and anything a binding says changes the chip. `Settings`
+also moved up the footer's priority order: it is the way into the whole key map,
+so it must not be the first chip cut on a narrow screen.
+
+## ADR-071 — Opening a gap is an action, not an emergent effect
+
+**Status:** accepted (2026-11-13, `0.6.11`)
+
+**Context:** `0.6.9` introduced blank rows as the arranging space, but the only
+way to get one was to push a row past the end — which required knowing that
+pushing past the end did that. A feature that has to be guessed is not a feature.
+
+**Decision:** `Action::FavoriteBlank` (`B` by default) inserts a blank
+immediately after the cursor. The blank is an ordinary row: `K`/`J` moves it,
+`Del` removes it. Dragging past the end still works, so both the direct and the
+incidental path lead to the same kind of row.
+
+**Consequences:** The gap is one key press away and shows up in the footer and in
+`Ctrl+E`, which is where a user looks to find out what exists.

@@ -1869,6 +1869,21 @@ impl App {
             }
             // Reordering belongs to the sidebar; in a panel these keys do
             // nothing so they cannot move a bookmark by accident.
+            Action::FavoriteSeparator => {
+                if self.focus == Focus::Favorites && self.fav_edit {
+                    self.begin_separator();
+                }
+            }
+            Action::FavoriteBlank => {
+                if self.focus == Focus::Favorites && self.fav_edit {
+                    self.insert_blank_after_cursor();
+                }
+            }
+            Action::FavoriteArrange => {
+                if self.focus == Focus::Favorites && !self.disks_focus {
+                    self.toggle_fav_edit();
+                }
+            }
             Action::FavoriteUp => {
                 if self.focus == Focus::Favorites && !self.disks_focus {
                     self.shift_favorite(-1);
@@ -2103,6 +2118,28 @@ impl App {
                     self.help = true;
                     return;
                 }
+                Action::FavoriteArrange => {
+                    if !self.disks_focus {
+                        self.toggle_fav_edit();
+                    }
+                    return;
+                }
+                Action::FavoriteSeparator => {
+                    if self.fav_edit {
+                        self.begin_separator();
+                    } else {
+                        self.status = "Separators live in arranging mode: press E".to_string();
+                    }
+                    return;
+                }
+                Action::FavoriteBlank => {
+                    if self.fav_edit {
+                        self.insert_blank_after_cursor();
+                    } else {
+                        self.status = "Empty rows live in arranging mode: press E".to_string();
+                    }
+                    return;
+                }
                 _ => {}
             }
         }
@@ -2124,13 +2161,10 @@ impl App {
                 self.fav_cursor = self.favorites.len().saturating_sub(1);
                 self.select_favorite_row();
             }
-            // Both cases add a separator here. `s` is the sort menu in a panel,
-            // but the sidebar has nothing to sort, so it used to be a silent
-            // no-op — indistinguishable from "the separator key is broken".
-            KeyCode::Char('S') | KeyCode::Char('s') => self.begin_separator(),
-            // `E` toggles arranging mode: in it every row is a stop, so
-            // separators and blanks can be moved and deleted.
-            KeyCode::Char('E') | KeyCode::Char('e') => self.toggle_fav_edit(),
+            // `S`, `B` and `E` are ordinary actions (`Add separator`,
+            // `Add empty row`, `Arrange favorites`), so they are dispatched from
+            // the binding list above and their chips in the footer match
+            // whatever the user assigned.
             // Enter *and* `→`/`l` open the bookmark: `→` used to work and must
             // keep working, `Enter` is the discoverable one.
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
@@ -2427,6 +2461,21 @@ impl App {
             buffer: String::new(),
         });
         self.status = "Separator title · Enter to add after the cursor · Esc cancels".to_string();
+    }
+
+    /// Insert an empty row right after the cursor.
+    ///
+    /// This is the direct way to open a gap: dragging a bookmark down is the
+    /// other one, but that requires knowing dragging exists. A blank is a row
+    /// like any other, so it can then be moved or deleted with the same keys.
+    fn insert_blank_after_cursor(&mut self) {
+        let at = (self.fav_cursor + 1).min(self.favorites.len());
+        self.favorites
+            .entries
+            .insert(at, crate::favorites::Entry::Blank);
+        self.fav_cursor = at;
+        self.persist_favorites();
+        self.status = "Empty row added · K/J moves it, Del removes it".to_string();
     }
 
     fn do_add_separator(&mut self, title: &str) {
@@ -5133,6 +5182,7 @@ mod tests {
         }
         app.favorites.set_file(tmp.path().join("favorites.toml"));
         app.fav_cursor = 0;
+        app.fav_edit = true; // separators are added while arranging
 
         press(&mut app, KeyCode::Char('S'), KeyModifiers::NONE);
         assert!(matches!(app.prompt, Some(Prompt::Separator { .. })));
@@ -5267,18 +5317,14 @@ mod tests {
     }
 
     #[test]
-    fn s_in_the_panels_explains_where_separators_live() {
+    fn the_separator_key_does_nothing_in_a_panel() {
+        // `S` is `Add separator`, a sidebar action. In a panel it is inert, which
+        // is what the settings menu implies; the sidebar footer is the place
+        // that mentions it.
         let tmp = tempfile::tempdir().unwrap();
         let mut app = app_for(tmp.path(), tmp.path());
-
         press(&mut app, KeyCode::Char('S'), KeyModifiers::NONE);
-
-        assert!(app.prompt.is_none(), "no prompt outside the sidebar");
-        assert!(
-            app.status.contains("Favorites"),
-            "the status must point at the sidebar: {}",
-            app.status
-        );
+        assert!(app.prompt.is_none(), "S opened a prompt in a panel");
     }
 
     // ---- regression: focus keys, disks, sidebar targets ----
@@ -5357,6 +5403,7 @@ mod tests {
             let mut app = favourites_app(tmp.path());
             app.favorites.set_file(tmp.path().join("favorites.toml"));
             app.fav_cursor = 0;
+            app.fav_edit = true;
 
             press(&mut app, key, KeyModifiers::NONE);
             assert!(
@@ -5666,5 +5713,94 @@ mod tests {
             app.panels[0].cursor, panel_cursor,
             "a held arrow in the sidebar moved the panel cursor"
         );
+    }
+
+    #[test]
+    fn a_blank_row_can_be_added_directly() {
+        // Opening a gap used to require dragging a row down and noticing that a
+        // blank appeared. `Add empty row` makes it explicit.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = arranging_app(tmp.path());
+        app.fav_edit = true;
+        app.fav_cursor = 0;
+        let before = app.favorites.len();
+
+        press(&mut app, KeyCode::Char('B'), KeyModifiers::NONE);
+
+        assert_eq!(app.favorites.len(), before + 1);
+        assert!(
+            app.favorites.entries[1].is_blank(),
+            "the blank was not inserted after the cursor: {:?}",
+            app.favorites.entries
+        );
+        assert_eq!(app.fav_cursor, 1, "the cursor did not follow the new row");
+        assert!(app.status.contains("Empty row"), "status: {}", app.status);
+
+        // And it is a normal row: movable and removable.
+        press(&mut app, KeyCode::Delete, KeyModifiers::NONE);
+        assert_eq!(app.favorites.len(), before);
+    }
+
+    #[test]
+    fn adding_a_blank_needs_arranging_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = arranging_app(tmp.path());
+        let before = app.favorites.len();
+
+        press(&mut app, KeyCode::Char('B'), KeyModifiers::NONE);
+        assert_eq!(
+            app.favorites.len(),
+            before,
+            "a blank was added while browsing"
+        );
+        assert!(app.status.contains("arranging"), "status: {}", app.status);
+    }
+
+    #[test]
+    fn adding_a_separator_needs_arranging_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = arranging_app(tmp.path());
+
+        press(&mut app, KeyCode::Char('S'), KeyModifiers::NONE);
+        assert!(app.prompt.is_none(), "S opened a prompt while browsing");
+        assert!(app.status.contains("arranging"), "status: {}", app.status);
+
+        press(&mut app, KeyCode::Char('E'), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char('S'), KeyModifiers::NONE);
+        assert!(matches!(app.prompt, Some(Prompt::Separator { .. })));
+    }
+
+    #[test]
+    fn the_sidebar_keys_are_rebindable_actions() {
+        // The chips in the sidebar footer were hard-coded strings, so they kept
+        // showing `K`/`J` long after the keys had been rebound. Every sidebar
+        // command is a real action now.
+        use crate::settings::{Action, KeySpec};
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = arranging_app(tmp.path());
+        app.settings
+            .assign(Action::FavoriteDown, 1, KeySpec::plain_char('n'))
+            .unwrap();
+        app.settings
+            .assign(Action::FavoriteBlank, 0, KeySpec::plain_char('z'))
+            .unwrap();
+        app.fav_edit = true;
+        app.fav_cursor = 0;
+
+        // The rebound key works…
+        press(&mut app, KeyCode::Char('n'), KeyModifiers::NONE);
+        assert_ne!(
+            app.favorites.entries[0].label(),
+            "a",
+            "n did not move the row"
+        );
+        // …and the old one no longer fires.
+        let before = app.favorites.entries.clone();
+        press(&mut app, KeyCode::Char('J'), KeyModifiers::SHIFT);
+        assert_eq!(app.favorites.entries, before, "J still moved the row");
+
+        // The new blank key works too.
+        press(&mut app, KeyCode::Char('z'), KeyModifiers::NONE);
+        assert!(app.favorites.entries.iter().any(|entry| entry.is_blank()));
     }
 }

@@ -1380,6 +1380,9 @@ fn short_label(action: crate::settings::Action) -> &'static str {
         A::Cancel => "cancel",
         A::FavoriteUp => "move up",
         A::FavoriteDown => "move down",
+        A::FavoriteSeparator => "separator",
+        A::FavoriteBlank => "gap",
+        A::FavoriteArrange => "arrange",
     }
 }
 
@@ -1400,25 +1403,26 @@ fn footer_rank(action: crate::settings::Action) -> u8 {
         A::ToggleHidden => 9,
         A::SelectAll => 10,
         A::BulkRename => 11,
-        A::Refresh => 12,
-        A::OpenInOther => 13,
+        A::Refresh => 13,
+        A::OpenInOther => 14,
         A::ContextMenu => 26,
-        A::PreviewThere => 14,
-        A::AddFavorite => 15,
-        A::FocusFavorites => 16,
-        A::ToggleSidebar => 17,
+        A::PreviewThere => 15,
+        A::AddFavorite => 16,
+        A::FocusFavorites => 17,
+        A::ToggleSidebar => 18,
         A::CopyPath => 21,
         A::CopyName => 22,
         A::CopySelection => 23,
         A::SwitchPanel => 24,
-        A::ColourMenu => 18,
-        A::Settings => 19,
+        A::ColourMenu => 19,
+        A::Settings => 12,
         A::Help => 20,
         // `Ctrl+C` is the terminal's interrupt and `Enter`/`Esc` only confirm a
         // prompt; `hints_for` drops all three before ranking.
         A::Confirm | A::Cancel | A::Quit => 250,
         // Sidebar-only actions stay out of a panel footer.
         A::FavoriteUp | A::FavoriteDown => 251,
+        A::FavoriteSeparator | A::FavoriteBlank | A::FavoriteArrange => 252,
     }
 }
 
@@ -1468,24 +1472,6 @@ fn hints_for(app: &App, modifiers: crossterm::event::KeyModifiers) -> Vec<Hint> 
         }
     }
 
-    // `Action::Settings` is deliberately absent from `Action::ALL`, because the
-    // settings menu must stay reachable, so its chips are added by hand.
-    if modifiers == M::CONTROL {
-        let specs: Vec<KeySpec> = (0..2)
-            .filter_map(|slot| app.settings.stored_slots(crate::settings::Action::Settings)[slot])
-            .collect();
-        if !specs.is_empty() {
-            keys.insert(
-                crate::settings::Action::Settings,
-                specs.iter().map(chip_key).collect(),
-            );
-            order.push((
-                footer_rank(crate::settings::Action::Settings),
-                crate::settings::Action::Settings,
-            ));
-        }
-    }
-
     // A narrow footer must show the workhorses first, not `F6 move`.
     order.sort_by_key(|(rank, action)| (*rank, action.id()));
 
@@ -1527,16 +1513,30 @@ fn chip_key(spec: &KeySpec) -> String {
         other => format!("{other:?}"),
     };
 
-    // Modifiers are already the topic of the screen, so they are not repeated
-    // on every chip; only Shift on an arrow (a different gesture) stays.
-    if spec
-        .modifiers
-        .contains(crossterm::event::KeyModifiers::SHIFT)
-        && matches!(spec.code, KeyCode::Left | KeyCode::Right | KeyCode::Tab)
-    {
-        return format!("Shift+{name}");
+    // A modifier is part of the key, not decoration: dropping it made the
+    // sidebar advertise `B` for `Ctrl+B`, which does nothing. The panel footer
+    // is drawn per modifier screen, but the sidebar chips are a single list, so
+    // the prefix has to be spelled out here.
+    use crossterm::event::KeyModifiers as M;
+    let mut prefix = String::new();
+    if spec.modifiers.contains(M::CONTROL) {
+        prefix.push_str("Ctrl+");
     }
-    name
+    if spec.modifiers.contains(M::ALT) {
+        prefix.push_str("Alt+");
+    }
+    if spec.modifiers.contains(M::SHIFT) {
+        // A shifted *letter* arrives as the capital already, so `Shift+J` would
+        // render as `Shift+J` twice.
+        let capital_letter = matches!(spec.code, KeyCode::Char(c) if c.is_alphabetic());
+        if !capital_letter || matches!(spec.code, KeyCode::Left | KeyCode::Right | KeyCode::Tab) {
+            prefix.push_str("Shift+");
+        }
+    }
+    if spec.modifiers.contains(M::SUPER) {
+        prefix.push_str("Cmd+");
+    }
+    format!("{prefix}{name}")
 }
 
 /// Width a chip occupies: key, separator, label, padding.
@@ -1560,53 +1560,52 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     );
 
     let hints = if app.focus == Focus::Favorites {
-        // The sidebar has two modes: browsing visits bookmarks only, arranging
-        // (`E`) visits every row so separators and blanks can be moved. The
-        // footer shows the mode's own keys, so what is on screen is what the
-        // keys do.
-        let mut hints = if app.fav_edit {
-            vec![
-                Hint {
-                    key: "↑↓".to_string(),
-                    label: "every row",
-                },
-                Hint {
-                    key: "PgUp/PgDn · K/J".to_string(),
-                    label: "move row",
-                },
-                Hint {
-                    key: "S".to_string(),
-                    label: "separator",
-                },
-                Hint {
-                    key: "Del".to_string(),
-                    label: "remove",
-                },
-                Hint {
-                    key: "E".to_string(),
-                    label: "done",
-                },
+        // Chips are built from the resolved binding list, so a rebound key
+        // changes its chip (ADR-070). The sidebar has two modes and each shows
+        // only its own actions.
+        let keys_of = |action: Action| {
+            let label = app
+                .settings
+                .shortcuts()
+                .into_iter()
+                .filter(|shortcut| shortcut.action == action)
+                .map(|shortcut| chip_key(&shortcut.spec))
+                .fold(Vec::new(), |mut acc: Vec<String>, key| {
+                    if !acc.contains(&key) {
+                        acc.push(key);
+                    }
+                    acc
+                });
+            label.join("/")
+        };
+
+        let actions: &[(Action, &str)] = if app.fav_edit {
+            &[
+                (Action::FavoriteArrange, "done"),
+                (Action::FavoriteUp, "up"),
+                (Action::FavoriteDown, "down"),
+                (Action::FavoriteSeparator, "separator"),
+                (Action::FavoriteBlank, "gap"),
+                (Action::Delete, "remove"),
             ]
         } else {
-            vec![
-                Hint {
-                    key: "↑↓".to_string(),
-                    label: "browse",
-                },
-                Hint {
-                    key: "Enter/→".to_string(),
-                    label: "open",
-                },
-                Hint {
-                    key: "Ctrl+B".to_string(),
-                    label: "add",
-                },
-                Hint {
-                    key: "E".to_string(),
-                    label: "arrange",
-                },
+            &[
+                (Action::OpenHere, "open"),
+                (Action::AddFavorite, "add"),
+                (Action::FavoriteArrange, "arrange"),
             ]
         };
+
+        let mut hints = vec![Hint {
+            key: "↑↓".to_string(),
+            label: if app.fav_edit { "every row" } else { "browse" },
+        }];
+        for (action, label) in actions {
+            let key = keys_of(*action);
+            if !key.is_empty() {
+                hints.push(Hint { key, label });
+            }
+        }
         // The exit key is whatever the user bound, not a hard-coded Esc.
         for shortcut in app.settings.shortcuts() {
             if shortcut.action == Action::FocusFavorites {
@@ -3262,5 +3261,47 @@ mod tests {
                 .len(),
             "the same open label appears twice: {labels:?}"
         );
+    }
+
+    #[test]
+    fn the_sidebar_footer_follows_the_rebound_keys() {
+        // Reported: the sidebar kept advertising `K`/`J` after those keys were
+        // moved, because its chips were hard-coded strings (ADR-070).
+        use crate::settings::{Action, KeySpec};
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = default_app(tmp.path());
+        app.favorites.entries.clear();
+        app.settings
+            .assign(Action::FavoriteDown, 1, KeySpec::plain_char('n'))
+            .unwrap();
+        app.settings
+            .assign(Action::FavoriteBlank, 0, KeySpec::plain_char('z'))
+            .unwrap();
+        app.settings
+            .assign(Action::FavoriteArrange, 0, KeySpec::plain_char('a'))
+            .unwrap();
+        app.focus = Focus::Favorites;
+        app.fav_edit = true;
+
+        let line = footer_line(&mut app, 200, 30);
+        assert!(
+            line.contains("N"),
+            "the rebound down key is missing: {line:?}"
+        );
+        assert!(line.contains("Z"), "the blank key is missing: {line:?}");
+        assert!(line.contains("A"), "the arrange key is missing: {line:?}");
+        assert!(
+            !line.contains("J"),
+            "the old key is still advertised: {line:?}"
+        );
+
+        // Browse mode shows its own set, also from the bindings.
+        app.fav_edit = false;
+        let line = footer_line(&mut app, 200, 30);
+        assert!(
+            line.contains("Ctrl+B"),
+            "add chip lost its modifier: {line:?}"
+        );
+        assert!(line.contains("A"), "arrange chip missing: {line:?}");
     }
 }
