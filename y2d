@@ -186,7 +186,7 @@ cmd_update() {
 # Dropbox) strips the executable bit from files, and a symlink to such a file
 # cannot be started. Inside the repo the binary is copied instead.
 link_binary() {
-  local bin="$1"
+  local bin="${1:-}"
   if [ -z "$bin" ]; then
     bin="$(binary release)"
   fi
