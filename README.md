@@ -100,8 +100,8 @@ bash y2d setup
 some sync clients and some `git` setups drop. Once it has run, plain `y2d` works
 from any directory.
 
-If Rust is missing the script stops with a one-line instruction. To install it
-first, or to do it yourself:
+If Rust is missing the script installs it through rustup and continues — no
+separate step. To install it yourself first:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
@@ -573,20 +573,18 @@ two-panel model). No Yazi source is included.
 Держать в голове длинные команды не нужно — в репозитории лежит скрипт `y2d`,
 который делает всё сам и на **macOS, и на Linux**.
 
-Один раз на машине:
+Один раз на машине — скопируйте три строки целиком. Работают на машине, где
+Rust никогда не ставили: скрипт сам установит его через rustup, если не найдёт.
 
 ```sh
 git clone https://github.com/wonderrozz-coder/yazi2d.git
 cd yazi2d
-y2d setup          # соберёт, поставит приложение и положит `y2d` в PATH
+bash y2d setup     # соберёт, поставит приложение и положит `y2d` в PATH
 ```
 
-Если `./y2d` отвечает `permission denied` (Nextcloud снимает бит исполнения),
-запустите первый раз через bash — дальше работает обычная команда:
-
-```sh
-bash y2d setup
-```
+`bash y2d setup` — намеренно: так команда не зависит от бита исполнения,
+который теряется в синхронизируемых папках и в некоторых настройках git. После
+первого запуска обычная `y2d` работает из любого каталога.
 
 Дальше каждый день:
 
