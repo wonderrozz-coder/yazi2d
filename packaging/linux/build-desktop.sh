@@ -50,20 +50,28 @@ mkdir -p "$DIST"
 cp "$BINARY" "$DIST/$BIN_NAME"
 
 # --- Icon -------------------------------------------------------------------
-# Icon themes want one image per size directory. `convert` (ImageMagick) is not
-# always installed, so a missing tool degrades to copying the source into the
-# largest size and into pixmaps, which every desktop environment also searches.
+# Icon themes look the picture up by size directory: a menu asking for 32x32 or
+# 48x48 does not find a 1024x1024-only icon, and LXQt then shows a blank or
+# generic square. ImageMagick is not installed everywhere (it is not on a stock
+# Arch + LXQt), so when it is missing the source is copied into *every* size
+# directory instead. The file is simply larger than the directory claims; every
+# toolkit scales on load, and the menu entry resolves either way.
 ICON_DIR="$DIST/icons"
+ICON_SIZES="16 24 32 48 64 128 256 512"
 if [ -f "$ICON_SRC" ]; then
-  for size in 128 256 512; do
-    mkdir -p "$ICON_DIR/hicolor/${size}x${size}/apps"
+  resize_icon() {
+    local size="$1" out="$2"
     if command -v magick >/dev/null 2>&1; then
-      magick "$ICON_SRC" -resize "${size}x${size}" \
-        "$ICON_DIR/hicolor/${size}x${size}/apps/$BIN_NAME.png"
+      magick "$ICON_SRC" -resize "${size}x${size}" "$out"
     elif command -v convert >/dev/null 2>&1; then
-      convert "$ICON_SRC" -resize "${size}x${size}" \
-        "$ICON_DIR/hicolor/${size}x${size}/apps/$BIN_NAME.png"
+      convert "$ICON_SRC" -resize "${size}x${size}" "$out"
+    else
+      cp "$ICON_SRC" "$out"
     fi
+  }
+  for size in $ICON_SIZES; do
+    mkdir -p "$ICON_DIR/hicolor/${size}x${size}/apps"
+    resize_icon "$size" "$ICON_DIR/hicolor/${size}x${size}/apps/$BIN_NAME.png"
   done
   mkdir -p "$ICON_DIR/hicolor/1024x1024/apps" "$ICON_DIR/pixmaps"
   cp "$ICON_SRC" "$ICON_DIR/hicolor/1024x1024/apps/$BIN_NAME.png"
@@ -82,7 +90,12 @@ Type=Application
 Name=$APP_NAME
 GenericName=File Manager
 Comment=Dual-pane terminal file manager
-Exec=$BIN_NAME %F
+# `Exec` must not be bare `yazi2d`: the graphical session's PATH is
+# /usr/local/sbin:/usr/local/bin:/usr/bin:..., which does not include
+# ~/.local/bin on most distributions, and the menu entry then fails silently.
+# Wrapping in `sh -lc` prepends the directory the binary was installed into;
+# `\$PATH` is escaped so the *target* shell expands it, not this script.
+Exec=sh -lc "PATH=\\"\$HOME/.local/bin:\$PATH\\" exec $BIN_NAME %F"
 Icon=$BIN_NAME
 Terminal=true
 Categories=Utility;FileManager;System;
@@ -117,14 +130,34 @@ if command -v gtk-update-icon-cache >/dev/null 2>&1; then
   gtk-update-icon-cache -f -t "$DATA/icons/hicolor" >/dev/null 2>&1 || true
 fi
 
+# --- PATH -------------------------------------------------------------------
+# `~/.local/bin` is not on PATH on a stock Arch install (or most distributions),
+# so typing `yazi2d` in a terminal would fail even though the file is installed.
+# A warning is not enough: add it to the profile the login shell actually reads.
+# Only ~/.profile is touched, and only once — it is sourced by bash, zsh and
+# most display managers.
+ensure_path_entry() {
+  local profile="$HOME/.profile"
+  local marker="# added by Yazi2D setup"
+  if [ -f "$profile" ] && grep -qF "$marker" "$profile"; then
+    return 0
+  fi
+  {
+    echo
+    echo "$marker"
+    echo 'case ":$PATH:" in'
+    echo '  *":$HOME/.local/bin:"*) ;;'
+    echo '  *) export PATH="$HOME/.local/bin:$PATH" ;;'
+    echo 'esac'
+  } >> "$profile"
+  echo "Added ~/.local/bin to PATH in $profile"
+}
+
+ensure_path_entry
+
 echo
 echo "Installed: $HOME/.local/bin/$BIN_NAME"
 echo "Menu entry: $DATA/applications/$BIN_NAME.desktop"
-case ":$PATH:" in
-  *":$HOME/.local/bin:"*) ;;
-  *) echo
-     echo "!! $HOME/.local/bin is not on PATH. Add this to your shell profile:"
-     echo "     export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
-esac
 echo
-echo "Start it from the application menu, or type: $BIN_NAME"
+echo "Open a new terminal (or run 'source ~/.profile') and type: $BIN_NAME"
+echo "It is also in the application menu as \"$APP_NAME\"."
