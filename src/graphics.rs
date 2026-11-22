@@ -57,6 +57,9 @@ pub enum Terminal {
 /// Graphics support, resolved once at startup.
 struct Graphics {
     picker: Option<Picker>,
+    /// Encoder for the single-image preview, built with a smaller font size on
+    /// purpose: see [`PREVIEW_SCALE`].
+    preview_picker: Option<Picker>,
     /// Protocol chosen for this terminal; `None` until [`init`] runs.
     protocol: Option<ProtocolType>,
     /// Pixels in one character cell, measured from the terminal.
@@ -67,6 +70,7 @@ thread_local! {
     static GRAPHICS: RefCell<Graphics> = const {
         RefCell::new(Graphics {
             picker: None,
+            preview_picker: None,
             protocol: None,
             cell: FALLBACK_CELL,
         })
@@ -82,6 +86,19 @@ thread_local! {
 /// it should be, while the half-block fallback, which works in cells only,
 /// keeps filling the pane.
 const FALLBACK_CELL: (u16, u16) = (8, 16);
+
+/// Share of the fitted rectangle's pixels the single-image preview is encoded
+/// at.
+///
+/// **Changed in 0.6.15:** this used to be 0.6, on the theory that the terminal
+/// stretches the bitmap into the cell rectangle and only softness would suffer.
+/// That is not what the Kitty protocol does: with a *virtual* placement the
+/// terminal derives the number of cells from the bitmap's own pixel size, so a
+/// 0.6 bitmap painted a picture covering 60 % of the pane. Yazi posts the
+/// bitmap at the full rectangle and lets the terminal scale it down, which is
+/// what happens now — hence 1.0. Kept as a named constant so a future payload
+/// fix has one obvious knob (see ADR-077).
+const PREVIEW_SCALE: f64 = 1.0;
 
 /// Start-up probe.
 ///
@@ -105,12 +122,17 @@ pub fn init() {
     let cell = measured_cell().unwrap_or(FALLBACK_CELL);
     let mut picker = Picker::from_fontsize(cell);
     picker.set_protocol_type(protocol);
+    // The preview encodes into a fraction of the pane's pixels on purpose.
+    let mut preview_picker = Picker::from_fontsize(preview_cell(cell));
+    preview_picker.set_protocol_type(protocol);
 
     crate::logging::info(format!(
-        "image protocol: {} (cell {}×{} px, TERM={:?}, TERM_PROGRAM={:?})",
+        "image protocol: {} (cell {}×{} px, preview {}×{} px, TERM={:?}, TERM_PROGRAM={:?})",
         protocol_name(protocol),
         cell.0,
         cell.1,
+        preview_cell(cell).0,
+        preview_cell(cell).1,
         std::env::var("TERM").unwrap_or_default(),
         std::env::var("TERM_PROGRAM").unwrap_or_default(),
     ));
@@ -118,9 +140,23 @@ pub fn init() {
     GRAPHICS.with(|graphics| {
         let mut graphics = graphics.borrow_mut();
         graphics.picker = Some(picker);
+        graphics.preview_picker = Some(preview_picker);
         graphics.protocol = Some(protocol);
         graphics.cell = cell;
     });
+}
+
+/// Cell size handed to the preview encoder.
+///
+/// The bitmap is sized as `cells × cell`. It must stay at the full cell size:
+/// with a virtual Kitty placement the terminal derives the number of occupied
+/// cells from the bitmap's pixel dimensions, so a shrunken cell paints a
+/// shrunken picture instead of a crisper one. See [`PREVIEW_SCALE`].
+fn preview_cell(cell: (u16, u16)) -> (u16, u16) {
+    (
+        ((cell.0 as f64 * PREVIEW_SCALE).round() as u16).max(1),
+        ((cell.1 as f64 * PREVIEW_SCALE).round() as u16).max(1),
+    )
 }
 
 /// Re-measure the cell size after the window changed.
@@ -143,6 +179,10 @@ pub fn refresh_cell_size() -> bool {
         let protocol = graphics.protocol.unwrap_or(ProtocolType::Halfblocks);
         if let Some(picker) = graphics.picker.as_mut() {
             *picker = Picker::from_fontsize(cell);
+            picker.set_protocol_type(protocol);
+        }
+        if let Some(picker) = graphics.preview_picker.as_mut() {
+            *picker = Picker::from_fontsize(preview_cell(cell));
             picker.set_protocol_type(protocol);
         }
         true
@@ -188,11 +228,6 @@ fn cell_from_window(columns: u16, rows: u16, width: u16, height: u16) -> Option<
         return None;
     }
     Some(cell)
-}
-
-/// Pixels in one cell, for captions that report what is really drawn.
-pub fn cell() -> (u16, u16) {
-    GRAPHICS.with(|graphics| graphics.borrow().cell)
 }
 
 /// Protocol requested through `YAZI2D_IMAGE_PROTOCOL`, if any.
@@ -261,17 +296,25 @@ pub fn native() -> bool {
     protocol() != ProtocolType::Halfblocks
 }
 
-/// Resize a decoded image into a protocol ready to be rendered.
+/// Everything needed to encode an image, detached from the UI thread.
 ///
-/// Returns `None` when graphics were never initialised (tests), so callers can
-/// fall back to the half-block renderer.
-pub fn render(image: DynamicImage, area: Rect, fit: Fit) -> Option<Protocol> {
-    GRAPHICS.with(|graphics| {
-        let graphics = graphics.borrow();
-        let picker = graphics.picker.as_ref()?;
+/// `GRAPHICS` is a `thread_local`, so a worker cannot reach it. This carries a
+/// copy of the picker instead, which is all `new_protocol` needs. Encoding costs
+/// 50–80 ms for a pane-sized payload, so it must not run while drawing.
+#[derive(Clone)]
+pub struct Encoder {
+    picker: Picker,
+    cell: (u16, u16),
+    protocol: ProtocolType,
+}
+
+impl Encoder {
+    /// Encode `image` into a protocol ready to be drawn into `area`.
+    pub fn encode(&self, image: DynamicImage, area: Rect, fit: Fit) -> Option<Protocol> {
+        let encode_cell = self.cell;
         let resize = match fit {
             Fit::Inside => Resize::Fit(Some(FilterType::Lanczos3)),
-            Fit::Fill => Resize::Scale(Some(FilterType::Lanczos3)),
+            Fit::Fill => Resize::Scale(Some(FilterType::Triangle)),
         };
         // `ratatui-image` pads the encoded image to the whole area and then
         // draws it into the fitted rectangle, so passing the pane itself
@@ -280,13 +323,59 @@ pub fn render(image: DynamicImage, area: Rect, fit: Fit) -> Option<Protocol> {
         //
         // Half blocks are the exception: they carry two pixel rows per cell and
         // encode the pane themselves, so they get the area untouched.
-        let size = if graphics.protocol == Some(ProtocolType::Halfblocks) {
+        let size = if self.protocol == ProtocolType::Halfblocks {
             area
         } else {
-            fitted_cells(image.width(), image.height(), area, graphics.cell)
+            fitted_cells(image.width(), image.height(), area, encode_cell)
         };
-        picker.new_protocol(image, size, resize).ok()
+        // A preview fills its pane, so a small picture is blown up to the
+        // pane's pixel size. Lanczos3 on that blow-up cost 50–100 ms per image
+        // on the UI thread while a terminal upscales anyway; a cheaper filter
+        // is indistinguishable there. Only real downscaling, where the filter
+        // decides how much detail survives, keeps Lanczos3.
+        let target_width = (size.width as u32) * encode_cell.0.max(1) as u32;
+        let resize = if target_width > image.width() {
+            match resize {
+                Resize::Scale(_) => Resize::Scale(Some(FilterType::Triangle)),
+                Resize::Fit(_) => Resize::Fit(Some(FilterType::Triangle)),
+                other => other,
+            }
+        } else {
+            resize
+        };
+        self.picker.new_protocol(image, size, resize).ok()
+    }
+}
+
+/// Build an encoder for `fit`, or `None` when graphics are unavailable.
+///
+/// The returned value is `Send`, so the caller may move it to a worker thread.
+pub fn encoder(fit: Fit) -> Option<Encoder> {
+    GRAPHICS.with(|graphics| {
+        let graphics = graphics.borrow();
+        let (picker, cell) = match fit {
+            Fit::Fill => (
+                graphics.preview_picker.as_ref()?,
+                preview_cell(graphics.cell),
+            ),
+            Fit::Inside => (graphics.picker.as_ref()?, graphics.cell),
+        };
+        Some(Encoder {
+            picker: picker.clone(),
+            cell,
+            protocol: graphics.protocol?,
+        })
     })
+}
+
+/// Resize a decoded image into a protocol ready to be rendered.
+///
+/// Test-only: the app now encodes on a worker thread through [`encoder`], so
+/// that the 50–80 ms cost never blocks a frame. Kept because the
+/// fitting/filtering tests below are much easier to read against it.
+#[cfg(test)]
+pub fn render(image: DynamicImage, area: Rect, fit: Fit) -> Option<Protocol> {
+    encoder(fit)?.encode(image, area, fit)
 }
 
 /// The largest cell rectangle inside `area` that keeps the image's aspect.
@@ -374,6 +463,51 @@ mod tests {
         init();
         let encoded = render(image(), Rect::new(0, 0, 40, 20), Fit::Inside);
         assert!(encoded.is_some(), "no protocol even for half blocks");
+    }
+
+    #[test]
+    fn a_preview_fills_the_fitted_rectangle_at_full_resolution() {
+        let _env = fixed_cell();
+        init();
+        // A virtual Kitty placement derives its cell footprint from the
+        // bitmap's own pixel size, so the bitmap must be posted at the full
+        // fitted rectangle. A shrunken cell (0.6, the 0.6.x behaviour) painted a
+        // picture covering 60 % of the pane instead.
+        let area = Rect::new(0, 0, 40, 20);
+        let fill = render(image(), area, Fit::Fill).unwrap();
+        let expected = fitted_cells(120, 80, area, (8, 16));
+        assert_eq!(fill.area(), expected, "preview rectangle changed");
+        assert_eq!(fill.area().width, 40, "preview lost width");
+
+        let cell = preview_cell((8, 16));
+        assert_eq!(
+            cell,
+            (8, 16),
+            "preview cell must stay full size or the picture shrinks"
+        );
+        GRAPHICS.with(|graphics| {
+            let graphics = graphics.borrow();
+            let picker = graphics.preview_picker.as_ref().unwrap();
+            assert_eq!(
+                picker.font_size(),
+                cell,
+                "preview picker kept the full cell"
+            );
+        });
+    }
+
+    #[test]
+    fn a_tile_still_uses_the_full_cell_size() {
+        let _env = fixed_cell();
+        init();
+        // The thumbnail grid is not the hot path and its tiles are tiny, so it
+        // keeps the real cell size: shrinking there would only blur icons.
+        GRAPHICS.with(|graphics| {
+            let graphics = graphics.borrow();
+            let picker = graphics.picker.as_ref().unwrap();
+            assert_eq!(picker.font_size(), graphics.cell);
+            assert_eq!(picker.font_size(), (8, 16));
+        });
     }
 
     #[test]

@@ -1687,3 +1687,321 @@ size, not on the monitor's DPI or on the file's own resolution. A 64×64 icon
 previewed alone is enlarged to the pane; the same icon in a tile keeps its
 pixels. `YAZI2D_CELL_SIZE` is the escape hatch for a terminal that reports its
 window without pixel data.
+
+## ADR-073 — The grid covers the pane, and a caption reports the file
+
+**Status:** accepted (2026-11-13, `0.6.13`)
+
+**Context:** Two complaints about the image modes had the same shape: a number
+that was true of the window was presented as if it were true of the file.
+
+The thumbnail grid computed `cols = width / tile_width` and
+`rows = height / tile_height` with floor division, so up to one tile of width
+and of height never received a tile. The user saw a black strip along the right
+and bottom edge and reported it as "the bottom part of the grid is empty".
+
+The caption under a single image reported the size actually drawn, which ADR-072
+had just changed to mean "the pane, in the terminal's pixels". So every picture,
+whatever its real resolution, was announced as `1200×1643` — a fact about the
+window. The user read it as the file's size and found it "useless and
+unreliable".
+
+**Decision:**
+
+- Count columns and rows with ceiling division and clip the last tile to the
+  pane (`Rect::intersection`). `Panel::index_at` mirrors the same rule, so a
+  click on the clipped part still selects the tile it visibly belongs to.
+- The caption reports the file's own pixel dimensions, captured when the decode
+  finishes and stored in `ImageEntry::dimensions` — before `shrink_source`
+  reduces the cached copy to 1600 px, so a large photo does not get announced as
+  1600 px wide.
+
+**Consequences:** The grid has no empty gutter. The caption is a property of the
+file, so it stays the same when the window is resized or the pane is split
+differently, and two machines with different DPI agree. `graphics::cell()` lost
+its only caller and was removed; the measured cell still drives `Fit::Fill`.
+
+## ADR-074 — Previews repaint on events, not on ticks
+
+**Status:** accepted (2026-11-13, `0.6.13`)
+
+**Context:** The user reported that the image preview "works very slowly" and
+that both image modes blink "as if something refreshes periodically". The log
+showed `image encode took 56–101 ms` per image.
+
+Three separate causes, all in the idling path:
+
+1. `App::tick` set `dirty` while `preview_cache.is_loading()` or
+   `image_cache.is_loading()`, so the event loop redrew at its full 80 ms poll
+   rate for as long as a decode was in flight. In the thumbnail grid that
+   repaint re-encoded nothing but did re-issue every visible protocol, which
+   reads as flicker.
+2. `ImageCache::protocol` cloned the whole `DynamicImage` *before* looking in
+   the per-size protocol cache. A 1600 px photo is several megabytes, and this
+   ran per visible tile per frame.
+3. Both caches called `entries.clear()` when they grew past a limit. Every
+   visible image then had to be decoded and re-encoded, which is the worst
+   possible moment to do it.
+
+**Decision:**
+
+- The caches expose `poll_background() -> bool`, which drains finished workers
+  and reports whether anything landed. `App::tick` repaints on that event only.
+- `ImageCache::protocol` checks its protocol cache first and clones the bitmap
+  only on a genuine miss.
+- Evict a single oldest entry instead of clearing the map, and raise the cap to
+  96 images.
+- When the target is larger than the source (the pane blows a small picture up),
+  resize with `FilterType::Triangle`; keep Lanczos3 for real downscaling, where
+  the filter decides how much detail survives. The terminal resamples again
+  anyway, so the difference on an upscale is not visible.
+
+**Consequences:** Idle costs nothing: a frame is drawn when a decode lands or a
+key arrives. Revisiting an already-decoded image of the same pane size needs no
+work at all. Encode time for a 1200 px pane dropped from the 56–101 ms logged
+before this change; the remaining cost is paid once per (image, pane size)
+pair rather than once per frame. `image encode took` in the log now appears only
+on a genuine encode, which makes it a useful signal again.
+
+
+## ADR-075 — The preview bitmap is encoded below the pane's pixel size
+
+**Status:** superseded by ADR-077 (2026-11-22). The measurement below was right,
+but the conclusion was wrong: for a *virtual* Kitty placement the bitmap's pixel
+size determines how many cells the picture covers, so shrinking it also shrank
+the picture on screen.
+
+**Context:** ADR-074 removed the per-frame waste, but the first encode of every
+image was still 50–69 ms (`image encode took`, 964×1280 source, 66×45 cells at
+16×31 px). Measured on the real path, that time split as:
+
+| stage | cost |
+|---|---|
+| downscale/upscale to the pane's pixels (`image`, Lanczos3) | ~47 ms |
+| base64-encoding the payload (raw RGBA) | ~3 ms |
+| writing the base64 payload through the pty | ~29 ms (7.5 MB) |
+
+The `kitty` graphics protocol states that "the image will be scaled
+(enlarged/shrunk) as needed to fit the specified area", and the placeholder
+rectangle is what defines that area. So encoding a bitmap the size of the pane's
+pixels and then having the terminal resample it again was pure waste: the same
+upstream resampling happened twice, and the payload grew quadratically.
+
+**Decision:** encode the single-image preview with a *smaller font size* — a
+second `Picker` built with `preview_cell(cell) = cell × 0.6`. The bitmap handed
+to the terminal is then 0.6 of the pane in each dimension (36% of the pixels),
+while the cell rectangle (`fitted_cells`) stays the full pane, so the terminal
+stretches it back to exactly the same place. Artwork format does not change:
+still `Resize::Scale`, still a placeholder rectangle, still one transmission.
+
+The thumbnail grid keeps the full cell size: it is already small, and a tile is
+one of hundreds rather than the only thing on screen.
+
+**Measured:** encode 58.7 → 10.4 ms per preview (5.6×), payload 7.5 → 2.7 MB
+base64, pty write ~29 → ~10 ms. Total first-paint cost of a preview drops from
+roughly 90 ms to roughly 21 ms.
+
+**Rejected alternatives:**
+
+- *PNG payload.* Needs a hand-written kitty emitter (`ratatui-image` 7 always
+  sends raw RGBA); PNG encoding itself cost 8–20 ms, eating the gain. Worth
+  revisiting only if payload size becomes the bottleneck again.
+- *`fast_image_resize` (SIMD).* 5.8 ms vs 10.5 ms for `image` Triangle, but a
+  new dependency for a few milliseconds — not worth it while the source is
+  already capped at 1600 px.
+- *`Resize::Fit` at reduced cell size.* `needs_resize` upscales back to
+  `size × font_size`, undoing the reduction entirely.
+
+**Consequences:** A preview is softer by a factor of 0.6 in each dimension
+before the terminal's own resampling. On a Retina cell (16×31 px) this is not
+visible in practice; it was accepted explicitly by the user in exchange for the
+speed-up. `PREVIEW_SCALE` in `src/graphics.rs` is the single knob: raise it for
+sharper previews, lower it for speed.
+
+> **Superseded in 0.6.15 — the premise was wrong.** The Kitty protocol does not
+> stretch a *virtual* placement (`U=1`) into the placeholder rectangle: the
+> terminal derives the number of cells it occupies from the bitmap's own pixel
+> size. A 0.6 bitmap therefore painted a picture covering 60 % of the pane,
+> anchored at its top-left corner — reported by the user as "the image does not
+> fill the panel", and measured on a screenshot as 58 % of the pane's width and
+> 50 % of its height. Yazi does not do this either; it posts the bitmap at the
+> full rectangle. `PREVIEW_SCALE` is now `1.0`, so the payload grows back and
+> the 90 → 21 ms figure no longer holds. The real fix for payload size is
+> shared memory or a compressed format (see ADR-076), not a smaller bitmap.
+
+## ADR-076 — Borrow Yazi's image-preview techniques, not its code
+
+**Status:** accepted (2026-11-22)
+
+**Context:** Previews felt several times slower than Yazi on the same machine
+and the same files. Measurements from the runtime log and a throwaway
+benchmark showed three independent causes, none of them UI-related:
+
+1. `graphics::render` ran **inside the draw call**, so a fresh image blocked the
+   event loop for 20–80 ms (`new_protocol` measured 20–21 ms plus the terminal
+   write).
+2. `ratatui-image` 7.0.0 sends **raw RGBA, base64, uncompressed** (`f=32`) in
+   4096-byte chunks: 2.2–5.7 MB per preview. Yazi sends the same pixels through
+   POSIX shared memory and only falls back to base64.
+3. `ImageCache` evicted `entries.keys().next()` — an **arbitrary `HashMap`
+   key**. Scrolling a folder of photos could drop the image being looked at,
+   and the log showed a single path decoded **598 times**.
+
+**Decision:** Copy the three *technical* ideas, keep our own interface:
+
+- **LRU eviction with a pinned entry.** `ImageEntry` carries a `used` stamp; the
+  pane pins the path it is showing so the cache can never evict it. Eviction
+  scans for the lowest stamp (≤96 entries, only on a miss).
+- **Prefetch only what is on screen.** Both the thumbnail grid and the folder
+  preview queue decodes *after* computing the visible range. Queueing every
+  image in the folder is what turned a 10-row window into 64 competing decodes.
+- **PDF through Poppler.** `pdftoppm -f N -l N -singlefile -jpeg` writes a
+  JPEG into a content-addressed cache, and that JPEG goes through the ordinary
+  image path. This is exactly what `pdf.lua` does upstream.
+
+**Rejected alternatives:**
+
+- *Vendoring Yazi's `yazi-adapter`.* It drags in `mlua`, the whole plugin host
+  and a VFS layer for one function. The product explicitly does not merge
+  upstream (ADR-001).
+- *Shared memory for the kitty payload.* The largest single win left, but it
+  means replacing `ratatui-image`'s emitter with a hand-written one. Deferred
+  until the two cheap fixes are measured in the field.
+- *Upgrading to `ratatui-image` 11 for zlib-compressed payloads.* Requires
+  `ratatui` 0.30, a separate migration across the whole UI module.
+- *Rendering PDFs in a background thread first.* `pdftoppm` takes 28 ms for one
+  page, and the result is cached on disk, so the first page only pays that once.
+
+**Consequences:** Scrolling a photo folder no longer re-decodes images it has
+already seen, and the first paint of a tile is no longer blocked by images
+scrolling past. PDFs are now a first-class preview with `PgUp`/`PgDn` paging;
+`pdfinfo` and `pdftoppm` (both Poppler, already present on macOS via Homebrew)
+are optional — without them the preview falls back to a plain message.
+
+## ADR-077 — A native preview is encoded at the full fitted rectangle
+
+**Status:** accepted (2026-11-22), supersedes ADR-075
+
+**Context:** In 0.6.14 the preview bitmap was encoded at 60 % of the pane's
+pixels (`PREVIEW_SCALE = 0.6`) because ADR-075 measured a real speed-up: encode
+58.7 → 10.4 ms and payload 7.5 → 2.7 MB. The reasoning was that the terminal
+"scales the bitmap up into the placeholder rectangle", so losing detail was
+free.
+
+On a real Ghostty window that reasoning failed. The picture was drawn at about
+58 % of the pane's width and 50 % of its height, pinned to the top-left corner,
+and a PDF page looked equally undersized. Measured on a screenshot
+(3104×1842, 2× scale): the preview covered 902 of 1552 pane pixels in width —
+0.58, the same factor that went into `PREVIEW_SCALE`.
+
+**Cause:** `kitty.rs` renders a virtual placement by emitting Unicode
+placeholders whose cell count is derived from the bitmap's pixel dimensions
+divided by the cell size. There is no `c=`/`r=` that would force a larger
+rectangle, so a smaller bitmap means fewer occupied cells. `PREVIEW_SCALE` was
+therefore not trading sharpness for payload — it was shrinking the picture.
+
+**Decision:** `PREVIEW_SCALE = 1.0`. The bitmap is encoded at exactly the fitted
+rectangle's pixel size, which is what Yazi does too. `Resize::Scale` still
+enlarges an image smaller than the pane, so a tiny icon fills the preview.
+
+**Consequences:** Encode time and payload return to the ADR-075 "before" values
+(~59 ms, ~7.5 MB on a 964×1280 source). That cost is paid once per pane
+geometry and is absorbed by the LRU cache and the pinned preview from ADR-076;
+correctness of the picture is not negotiable. If the payload becomes a problem
+again, the fix is background encoding or Kitty's shared-memory/zlib transport
+(`o=z`), not a smaller bitmap — both are listed in ROADMAP.
+
+**Rejected alternatives:**
+- *Keep 0.6 and force the rectangle with `c=`/`r=`.* `ratatui-image` 7.0.0 does
+  not expose them, and the placeholder still has to be emitted per cell.
+- *Upgrade to `ratatui-image` 11.x, which supports zlib.* It requires
+  `ratatui` 0.30 while the project is on 0.29; that is a separate migration.
+
+## ADR-078 — No app-side key repeat, and encodes run off the UI thread
+
+**Status:** accepted (2026-11-22)
+
+**Context:** Two regressions shipped in 0.6.15 and were reported together.
+
+*The cursor pace changed mid-session.* The app kept its own auto-repeat on top
+of the terminal's. It was gated on `releases_seen`, so before the first
+key-release event only the terminal moved the cursor (the pace felt right) and
+afterwards both mechanisms ran, advancing 2–4 rows per repeat. That is exactly
+what "fast right after launch, fast again once I open a folder" described.
+
+*PDF hung on "Rendering page…".* The PDF branch called `source_dimensions`
+first. That method only read the cache and never started a decode, so the JPEG
+was never queued, the entry never appeared, and no frame was ever marked dirty.
+The message stayed forever.
+
+*Images became dramatically slower.* Making the preview full-resolution
+(`PREVIEW_SCALE = 1.0`, ADR-077) restored correctness but put a 50–80 ms encode
+back on the UI thread for every new file.
+
+**Decision:**
+1. Delete the app-side repeat entirely. Movement comes from the terminal only,
+   one row per repeat, like Yazi. `held_arrow` survives purely as a watchdog so
+   a lost release cannot leave stale state.
+2. Let `source_dimensions` start a decode on a miss, exactly like `render` and
+   `protocol` already did.
+3. Move encoding to a worker thread. `graphics::Encoder` holds a clone of the
+   `Picker` (it is plain data, therefore `Send`), so a worker can encode without
+   touching the `thread_local` `GRAPHICS`. Results come back over an `mpsc`
+   channel keyed by `(path, size)` and are drained by `poll_background`.
+
+**Verified:** 209 unit tests, `clippy -D warnings`, release build and the PTY
+end-to-end test. `is_loading` counts both decodes and encodes, so the pane shows
+"Decoding image…" instead of a wrong "Cannot decode".
+
+**Rejected alternatives:**
+- *Keep the repeat but delay it.* The terminal's repeat is already the right
+  cadence; a second timer can only ever be faster or fight it.
+- *Cache more protocols to avoid re-encoding.* Does not help the first paint of
+  a file, which is the case that felt slow.
+- *Lower `PREVIEW_SCALE` again.* That was ADR-075 and it shrinks the picture on
+  screen, which is the bug ADR-077 fixed.
+
+## ADR-079 — Setup must work on a machine that has never seen Rust
+
+**Status:** accepted (2026-11-22)
+
+**Context:** Installing from GitHub on a second Mac failed with nothing to go
+on. Reproduced on a fresh `git clone` in a clean `HOME` with launchd's PATH:
+
+```
+y2d setup      -> bash: y2d: command not found
+./y2d setup    -> bash: ./y2d: Permission denied
+```
+
+Two independent causes, both invisible from the first Mac:
+
+1. `y2d` was committed as mode `100644`. Git therefore checks it out without
+   the executable bit, so `./y2d` cannot run. On the development machine the
+   file *looked* executable because the sync client had rewritten the mode
+   locally, which is exactly the trap `AGENTS.md` already warned about.
+2. The README said `y2d setup` — a bare name, which needs `y2d` on `PATH`.
+   It is not, until `setup` has run. Chicken-and-egg.
+
+A third problem was waiting behind those: without Rust the script died with
+"cargo not found", which is a dead end for someone who just wants to try the
+app.
+
+**Decision:**
+
+- Commit `100755` for `y2d` and the packaging scripts
+  (`git update-index --chmod=+x`), so a clean clone is runnable as-is.
+- Document `bash y2d setup`. It works regardless of the executable bit, so it
+  survives sync clients that strip modes.
+- `ensure_rust()` installs Rust through rustup when `cargo` is missing, and
+  fails with an actionable message if rustup itself cannot run. Only commands
+  that compile call it; `status`, `log` and `notes` still work without Rust.
+- `y2d status` reports the optional pieces — Poppler for PDF, Ghostty for sharp
+  images — so a missing helper is visible instead of being guessed at.
+
+**Rejected alternatives:** shipping prebuilt binaries in the repository (large,
+platform-specific, and untrustworthy); a `curl | sh` one-liner installer (a
+second script to keep in sync, and harder to inspect); requiring Homebrew
+(adds a dependency the app does not otherwise need).
+
+**Consequences:** the documented path is three lines and needs no preparation
+beyond `git`. `TERM`/terminal quality is reported but never required.

@@ -20,7 +20,7 @@ filesystems, a GUI.
 
 ## Current status (2026-11-13)
 
-Version `0.6.12` — MVP + quick view, thumbnails, background loading, logging,
+Version `0.6.18` — MVP + quick view, thumbnails, background loading, logging,
 sorting, type colours, bulk rename, trackpad gestures, a live footer, a
 polished thumbnail grid, full mouse support (click, double click, path-bar
 copy, right-click menu), recursive search, Windows builds, native image
@@ -53,7 +53,7 @@ previews bound to the pane with a measured cell size.
 - [x] Copy/move confirmation, Alt-based cross-panel keys, footer recovery.
 - [x] Shift opens / Alt previews; modifier-safe file ops; full key menu.
 - [x] macOS `.app` bundle with a generated icon, installed to /Applications.
-- [x] 203 unit tests + a real-PTY end-to-end test, all green.
+- [x] 211 unit tests + a real-PTY end-to-end test, all green.
 - [x] `cargo fmt`, `cargo clippy -D warnings`, release build (≈2 MB binary).
 
 Known limitations and the next steps are in `docs/STATUS.md` and
@@ -108,7 +108,7 @@ export CARGO_TARGET_DIR="$HOME/.cache/yazi2d-target"
 real target directory from `cargo metadata`, so an existing
 `CARGO_TARGET_DIR` keeps working.
 
-### Two pitfalls on a synced/repo folder
+### Three pitfalls on a synced/repo folder
 
 - **The sync client strips the executable bit.** Nextcloud rewrites modes to
   `644`, so `./y2d` fails with `permission denied` and `git status` shows
@@ -119,6 +119,34 @@ real target directory from `cargo metadata`, so an existing
 - **`CARGO_TARGET_DIR` must be honoured.** `packaging/macos/build-app.sh` and
   `packaging/linux/build-desktop.sh` ask `cargo metadata` for the target
   directory instead of assuming `target/`.
+- **Never read `$?` after a pipe.** `cargo clippy … | tail -12; echo $?` reports
+  *tail's* status, so a failing gate looks green — this hid two clippy errors in
+  one session. Redirect to a file and check `cargo` itself:
+
+  ```sh
+  cargo clippy --all-targets -- -D warnings > /tmp/clippy.out 2>&1
+  echo "clippy exit=$?"
+  ```
+
+## Working efficiently (read this before exploring)
+
+A feedback entry said work was getting slow and token-hungry. It was right: a
+single investigation re-read the same `ui.rs` ranges a dozen times. Follow these
+rules so it does not happen again.
+
+- **Read once, wide.** One `read` of 150 lines beats five of 30. Do not re-open a
+  region to "check" it — note the line numbers and trust them; re-read only the
+  exact range you are about to edit.
+- **Grep before reading.** Locate with `grep -n "symbol"`, then read around the
+  hits. Never read a whole file to find one function.
+- **Batch independent commands** in one `shell` call (`grep a; grep b`) instead
+  of one call per pattern.
+- **Do not read the same file from both a `read` and a `sed`/`awk`.** Pick one.
+  Prefer `awk 'NR>=a&&NR<=b{printf "%d|%s\n", NR, $0}'` when you need numbers.
+- **No idle polling.** Do not re-run `git status`, `ls` or a build to "see"; the
+  previous result is still valid.
+- Finish the investigation before editing: decide the full patch, then apply it
+  in a few `edit` calls, then run `y2d test` once.
 
 ## Repository map
 
@@ -236,6 +264,20 @@ Detailed invariants and data flow: `docs/ARCHITECTURE.md`.
   thumbnail grids are not (`Fit::Inside`), and the pixel size of a cell comes
   from the terminal window (`YAZI2D_CELL_SIZE` overrides it) rather than from a
   hard-coded guess — see ADR-072. Never hard-code `(8, 16)` as the real cell.
+- The thumbnail grid covers the whole pane: columns and rows use ceiling
+  division and the last tile is clipped to the pane. `Panel::index_at` must use
+  the same rule, or a click misses the tile it visibly lands on (ADR-073).
+- A caption must describe the **file**, never the pane. The image caption
+  reports the file's own pixels, captured before `shrink_source`; a number about
+  this window is exactly what the user called "useless and unreliable"
+  (ADR-073).
+- Repaint on events, not on ticks. `App::tick` sets `dirty` only when a cache
+  reports that something landed (`poll_background`); setting it while a decode
+  is still running made the preview and the grid blink. Caches evict one entry
+  at a time and never `clear()` — wiping the map re-decodes everything visible
+  (ADR-074).
+- `ImageCache::protocol` checks its protocol cache before cloning the bitmap:
+  a per-frame multi-megabyte copy is what made the preview slow (ADR-074).
 - `KeyEventKind::Repeat` must be handled exactly like `Press`: with keyboard
   enhancement enabled, held keys arrive as `Repeat` and dropping them breaks
   key repeat.

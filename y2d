@@ -55,13 +55,37 @@ warn() { printf '%swarn%s %s\n' "$YELLOW" "$RESET" "$*" >&2; }
 die()  { printf '%serr %s %s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
 
 # --- Rust environment -----------------------------------------------------
+#
+# A fresh machine has no Rust at all. Refusing there with "install Rust first"
+# is a dead end for someone who just wants to try the app, so `setup` installs
+# it through rustup instead of failing.
 if ! command -v cargo >/dev/null 2>&1; then
   if [ -f "$HOME/.cargo/env" ]; then
     # shellcheck disable=SC1091
     . "$HOME/.cargo/env"
   fi
 fi
-command -v cargo >/dev/null 2>&1 || die "cargo not found — install Rust from https://rustup.rs"
+
+ensure_rust() {
+  command -v cargo >/dev/null 2>&1 && return 0
+
+  step "Rust is not installed — installing it with rustup"
+  if ! command -v curl >/dev/null 2>&1; then
+    die "curl is required to install Rust. Install Rust manually from https://rustup.rs"
+  fi
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --profile minimal || die "rustup failed — see https://rustup.rs"
+  # shellcheck disable=SC1091
+  . "$HOME/.cargo/env"
+  command -v cargo >/dev/null 2>&1 || die "Rust installed but cargo is still not on PATH"
+  ok "Rust installed"
+}
+
+# Commands that compile need Rust; the rest (status, log, notes) do not, so the
+# check is called by build/test/app/run/setup rather than at load time.
+require_rust() {
+  ensure_rust
+}
 
 # A synced folder (Nextcloud, Dropbox, …) must not receive gigabytes of build
 # artifacts, so the target directory is moved out of it automatically. An
@@ -101,6 +125,7 @@ binary() {
 # --- Commands -------------------------------------------------------------
 
 cmd_run() {
+  require_rust
   step "Building (debug) — fast, what you want while testing"
   cargo build --manifest-path "$ROOT/Cargo.toml"
   local bin
@@ -114,6 +139,7 @@ cmd_run() {
 }
 
 cmd_test() {
+  require_rust
   step "cargo fmt --check"
   cargo fmt --manifest-path "$ROOT/Cargo.toml" --check
   ok "formatting"
@@ -237,6 +263,7 @@ WRAPPER
 }
 
 cmd_setup() {
+  require_rust
   link_self
   cmd_install
   local bin
@@ -348,6 +375,30 @@ cmd_status() {
   else
     printf '  command   not on PATH — run: y2d setup\n'
   fi
+
+  # Optional helpers. None of them is required to browse files, so they are
+  # reported as a checklist rather than as errors: knowing *what* is missing
+  # beats guessing when previews look wrong.
+  printf '  optional  '
+  local tool missing=""
+  for tool in pdftoppm pdfinfo; do
+    command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+  done
+  if [ -n "$missing" ]; then
+    printf 'missing:%s — PDF previews need Poppler (brew install poppler)\n' "$missing"
+  else
+    printf 'Poppler found (PDF previews work)\n'
+  fi
+  case "$(uname -s)" in
+    Darwin)
+      if [ -d "/Applications/Ghostty.app" ] || command -v ghostty >/dev/null 2>&1; then
+        printf '  terminal  Ghostty found (sharp image previews)\n'
+      else
+        printf '  terminal  Ghostty not found — images fall back to half blocks\n'
+        printf '            install: brew install --cask ghostty\n'
+      fi
+      ;;
+  esac
 }
 
 cmd_clean() {

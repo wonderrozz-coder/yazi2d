@@ -61,7 +61,8 @@ the truecolor previews and thumbnails look best.
 - **Copy/move between panels** (`F5`/`F6` or `c`/`m`), recursive, symlink-aware, confirmed before running.
 - **Background operations** with progress; the UI stays navigable.
 - **Quick preview** (`Ctrl+Q`/`Ctrl+P`): the **opposite** panel shows text, an
-  image, or a folder grid and follows the cursor. Read-only.
+  image, a PDF (paged with `PgUp`/`PgDn`), or a folder grid and follows the
+  cursor. Read-only.
 - **Folder facts at a glance**: the `Ext` column shows how many folders a
   folder contains, and `Space` on a folder measures its size in the background
   (shown in the `Dir` column, in K/M/G).
@@ -86,16 +87,30 @@ the truecolor previews and thumbnails look best.
 
 ## Install
 
-**One command to remember: `y2d`.**
+Copy-paste these three lines. They work on a machine that has never seen Rust,
+on macOS and Linux alike — the script installs Rust itself if it is missing.
 
 ```sh
 git clone https://github.com/wonderrozz-coder/yazi2d.git
 cd yazi2d
-y2d setup          # build, install the icon app, put y2d on PATH
+bash y2d setup
 ```
 
-If `./y2d` says `permission denied` (Nextcloud strips the executable bit), run
-the first one through bash: `bash y2d setup`.
+`bash y2d setup` is deliberate: it does not depend on the executable bit, which
+some sync clients and some `git` setups drop. Once it has run, plain `y2d` works
+from any directory.
+
+If Rust is missing the script stops with a one-line instruction. To install it
+first, or to do it yourself:
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+source "$HOME/.cargo/env"
+```
+
+On macOS the recommended terminal is [Ghostty](https://ghostty.org) — it is
+what makes previews and thumbnails sharp. `brew install --cask ghostty`. Without
+it Yazi2D still works, but images fall back to coarse half blocks.
 
 Everyday commands — identical on macOS and Linux:
 
@@ -227,7 +242,7 @@ alternative.
 |---|---|
 | `Tab` | switch active panel |
 | `↑`/`k`, `↓`/`j` | move cursor (scroll in preview) |
-| `PgUp`/`PgDn`, `Home`/`g`, `End`/`G` | page, top, bottom |
+| `PgUp`/`PgDn`, `Home`/`g`, `End`/`G` | page, top, bottom (`PgUp`/`PgDn` page a PDF) |
 | `Enter` / `l` / `→` | open folder; for a file, open with its associated app |
 | `Backspace` / `h` / `←` | go to parent directory |
 | `Space` / `Insert` | select and move down; on a folder, measure its size |
@@ -252,7 +267,7 @@ alternative.
 | `Ctrl+E` | settings: key bindings and trackpad |
 | `Ctrl+R` | refresh both panels |
 | `Ctrl+H` / `.` | toggle hidden files |
-| `?` / `F1` | help |
+| `?` / `F1` | help (the title shows the build version) |
 | `q` / `Ctrl+C` | quit |
 
 Every key in this table is a **default**: all of them can be changed in `Ctrl+E`,
@@ -723,7 +738,7 @@ WIN7=0 ./packaging/windows/build-windows.sh   # только Windows 10/11
 |---|---|
 | `Tab` | переключить активную панель |
 | `↑`/`k`, `↓`/`j` | движение курсора (в просмотре — прокрутка) |
-| `PgUp`/`PgDn`, `Home`/`g`, `End`/`G` | страница, начало, конец |
+| `PgUp`/`PgDn`, `Home`/`g`, `End`/`G` | страница, начало, конец (`PgUp`/`PgDn` листают PDF) |
 | `Enter` / `l` / `→` | войти в каталог; для файла — открыть приложением по умолчанию |
 | `Backspace` / `h` / `←` | подняться на уровень выше |
 | `Space` / `Insert` | выделить и перейти ниже; на папке — посчитать объём |
@@ -748,7 +763,7 @@ WIN7=0 ./packaging/windows/build-windows.sh   # только Windows 10/11
 | `Ctrl+E` | настройки: горячие клавиши и трекпад |
 | `Ctrl+R` | обновить обе панели |
 | `Ctrl+H` / `.` | показать/скрыть скрытые файлы |
-| `?` / `F1` | справка |
+| `?` / `F1` | справка (в заголовке версия сборки) |
 | `q` / `Ctrl+C` | выход |
 
 Все клавиши в этой таблице — **значения по умолчанию**: любую можно сменить в

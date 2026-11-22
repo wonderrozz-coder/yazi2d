@@ -128,25 +128,22 @@ pub struct App {
     /// different row starts a new gesture instead of opening anything.
     pub last_tap_target: Option<(usize, usize)>,
     /// The arrow key that is currently held, if any, and when it was pressed.
-    /// Held arrows accelerate: after the keyboard's own repeat delay the app
-    /// starts moving the cursor by itself, much faster than the terminal
-    /// repeats the key.
+    ///
+    /// Kept only so the event loop can keep its short poll timeout while a key
+    /// is down. The app does **not** move the cursor itself: the terminal's own
+    /// repeat does, exactly like Yazi. See `tick_key_repeat`.
     pub held_arrow: Option<(KeyCode, Instant)>,
     /// Last time the held arrow produced any key event.
     ///
-    /// A release event is the normal way to end an auto-repeat, but it can be
+    /// A release event is the normal way to clear `held_arrow`, but it can be
     /// lost or never sent at all (Terminal.app does not report releases). This
-    /// timestamp is the watchdog that stops the cursor moving on its own.
+    /// timestamp is the watchdog that clears it.
     pub last_arrow_activity: Option<Instant>,
     /// Set once the terminal has delivered a key-release event.
     ///
-    /// The app moves the cursor itself for smoother acceleration, which is only
-    /// safe when the terminal reports releases — otherwise nothing tells it that
-    /// the key was let go and the cursor keeps walking. Until a release has
-    /// actually been seen, the terminal's own key repeat drives the movement.
+    /// Only release events drive the footer's modifier state; without them the
+    /// footer keeps its default screen.
     pub releases_seen: bool,
-    /// Last automatic move of a held arrow.
-    pub last_auto_repeat: Option<Instant>,
     /// Folder sizes measured on demand (Space on a folder). Keyed by path so a
     /// measured size survives navigation and re-listing.
     pub folder_sizes: HashMap<PathBuf, u64>,
@@ -158,8 +155,12 @@ pub struct App {
     pub favorite_file: Option<PathBuf>,
 }
 
-/// After the arrow has been held this long, the app moves the cursor itself.
-const REPEAT_DELAY: Duration = Duration::from_millis(320);
+/// Silence after which a held arrow counts as released.
+///
+/// The app never moves the cursor on its own any more, so this only clears a
+/// stale `held_arrow` when the terminal loses a release event (Terminal.app
+/// reports none at all).
+const LOST_KEY_RELEASE: Duration = Duration::from_millis(600);
 
 /// How many spacer rows may pile up below the last group.
 ///
@@ -167,23 +168,6 @@ const REPEAT_DELAY: Duration = Duration::from_millis(320);
 /// left there; a handful of rows is enough to arrange groups, and without a cap
 /// a held `↓` would append blanks forever.
 const MAX_TRAILING_BLANKS: usize = 3;
-/// Interval between two automatic moves at the first repeat speed.
-const REPEAT_START: Duration = Duration::from_millis(55);
-/// Fastest automatic repeat interval.
-const REPEAT_MIN: Duration = Duration::from_millis(12);
-/// How often the repeat speed is doubled.
-const REPEAT_RAMP: Duration = Duration::from_millis(500);
-
-/// Silence after which a held arrow counts as released.
-///
-/// The app moves the cursor itself instead of waiting for the terminal's slow
-/// repeat, so it needs to know when the key is let go. A release event only
-/// arrives with keyboard enhancement, and even then one can be lost (a dropped
-/// read, a multiplexer, a terminal that keeps repeat switched off). A held key
-/// produces events every few tens of milliseconds, so a whole second of silence
-/// means the key is up: without this the cursor walked on its own until another
-/// key was pressed.
-const LOST_KEY_RELEASE: Duration = Duration::from_millis(600);
 
 /// One row of the right-click menu.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -422,7 +406,6 @@ impl App {
             held_arrow: None,
             last_arrow_activity: None,
             releases_seen: false,
-            last_auto_repeat: None,
             folder_sizes: HashMap::new(),
             folder_size_pending: Vec::new(),
             favorites_preview: None,
@@ -449,10 +432,26 @@ impl App {
         self.poll_folder_sizes();
         self.poll_search();
         self.sync_preview_scroll();
-        // Background preview/image loads complete after a frame or two; repaint
-        // when something new showed up.
-        if self.preview_cache.is_loading() || self.image_cache.is_loading() {
+        // Repaint when a background load or decode lands, not on every tick:
+        // repainting while one was still running is what made the preview and
+        // the grid blink.
+        if self.preview_cache.poll_background() || self.image_cache.poll_background() {
             self.dirty = true;
+        }
+        // Once the cursor has rested long enough, repaint so the full-size
+        // bitmap is built. Without this the pane would keep the cheap half-block
+        // image until some unrelated event happened to redraw it.
+        for panel in &mut self.panels {
+            if panel.mode != PanelMode::Preview {
+                continue;
+            }
+            let Some(since) = panel.preview_settled else {
+                continue;
+            };
+            if since.elapsed() >= crate::panel::FULL_PREVIEW_DELAY {
+                panel.preview_settled = None;
+                self.dirty = true;
+            }
         }
         let mut finished = false;
         let mut changed = false;
@@ -914,7 +913,10 @@ impl App {
         self.sync_preview_scroll();
     }
 
-    /// Remember that an arrow key is held, so `on_tick` can accelerate it.
+    /// Remember that an arrow key is held.
+    ///
+    /// Only the watchdog uses this now: the cursor itself moves on the terminal's
+    /// own repeat events, one row each, exactly like Yazi.
     fn arm_arrow(&mut self, code: KeyCode) {
         let already = self
             .held_arrow
@@ -922,10 +924,9 @@ impl App {
             .unwrap_or(false);
         if !already {
             self.held_arrow = Some((code, Instant::now()));
-            self.last_auto_repeat = None;
         }
-        // Any event for the arrow proves the key is still down, whatever the
-        // acceleration timer says. See `LOST_KEY_RELEASE`.
+        // Any event for the arrow proves the key is still down. See
+        // `LOST_KEY_RELEASE`.
         self.last_arrow_activity = Some(Instant::now());
     }
 
@@ -933,113 +934,35 @@ impl App {
     fn release_arrow(&mut self) {
         self.held_arrow = None;
         self.last_arrow_activity = None;
-        self.last_auto_repeat = None;
     }
 
     /// Drive the held arrow.
     ///
-    /// Terminals repeat a held key at their own rate, which is slow and often
-    /// capped. Instead of waiting for those events the app moves the cursor
-    /// itself: after `REPEAT_DELAY` it repeats every `REPEAT_START`, halving
-    /// that interval every `REPEAT_RAMP`, and it grows the step so a long list
-    /// is crossed in a second or two. Called from the event loop while it
-    /// waits for input, so the movement is smooth between key repeats.
+    /// Deliberately a no-op: Yazi has no auto-repeat of its own and simply uses
+    /// the terminal's. Ours stacked on top of it — the app moves the cursor
+    /// itself *and* the terminal keeps sending its own repeats — which read as
+    /// "the cursor jumps several rows at once". It was also inconsistent: until
+    /// the first key-release event `releases_seen` was false and only the
+    /// terminal drove the movement, so the pace changed the moment the user
+    /// pressed anything that produces a release.
+    ///
+    /// Kept as a function so the event loop stays unchanged and a future,
+    /// measured repeat can be reintroduced in one place.
     pub fn tick_key_repeat(&mut self) -> bool {
-        let Some((code, pressed)) = self.held_arrow else {
-            return false;
-        };
-        if self.should_quit
-            || self.help
-            || self.prompt.is_some()
-            || self.sort_menu
-            || self.theme_menu
-            || self.settings_menu
-            || self.context_menu.is_some()
-            || self.search.is_some()
-        {
-            return false;
-        }
-
-        let now = Instant::now();
-        let held = now.saturating_duration_since(pressed);
-
-        // Only accelerate when the terminal has told us it reports releases.
-        // Otherwise nothing can end the repeat reliably (Terminal.app sends no
-        // releases at all), and the cursor would keep walking after the key is
-        // up. The terminal's own repeat still moves the cursor in that case.
-        if !self.releases_seen {
-            return false;
-        }
-
-        // A lost release must not leave the cursor walking on its own: a key
-        // that is really down keeps sending events, so a long silence means it
-        // was let go.
-        if let Some(activity) = self.last_arrow_activity {
-            if now.saturating_duration_since(activity) > LOST_KEY_RELEASE {
-                self.release_arrow();
-                return false;
-            }
-        } else {
-            self.release_arrow();
-            return false;
-        }
-
-        if held < REPEAT_DELAY {
-            return false;
-        }
-
-        let interval = self.repeat_interval(held);
-        if let Some(last) = self.last_auto_repeat {
-            if now.saturating_duration_since(last) < interval {
-                return false;
+        // Terminals do not always report a key release (Terminal.app never
+        // does), so a held arrow would otherwise keep `held_arrow` set forever
+        // and the event loop would spin at its short timeout.
+        if let Some((_, pressed)) = self.held_arrow {
+            if pressed.elapsed() >= LOST_KEY_RELEASE
+                && self
+                    .last_arrow_activity
+                    .map_or(true, |last| last.elapsed() >= LOST_KEY_RELEASE)
+            {
+                self.held_arrow = None;
+                return true;
             }
         }
-        self.last_auto_repeat = Some(now);
-
-        let direction: i32 = if matches!(code, KeyCode::Up | KeyCode::Char('k') | KeyCode::PageUp) {
-            -1
-        } else {
-            1
-        };
-        // The sidebar has its own cursor, so a held arrow there must move it —
-        // the panels must not scroll while the pointer is on a bookmark.
-        if self.focus == Focus::Favorites {
-            let step = self.repeat_step_for(held);
-            self.move_favorite(direction * step);
-            self.dirty = true;
-            return true;
-        }
-        let cols = self.active().grid_cols.max(1) as i32;
-        let step = if self.active().mode == PanelMode::Thumbnails {
-            cols
-        } else {
-            self.repeat_step_for(held)
-        };
-
-        self.move_active(direction * step);
-        self.dirty = true;
-        true
-    }
-
-    /// Interval between automatic moves for a key held for `held`.
-    fn repeat_interval(&self, held: Duration) -> Duration {
-        let ramps = (held.as_millis() / REPEAT_RAMP.as_millis()) as u32;
-        let millis = REPEAT_START
-            .as_millis()
-            .saturating_div(1u128 << ramps.min(4))
-            .max(REPEAT_MIN.as_millis());
-        Duration::from_millis(millis as u64)
-    }
-
-    /// How many rows one automatic move covers for a key held for `held`.
-    fn repeat_step_for(&self, held: Duration) -> i32 {
-        if held > Duration::from_millis(1800) {
-            4
-        } else if held > Duration::from_millis(900) {
-            2
-        } else {
-            1
-        }
+        false
     }
 
     fn handle_panel_key(&mut self, key: KeyEvent) {
@@ -1711,10 +1634,16 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => self.active_mut().scroll_preview(-1, 0),
             KeyCode::Down | KeyCode::Char('j') => self.active_mut().scroll_preview(1, 0),
             KeyCode::PageUp => {
+                if self.preview_page_step(-1) {
+                    return;
+                }
                 let page = self.active().page_size.max(1) as i32;
                 self.active_mut().scroll_preview(-page, 0);
             }
             KeyCode::PageDown => {
+                if self.preview_page_step(1) {
+                    return;
+                }
                 let page = self.active().page_size.max(1) as i32;
                 self.active_mut().scroll_preview(page, 0);
             }
@@ -1739,6 +1668,33 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Step a multi-page document preview by `delta` pages.
+    ///
+    /// Returns `false` when the preview is not a document, so the caller falls
+    /// back to its usual scrolling. Paging a PDF must not also scroll the text
+    /// preview: the two gestures share `PgUp`/`PgDn` but mean different things.
+    fn preview_page_step(&mut self, delta: i32) -> bool {
+        let Some(path) = self.active().preview_path.clone() else {
+            return false;
+        };
+        if !crate::pdf::is_pdf_path(&path) {
+            return false;
+        }
+        let total = crate::pdf::page_count(&path).unwrap_or(1).max(1);
+        let current = self.active().preview_page as i32;
+        let next = (current + delta).clamp(1, total as i32) as usize;
+        if next != self.active().preview_page {
+            let panel = self.active_mut();
+            panel.preview_page = next;
+            panel.preview_scroll = 0;
+            panel.preview_scroll_x = 0;
+            // Flipping pages quickly must not encode a full page per keypress.
+            panel.preview_settled = Some(Instant::now());
+            self.dirty = true;
+        }
+        true
     }
 
     /// File operations shared by the list and the thumbnail grid.
@@ -3377,6 +3333,10 @@ impl App {
                 panel.preview_scroll_x = 0;
                 panel.preview_max_scroll = 0;
                 panel.preview_max_scroll_x = 0;
+                panel.preview_page = 1;
+                // Restart the settle timer: the full-size bitmap must only be
+                // built once the cursor stops moving.
+                panel.preview_settled = Some(Instant::now());
                 self.dirty = true;
             }
         }
@@ -3499,6 +3459,38 @@ fn pick_dir(path: Option<&PathBuf>, fallback: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_app_never_moves_the_cursor_on_its_own() {
+        // Yazi leaves held-key movement to the terminal. An app-side repeat ran
+        // *on top of* the terminal's own, so a held arrow advanced two rows per
+        // repeat and the cursor overshot. It also only switched on after the
+        // first key-release event, so the pace changed the moment the user
+        // entered a folder — exactly the bug that was reported.
+        let tmp = tempfile::tempdir().unwrap();
+        let left = tmp.path().join("left");
+        fs::create_dir_all(&left).unwrap();
+        for index in 0..20 {
+            fs::write(left.join(format!("f{index:02}.txt")), "x").unwrap();
+        }
+
+        let mut app = app_for(&left, &left);
+        app.panels[0].cursor = 1;
+
+        app.releases_seen = true;
+        app.held_arrow = Some((KeyCode::Down, Instant::now() - Duration::from_secs(5)));
+        app.last_arrow_activity = Some(Instant::now());
+        for _ in 0..50 {
+            assert!(
+                !app.tick_key_repeat(),
+                "the app moved the cursor itself instead of leaving it to the terminal"
+            );
+        }
+        assert_eq!(
+            app.panels[0].cursor, 1,
+            "the cursor moved without a key event"
+        );
+    }
+
     use super::*;
     use std::fs;
     use std::time::{Duration, Instant};
@@ -4397,6 +4389,31 @@ mod tests {
     }
 
     #[test]
+    fn changing_the_preview_restarts_the_settle_timer() {
+        // The full-size bitmap must only be built once the cursor stops: browsing
+        // a photo folder used to encode a pane-sized payload for every file that
+        // passed under the cursor, and that is what made scrolling hitch.
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("a.txt"), "a").unwrap();
+        fs::write(tmp.path().join("b.txt"), "b").unwrap();
+        let mut app = app_for(tmp.path(), tmp.path());
+        press(&mut app, KeyCode::Char('q'), KeyModifiers::CONTROL);
+        wait_for_loads(&mut app);
+
+        assert!(
+            app.panels[1].preview_settled.is_some(),
+            "a fresh preview target must start the settle timer"
+        );
+
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        wait_for_loads(&mut app);
+        assert!(
+            app.panels[1].preview_settled.is_some(),
+            "moving the cursor must restart it, so the bitmap is not built mid-scroll"
+        );
+    }
+
+    #[test]
     fn colour_menu_switches_theme() {
         let tmp = tempfile::tempdir().unwrap();
         let mut app = app_for(tmp.path(), tmp.path());
@@ -4758,123 +4775,6 @@ mod tests {
             "unexpected status: {}",
             app.status
         );
-    }
-
-    #[test]
-    fn a_held_arrow_moves_faster_than_the_terminal_repeats() {
-        let tmp = tempfile::tempdir().unwrap();
-        let left = tmp.path().join("left");
-        fs::create_dir_all(&left).unwrap();
-        for index in 0..200 {
-            fs::write(left.join(format!("f{index:03}.txt")), "x").unwrap();
-        }
-
-        let mut app = app_for(&left, &left);
-        app.panels[0].cursor = 1;
-
-        // Simulate a hold: arm the arrow, then let the clock pass and drive the
-        // repeat by hand. One terminal press, many app moves.
-        //
-        // Acceleration only runs when the terminal reports key releases; that
-        // is what makes it safe to move the cursor on our own.
-        app.releases_seen = true;
-        app.held_arrow = Some((KeyCode::Down, Instant::now() - Duration::from_millis(1000)));
-        app.last_arrow_activity = Some(Instant::now());
-        app.last_auto_repeat = None;
-
-        let mut moves = 0;
-        for _ in 0..50 {
-            if app.tick_key_repeat() {
-                moves += 1;
-            }
-            // Pretend time passes between event-loop iterations.
-            app.last_auto_repeat = app
-                .last_auto_repeat
-                .map(|last| last - Duration::from_millis(100));
-        }
-        assert!(
-            moves > 10,
-            "a held arrow produced only {moves} moves in one second"
-        );
-        assert!(
-            app.panels[0].cursor > 1,
-            "the cursor did not advance while the arrow was held"
-        );
-    }
-
-    #[test]
-    fn releasing_the_arrow_stops_the_acceleration() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut app = app_for(tmp.path(), tmp.path());
-
-        app.releases_seen = true;
-        app.held_arrow = Some((KeyCode::Down, Instant::now() - Duration::from_millis(1000)));
-        app.last_arrow_activity = Some(Instant::now());
-        assert!(app.tick_key_repeat());
-
-        app.on_key_release(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        assert!(app.held_arrow.is_none());
-        assert!(
-            !app.tick_key_repeat(),
-            "the repeat must stop once the key is released"
-        );
-    }
-
-    #[test]
-    fn a_terminal_without_key_releases_never_moves_the_cursor_itself() {
-        // Terminal.app sends no key-release events at all. If the app still ran
-        // its own repeat there, nothing could ever stop it: the cursor walked
-        // on until another key was pressed, wrapping onto `..` and making the
-        // next file operation report "Nothing selected".
-        let tmp = tempfile::tempdir().unwrap();
-        let left = tmp.path().join("left");
-        fs::create_dir_all(&left).unwrap();
-        for index in 0..20 {
-            fs::write(left.join(format!("f{index:02}.txt")), "x").unwrap();
-        }
-
-        let mut app = app_for(&left, &left);
-        assert!(!app.releases_seen);
-        app.panels[0].cursor = 1;
-
-        // A press, then no release ever arrives.
-        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
-        app.held_arrow = Some((KeyCode::Char('j'), Instant::now() - Duration::from_secs(5)));
-        app.last_arrow_activity = Some(Instant::now());
-
-        for _ in 0..50 {
-            assert!(
-                !app.tick_key_repeat(),
-                "the app must not move the cursor without key releases"
-            );
-        }
-        assert_eq!(app.panels[0].cursor, 2, "the cursor moved on its own");
-    }
-
-    #[test]
-    fn a_lost_key_release_stops_the_repeat_after_a_silence() {
-        // A release can be lost even on a terminal that reports them. A key
-        // that is still down keeps sending events, so silence means it is up.
-        let tmp = tempfile::tempdir().unwrap();
-        let mut app = app_for(tmp.path(), tmp.path());
-
-        app.releases_seen = true;
-        app.held_arrow = Some((KeyCode::Down, Instant::now() - Duration::from_millis(1000)));
-        app.last_arrow_activity =
-            Some(Instant::now() - LOST_KEY_RELEASE - Duration::from_millis(50));
-
-        assert!(!app.tick_key_repeat(), "the watchdog did not fire");
-        assert!(app.held_arrow.is_none(), "the held arrow was not cleared");
-    }
-
-    #[test]
-    fn seconds_of_holding_grow_the_repeat_step() {
-        let tmp = tempfile::tempdir().unwrap();
-        let app = app_for(tmp.path(), tmp.path());
-
-        assert_eq!(app.repeat_step_for(Duration::from_millis(300)), 1);
-        assert_eq!(app.repeat_step_for(Duration::from_millis(1000)), 2);
-        assert_eq!(app.repeat_step_for(Duration::from_millis(2000)), 4);
     }
 
     #[test]
@@ -5653,49 +5553,6 @@ mod tests {
         );
         press(&mut app, KeyCode::Delete, KeyModifiers::NONE);
         assert_eq!(app.favorites.len(), before.len() - 1);
-    }
-
-    #[test]
-    fn the_sidebar_cursor_accelerates_like_a_panel() {
-        // The sidebar never armed the held-arrow timer, so a held `j` only moved
-        // at the terminal's own repeat rate and felt much slower than a panel.
-        let tmp = tempfile::tempdir().unwrap();
-        let mut app = favourites_app(tmp.path());
-        app.favorites.entries.clear();
-        for index in 0..40 {
-            let path = tmp.path().join(format!("d{index:02}"));
-            fs::create_dir_all(&path).unwrap();
-            app.favorites
-                .entries
-                .push(crate::favorites::Entry::Path(path));
-        }
-        app.releases_seen = true;
-        app.fav_cursor = 0;
-
-        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
-        assert_eq!(app.fav_cursor, 1, "one press is one step");
-        assert!(app.held_arrow.is_some(), "the arrow was not armed");
-
-        // Pretend the key stays down.
-        app.held_arrow = Some((
-            KeyCode::Char('j'),
-            Instant::now() - Duration::from_millis(500),
-        ));
-        app.last_arrow_activity = Some(Instant::now());
-        let mut moves = 0;
-        for _ in 0..30 {
-            if app.tick_key_repeat() {
-                moves += 1;
-            }
-            app.last_auto_repeat = app
-                .last_auto_repeat
-                .map(|last| last - Duration::from_millis(100));
-        }
-        assert!(
-            moves > 5,
-            "the sidebar cursor produced only {moves} repeats"
-        );
-        assert!(app.fav_cursor > 1, "the sidebar cursor did not advance");
     }
 
     #[test]

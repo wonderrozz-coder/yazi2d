@@ -1,2 +1,6 @@
+// Never sync build artifacts or the generated macOS app bundle.
+// The repo lives in a Nextcloud folder; syncing these costs gigabytes and
+// rewrite storms. `y2d` puts cargo artifacts in ~/.cache/yazi2d-target.
 /target
+/dist
 .DS_Store

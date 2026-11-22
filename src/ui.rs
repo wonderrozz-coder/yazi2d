@@ -424,11 +424,6 @@ fn draw_preview(
                     format!(" {name}  ·  folder  ·  {total} items ")
                 };
                 draw_caption(frame, header, &caption);
-                // Queue the decodes first: the renderer below draws whatever is
-                // already cached this frame and shows `…` for the rest.
-                for child in children.iter().filter(|child| child.is_image) {
-                    image_cache.prefetch(&child.path);
-                }
                 draw_folder_grid(frame, panel, children, area, image_cache, colors);
             }
             PreviewContent::Error(error) => render_message(frame, area, error),
@@ -437,9 +432,81 @@ fn draw_preview(
         return;
     }
 
+    // A PDF is rasterised to a JPEG and then drawn through the ordinary image
+    // path, the same way Yazi does it: the terminal only has to understand one
+    // picture format.
+    if crate::pdf::is_pdf_path(path) {
+        match crate::pdf::page_image(path, panel.preview_page) {
+            Some(page_image) => {
+                let page = panel.preview_page;
+                if let Some(source_size) = image_cache.source_dimensions(&page_image) {
+                    let (file_width, file_height) = source_size;
+                    let native = crate::graphics::native();
+                    // Same settle rule as an image: paging through a PDF with
+                    // PgUp/PgDn must not encode a full page per keypress.
+                    let settled = panel.preview_settled.map_or(true, |since| {
+                        since.elapsed() >= crate::panel::FULL_PREVIEW_DELAY
+                    });
+                    let protocol = if native && settled {
+                        image_cache.pin(&page_image);
+                        image_cache.protocol(&page_image, area, crate::graphics::Fit::Fill)
+                    } else {
+                        None
+                    };
+                    let halfblocks = if protocol.is_none() {
+                        image_cache.render(&page_image, area.width, area.height)
+                    } else {
+                        None
+                    };
+                    let total = crate::pdf::page_count(path).unwrap_or(1).max(1);
+                    draw_caption(
+                        frame,
+                        header,
+                        &format!(
+                            " {name}  ·  pdf page {page}/{total}  ·  {file_width}×{file_height}  ·  {} ",
+                            human_size(size)
+                        ),
+                    );
+                    clamp_preview(panel, 0, 0);
+                    if !draw_native(frame, area, protocol) {
+                        if let Some(halfblocks) = halfblocks {
+                            render_halfblocks(frame, &halfblocks, area);
+                        }
+                    }
+                } else {
+                    // Kick the decode, exactly like the image branch does:
+                    // without this the pane shows "Rendering page…" forever,
+                    // because nothing ever fills the cache or repaints.
+                    let _ = image_cache.render(&page_image, area.width, area.height);
+                    let total = crate::pdf::page_count(path).unwrap_or(1).max(1);
+                    draw_caption(
+                        frame,
+                        header,
+                        &format!(" {name}  ·  pdf page {}/{} ", panel.preview_page, total),
+                    );
+                    render_message(frame, area, "Rendering page…");
+                }
+            }
+            None => {
+                draw_caption(frame, header, &format!(" {name}  ·  pdf "));
+                if !crate::pdf::is_pdf_path(path) || !crate::pdf::available() {
+                    render_message(
+                        frame,
+                        area,
+                        "PDF preview needs pdftoppm from Poppler.\n\nInstall it with `brew install poppler`.",
+                    );
+                } else {
+                    render_message(frame, area, "Cannot render this PDF");
+                }
+            }
+        }
+        return;
+    }
+
     if is_image_path(path) {
-        match image_cache.decoded(path) {
-            Some(_) => {
+        let source_size = image_cache.source_dimensions(path);
+        match source_size {
+            Some((file_width, file_height)) => {
                 // Without truecolor half blocks are just a dithered mess, which
                 // is the "huge pixels" complaint. macOS Terminal gets a warning
                 // that points at a terminal which draws the preview properly.
@@ -461,7 +528,19 @@ fn draw_preview(
                 let native = crate::graphics::native();
                 // A preview is bound to the pane: native graphics enlarge the
                 // image to fill it, and half blocks do the same in cells.
-                let protocol = if native {
+                //
+                // The native bitmap is only built once the cursor has rested for
+                // `FULL_PREVIEW_DELAY`. Browsing a photo folder otherwise paid a
+                // 50–80 ms encode plus a multi-megabyte write per file, which is
+                // what made scrolling hitch. Half blocks are cheap and appear at
+                // once, so the pane is never empty in the meantime.
+                let settled = panel.preview_settled.map_or(true, |since| {
+                    since.elapsed() >= crate::panel::FULL_PREVIEW_DELAY
+                });
+                let protocol = if native && settled {
+                    // Pin it: a neighbouring grid must not evict the one
+                    // payload the user is actually looking at.
+                    image_cache.pin(path);
                     image_cache.protocol(path, area, crate::graphics::Fit::Fill)
                 } else {
                     None
@@ -472,26 +551,13 @@ fn draw_preview(
                 } else {
                     None
                 };
-                // Report the size really drawn, in pixels of this terminal's
-                // cells — not the file's size, which the pane ignores.
-                let (cell_width, cell_height) = crate::graphics::cell();
-                let drawn = match (&protocol, &halfblocks) {
-                    (Some(protocol), _) => Some((
-                        protocol.area().width as u32 * cell_width as u32,
-                        protocol.area().height as u32 * cell_height as u32,
-                    )),
-                    // Half blocks are one pixel per column and two per row, so
-                    // the cached bitmap already is the drawn pixel size.
-                    (None, Some(image)) => Some((image.width(), image.height())),
-                    (None, None) => None,
-                };
-                let dimensions = match drawn {
-                    Some((width, height)) => format!(
-                        " {name}  ·  image {width}×{height}  ·  {} ",
-                        human_size(size)
-                    ),
-                    None => format!(" {name}  ·  image  ·  {} ", human_size(size)),
-                };
+                // Report the file's own pixel size, not the size of the payload
+                // this pane happens to draw: the drawn size is an artefact of
+                // the terminal and the pane, and it told the user nothing.
+                let dimensions = format!(
+                    " {name}  ·  image {file_width}×{file_height}  ·  {} ",
+                    human_size(size)
+                );
                 draw_caption(frame, header, &dimensions);
                 clamp_preview(panel, 0, 0);
                 if !draw_native(frame, area, protocol) {
@@ -593,8 +659,11 @@ fn draw_folder_grid(
 
     let tile_width = (area.width / 3).clamp(TILE_MIN_WIDTH, TILE_MAX_WIDTH);
     let tile_height = ((tile_width.saturating_sub(2)) / 2 + 3).clamp(8, 18);
-    let cols = (area.width / tile_width).max(1) as usize;
-    let rows = (area.height / tile_height).max(1) as usize;
+    // Round the column and row counts up and clip each tile to the pane: a
+    // floor count left a black strip on the right and at the bottom, which
+    // reads as "the grid does not use the panel".
+    let cols = (area.width as usize).div_ceil(tile_width as usize).max(1);
+    let rows = (area.height as usize).div_ceil(tile_height as usize).max(1);
 
     let page = cols * rows;
     let max_scroll = children.len().saturating_sub(page);
@@ -603,13 +672,21 @@ fn draw_folder_grid(
     let start = (panel.preview_scroll as usize) * cols;
     let end = (start + page).min(children.len());
 
+    // Queue decodes only for the visible tiles: the sidebar grid draws a page
+    // at a time, and queueing all 64 children evicted the preview it sits next
+    // to, which then re-decoded on every frame.
+    for child in children[start..end].iter().filter(|child| child.is_image) {
+        image_cache.prefetch(&child.path);
+    }
+
     for (relative, child) in children[start..end].iter().enumerate() {
         let tile = Rect {
             x: area.x + (relative % cols) as u16 * tile_width,
             y: area.y + (relative / cols) as u16 * tile_height,
             width: tile_width,
             height: tile_height,
-        };
+        }
+        .intersection(area);
         let color = colors.color(FileGroup::classify(&child.path, child.is_dir));
 
         // Same layout as the Ctrl+T grid: image thumbnail, or a block icon for
@@ -657,13 +734,6 @@ fn draw_thumbnails(
     image_cache: &mut ImageCache,
     colors: &crate::colors::Colors,
 ) {
-    // Queue decodes for the tiles that are about to be drawn.
-    for entry in &panel.entries {
-        if !entry.is_dir && is_image_path(&entry.path) {
-            image_cache.prefetch(&entry.path);
-        }
-    }
-
     const TILE_MIN_WIDTH: u16 = 16;
     const TILE_MAX_WIDTH: u16 = 32;
 
@@ -676,8 +746,10 @@ fn draw_thumbnails(
     let tile_width = (area.width / 3).clamp(TILE_MIN_WIDTH, TILE_MAX_WIDTH);
     let tile_height = ((tile_width.saturating_sub(2)) / 2 + 3).clamp(8, 22);
 
-    let cols = (area.width / tile_width).max(1) as usize;
-    let rows = (area.height / tile_height).max(1) as usize;
+    // Round up and clip to the pane, so the last column and row fill the
+    // remaining cells instead of leaving a black strip.
+    let cols = (area.width as usize).div_ceil(tile_width as usize).max(1);
+    let rows = (area.height as usize).div_ceil(tile_height as usize).max(1);
     panel.grid_cols = cols;
     panel.grid_rows = rows;
     panel.tile_width = tile_width;
@@ -698,6 +770,15 @@ fn draw_thumbnails(
     let start = panel.offset * cols;
     let end = (start + cols * rows).min(panel.entries.len());
 
+    // Queue decodes only for the tiles that are actually on screen. Queueing
+    // every image in a folder made a big directory thrash the cache: hundreds
+    // of decodes ran, evicted each other's entries and re-decoded in a loop.
+    for entry in &panel.entries[start..end] {
+        if !entry.is_dir && is_image_path(&entry.path) {
+            image_cache.prefetch(&entry.path);
+        }
+    }
+
     for index in start..end {
         let relative = index - start;
         let tile = Rect {
@@ -711,7 +792,7 @@ fn draw_thumbnails(
         draw_tile(
             frame,
             entry,
-            tile,
+            tile.intersection(area),
             index == panel.cursor,
             selected,
             active,
@@ -1693,7 +1774,10 @@ fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::Cyan))
         .title(Span::styled(
-            " Keyboard shortcuts ",
+            format!(
+                " Keyboard shortcuts · Yazi2D {} ",
+                env!("CARGO_PKG_VERSION")
+            ),
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -2893,6 +2977,12 @@ mod tests {
 
         let text = render(&mut app, 100, 34);
         assert!(text.contains("Keyboard shortcuts"));
+        // The title carries the build's own version, so a bug report can quote it.
+        let version = env!("CARGO_PKG_VERSION");
+        assert!(
+            text.contains(&format!("Yazi2D {version}")),
+            "help overlay must show version {version}: {text}"
+        );
         // The help screen prints live labels, so chips read `ctrl+b`.
         assert!(text.contains("ctrl+b"), "favorite chord missing: {text}");
         assert!(text.contains("ctrl+q"), "preview chord missing: {text}");
@@ -2978,6 +3068,37 @@ mod tests {
         );
     }
 
+    /// The grid must cover the whole pane: a floor division on the column and
+    /// row counts left a black strip at the right and bottom, which the user
+    /// reported as "the bottom part of the grid is empty".
+    #[test]
+    fn the_thumbnail_grid_fills_the_whole_pane() {
+        let _env = truecolor_halfblocks();
+        let tmp = tempfile::tempdir().unwrap();
+        let image = RgbImage::from_pixel(4, 4, image::Rgb([200, 40, 40]));
+        image.save(tmp.path().join("red.png")).unwrap();
+
+        let mut app = App::new(vec![tmp.path().to_path_buf(), tmp.path().to_path_buf()]);
+        app.panels[0].set_mode(PanelMode::Thumbnails);
+
+        render_until(&mut app, 120, 40, |text| text.contains("▀"));
+        let panel = &app.panels[0];
+        assert!(panel.grid_cols >= 1 && panel.grid_rows >= 1);
+        // Every row of the body must belong to some tile row.
+        let covered = panel.grid_rows * panel.tile_height as usize;
+        assert!(
+            covered >= panel.body_area.height as usize,
+            "grid covers {covered} rows but the pane is {} tall",
+            panel.body_area.height
+        );
+        let covered = panel.grid_cols * panel.tile_width as usize;
+        assert!(
+            covered >= panel.body_area.width as usize,
+            "grid covers {covered} columns but the pane is {} wide",
+            panel.body_area.width
+        );
+    }
+
     #[test]
     fn renders_an_image_preview_with_half_blocks() {
         let _env = truecolor_halfblocks();
@@ -2999,13 +3120,36 @@ mod tests {
         );
     }
 
+    /// `shrink_source` caps the decoded copy at 1600 px, so a big picture is
+    /// cached smaller than it really is. The caption must still report the
+    /// file's own size, not the shrunk copy's.
     #[test]
-    fn an_image_preview_caption_reports_what_the_pane_draws() {
+    fn a_large_image_caption_reports_the_real_file_size() {
         let _env = truecolor_halfblocks();
         let tmp = tempfile::tempdir().unwrap();
-        // 400×300 is wider than the preview pane, so the drawn size must be
-        // smaller than the file — the caption used to multiply the file size by
-        // a hard-coded 8 px per cell and print nonsense.
+        let image = RgbImage::from_pixel(2000, 1200, image::Rgb([30, 120, 220]));
+        image.save(tmp.path().join("huge.png")).unwrap();
+
+        let mut app = App::new(vec![tmp.path().to_path_buf(), tmp.path().to_path_buf()]);
+        app.panels[0].select_name("huge.png");
+        app.panels[0].set_mode(PanelMode::Preview);
+        app.panels[1].select_name("huge.png");
+
+        let text = render_until(&mut app, 100, 30, |text| text.contains("▀"));
+        assert!(
+            text.contains("2000×1200"),
+            "caption reported the shrunk copy instead of the file: {text:?}"
+        );
+    }
+
+    #[test]
+    fn an_image_preview_caption_reports_the_file_size() {
+        let _env = truecolor_halfblocks();
+        let tmp = tempfile::tempdir().unwrap();
+        // The caption must name the size of the picture on disk. It used to
+        // print the size the pane happened to draw — first a hard-coded 8 px
+        // per cell, then, after that was fixed, a size derived from the pane —
+        // and both told the user something about this window, not their image.
         let image = RgbImage::from_pixel(400, 300, image::Rgb([30, 120, 220]));
         image.save(tmp.path().join("wide.png")).unwrap();
 
@@ -3017,11 +3161,10 @@ mod tests {
         let text = render_until(&mut app, 100, 30, |text| text.contains("▀"));
         assert!(text.contains("wide.png"));
         assert!(
-            !text.contains("400×300") && !text.contains("3200×"),
-            "caption reported the file instead of the drawn image: {text:?}"
+            text.contains("400×300"),
+            "caption did not report the file's own size: {text:?}"
         );
         assert!(text.contains("image "), "no image caption: {text:?}");
-        assert!(text.contains('×'), "caption has no drawn size: {text:?}");
     }
 
     /// Flatten a rendered buffer into lines, so a test can look at the footer.

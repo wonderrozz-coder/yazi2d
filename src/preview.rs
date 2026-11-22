@@ -116,9 +116,15 @@ impl PreviewCache {
         None
     }
 
-    /// True when a preview load is currently in flight.
-    pub fn is_loading(&self) -> bool {
-        self.pending.is_some()
+    /// Collect a finished background load.
+    ///
+    /// Returns true when something arrived, so the caller repaints once instead
+    /// of on every tick while the load is still running.
+    pub fn poll_background(&mut self) -> bool {
+        let was_pending = self.pending.is_some();
+        let before = self.entries.len();
+        self.poll();
+        was_pending && (self.pending.is_none() || self.entries.len() != before)
     }
 
     /// Forget every cached preview (used after renames/deletes).
@@ -139,8 +145,15 @@ impl PreviewCache {
 
         match received {
             Some(Ok(loaded)) => {
-                if self.entries.len() > 64 {
-                    self.entries.clear();
+                // Evict a single old entry rather than clearing the map: a
+                // wipe re-decoded and re-encoded everything visible, which the
+                // user saw as the preview blinking.
+                if !self.entries.contains_key(&loaded.path)
+                    && self.entries.len() >= MAX_CACHED_IMAGES
+                {
+                    if let Some(oldest) = self.entries.keys().next().cloned() {
+                        self.entries.remove(&oldest);
+                    }
                 }
                 logging::info(format!("preview ready: {}", loaded.path.display()));
                 self.entries.insert(loaded.path, loaded.content);
@@ -266,17 +279,24 @@ pub fn is_image_path(path: &Path) -> bool {
 
 struct ImageEntry {
     source: Option<DynamicImage>,
+    /// The picture's own pixel size, before the decoded copy was shrunk.
+    dimensions: (u32, u32),
     resized: HashMap<(u32, u32), Arc<RgbImage>>,
     /// Encoded native-graphics payloads (kitty/iTerm2/sixel), keyed by the
     /// terminal area and the fitting mode. Encoding is expensive, so it is done
     /// once per size.
     protocols: HashMap<(u16, u16, bool), Rc<ratatui_image::protocol::Protocol>>,
+    /// Logical clock value of the last use, for LRU eviction.
+    used: u64,
 }
 
 /// Outcome of a background decode.
 struct DecodedImage {
     path: PathBuf,
     source: Option<DynamicImage>,
+    /// The picture's own pixel size, captured before `shrink_source` crops the
+    /// decoded copy. The caption reports this, so it stays the file's size.
+    dimensions: Option<(u32, u32)>,
 }
 
 /// Decodes images and caches half-block-sized RGB thumbnails.
@@ -291,13 +311,41 @@ pub struct ImageCache {
     pending: Vec<(PathBuf, Receiver<DecodedImage>)>,
     /// Paths that failed to decode, so we do not retry every frame.
     failed: HashSet<PathBuf>,
+    /// Monotonic tick used to age cache entries for LRU eviction.
+    age: u64,
+    /// The image the preview pane is currently showing.
+    ///
+    /// It must survive eviction: a pane-sized payload is megabytes and a
+    /// neighbouring thumbnail grid otherwise pushes it out of the cache, so the
+    /// preview re-decoded and re-encoded on every frame.
+    pinned: Option<PathBuf>,
+    /// Encodes in flight, keyed by their cache key. Encoding a pane-sized
+    /// payload costs 50–80 ms; doing it inline blocked the whole UI on every new
+    /// file, which is what made previews feel slow. Yazi encodes in a worker
+    /// task too and simply shows the previous frame meanwhile.
+    pending_encodes: Vec<PendingEncode>,
+    /// `(path, key)` pairs currently being encoded, so the next frame does not
+    /// start a duplicate job for the same picture and size.
+    encoding: HashSet<(PathBuf, (u16, u16, bool))>,
 }
 
 /// How many image decodes may run at once.
 const MAX_PENDING_DECODES: usize = 4;
 
+/// How many decoded images are kept. Old ones are evicted one by one, never
+/// all at once: wiping the map re-decoded and re-encoded every visible tile,
+/// which showed up as the grid blinking.
+const MAX_CACHED_IMAGES: usize = 96;
+
 /// How many encoded payloads are kept per image (one per distinct size).
 const MAX_PROTOCOL_SIZES: usize = 4;
+
+/// An encode running on a worker thread: which image and size it is for, and
+/// the channel that hands back the finished protocol.
+type PendingEncode = (
+    (PathBuf, (u16, u16, bool)),
+    Receiver<Option<ratatui_image::protocol::Protocol>>,
+);
 
 impl Default for ImageCache {
     fn default() -> Self {
@@ -311,6 +359,41 @@ impl ImageCache {
             entries: HashMap::new(),
             pending: Vec::new(),
             failed: HashSet::new(),
+            age: 0,
+            pinned: None,
+            pending_encodes: Vec::new(),
+            encoding: HashSet::new(),
+        }
+    }
+
+    /// Keep `path` out of LRU eviction while the preview pane shows it.
+    pub fn pin(&mut self, path: &Path) {
+        self.pinned = Some(path.to_path_buf());
+        self.touch(path);
+    }
+
+    /// Advance the logical clock and stamp an entry as most recently used.
+    fn touch(&mut self, path: &Path) {
+        self.age = self.age.wrapping_add(1);
+        let age = self.age;
+        if let Some(entry) = self.entries.get_mut(path) {
+            entry.used = age;
+        }
+    }
+
+    /// Drop the least recently used entry, never the pinned preview.
+    ///
+    /// Scanning the whole map is fine: it holds at most a few dozen entries and
+    /// only runs on a cache miss.
+    fn evict_one(&mut self) {
+        let victim = self
+            .entries
+            .iter()
+            .filter(|(path, _)| Some(path.as_path()) != self.pinned.as_deref())
+            .min_by_key(|(_, entry)| entry.used)
+            .map(|(path, _)| path.clone());
+        if let Some(victim) = victim {
+            self.entries.remove(&victim);
         }
     }
 
@@ -343,6 +426,7 @@ impl ImageCache {
         }
 
         let entry = self.entries.get_mut(path)?;
+        entry.used = self.age;
         let source = entry.source.as_ref()?;
         let (width, height) = fit_dimensions(
             source.width(),
@@ -384,15 +468,33 @@ impl ImageCache {
         self.spawn_decode(path);
     }
 
-    /// The decoded source image, if the background decode has finished.
+    /// True when the image has been decoded and is ready to draw.
     ///
     /// The caller then chooses between a native graphics protocol and half
     /// blocks, which needs the original aspect ratio rather than the
     /// pre-resized half-block image.
-    pub fn decoded(&mut self, path: &Path) -> Option<DynamicImage> {
+    pub fn source_dimensions(&mut self, path: &Path) -> Option<(u32, u32)> {
         self.poll();
-        let entry = self.entries.get(path)?;
-        entry.source.clone()
+        // Start the decode on a miss, exactly like `render` and `protocol` do.
+        // A PDF page goes through here first, so without this the pane stayed on
+        // "Rendering page…" forever: nothing was ever queued, nothing landed,
+        // and the frame was never repainted.
+        if !self.entries.contains_key(path) {
+            if self.failed.contains(path) {
+                return None;
+            }
+            let already = self.pending.iter().any(|(pending, _)| pending == path);
+            if !already && self.pending.len() < MAX_PENDING_DECODES {
+                self.spawn_decode(path);
+            }
+            return None;
+        }
+        self.age = self.age.wrapping_add(1);
+        let age = self.age;
+        let entry = self.entries.get_mut(path)?;
+        entry.used = age;
+        entry.source.as_ref()?;
+        Some(entry.dimensions)
     }
 
     /// Encoded native protocol for `area`, built once per terminal size.
@@ -422,26 +524,65 @@ impl ImageCache {
             return None;
         }
 
-        let entry = self.entries.get_mut(path)?;
-        let source = entry.source.clone()?;
         let key = (area.width, area.height, fit == crate::graphics::Fit::Fill);
+        self.age = self.age.wrapping_add(1);
+        let age = self.age;
+        let entry = self.entries.get_mut(path)?;
+        entry.used = age;
+        // Check the cache before touching the bitmap: cloning a multi-megapixel
+        // `DynamicImage` per frame and per tile was the main reason previews
+        // felt slow.
         if let Some(protocol) = entry.protocols.get(&key) {
             return Some(protocol.clone());
         }
+        let source = entry.source.clone()?;
 
-        let started = Instant::now();
-        let protocol = Rc::new(crate::graphics::render(source, area, fit)?);
-        let elapsed = started.elapsed();
-        if elapsed.as_millis() >= 50 {
-            logging::info(format!(
-                "image encode took {} ms: {} ({}×{} cells, {})",
-                elapsed.as_millis(),
-                path.display(),
-                area.width,
-                area.height,
-                if key.2 { "fill" } else { "inside" }
-            ));
+        // Encoding a pane-sized payload takes 50–80 ms. It used to run right
+        // here, on the UI thread, which is why scrolling through photos felt
+        // stuck. Start a worker instead and let the caller draw the previous
+        // frame; the next `poll_background` picks the result up.
+        let job = (path.to_path_buf(), key);
+        if self.encoding.contains(&job) {
+            return None;
         }
+        let encoder = crate::graphics::encoder(fit)?;
+        self.encoding.insert(job);
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let started = Instant::now();
+            let protocol = encoder.encode(source, area, fit);
+            let elapsed = started.elapsed();
+            if elapsed.as_millis() >= 50 {
+                logging::info(format!(
+                    "image encode took {} ms: {} ({}×{} cells, {}, background)",
+                    elapsed.as_millis(),
+                    "",
+                    area.width,
+                    area.height,
+                    if fit == crate::graphics::Fit::Fill {
+                        "fill"
+                    } else {
+                        "inside"
+                    }
+                ));
+            }
+            let _ = sender.send(protocol);
+        });
+        self.pending_encodes
+            .push(((path.to_path_buf(), key), receiver));
+        None
+    }
+
+    /// Store a finished encode, honouring the per-image payload cap.
+    fn store_protocol(
+        &mut self,
+        path: &Path,
+        key: (u16, u16, bool),
+        protocol: Rc<ratatui_image::protocol::Protocol>,
+    ) {
+        let Some(entry) = self.entries.get_mut(path) else {
+            return;
+        };
         // A fill payload covers the whole pane at real pixel size, which is
         // megabytes, so a preview keeps a couple of sizes at most while tiles
         // (a few hundred bytes each) may keep more.
@@ -449,7 +590,7 @@ impl ImageCache {
         if entry.protocols.len() >= limit {
             entry.protocols.clear();
         }
-        entry.protocols.insert(key, protocol.clone());
+        entry.protocols.insert(key, protocol);
         if key.2 {
             // Only the image on screen is worth a full-pane payload: scrolling
             // through previews must not accumulate one per file.
@@ -459,7 +600,6 @@ impl ImageCache {
                 }
             }
         }
-        Some(protocol)
     }
 
     /// Drop the encoded payloads of every image, keeping the decodes.
@@ -473,9 +613,9 @@ impl ImageCache {
         }
     }
 
-    /// True when at least one decode is in flight.
+    /// True when at least one decode or encode is in flight.
     pub fn is_loading(&self) -> bool {
-        !self.pending.is_empty()
+        !self.pending.is_empty() || !self.pending_encodes.is_empty()
     }
 
     fn spawn_decode(&mut self, path: &Path) {
@@ -484,15 +624,20 @@ impl ImageCache {
         thread::spawn(move || {
             let started = Instant::now();
             logging::info(format!("image decode start: {}", thread_path.display()));
-            let source = image::ImageReader::open(&thread_path)
+            let decoded = image::ImageReader::open(&thread_path)
                 .ok()
                 .and_then(|reader| reader.with_guessed_format().ok())
                 .and_then(|reader| reader.decode().ok())
                 .filter(|image| {
                     let pixels = u64::from(image.width()) * u64::from(image.height());
                     pixels.saturating_mul(4) <= MAX_IMAGE_BYTES
-                })
-                .map(shrink_source);
+                });
+            // Capture the file's own size before shrinking: the caption must
+            // report the picture, not the copy this cache keeps.
+            let dimensions = decoded
+                .as_ref()
+                .map(|image| (image.width(), image.height()));
+            let source = decoded.map(shrink_source);
             match &source {
                 Some(image) => logging::info(format!(
                     "image decode done in {} ms: {} ({}×{})",
@@ -510,9 +655,50 @@ impl ImageCache {
             let _ = sender.send(DecodedImage {
                 path: thread_path,
                 source,
+                dimensions,
             });
         });
         self.pending.push((path.to_path_buf(), receiver));
+    }
+
+    /// Collect finished background decodes.
+    ///
+    /// Returns true when at least one entry changed, so the caller can repaint
+    /// exactly once per finished decode. Repainting every tick while something
+    /// was still decoding made the grid blink.
+    pub fn poll_background(&mut self) -> bool {
+        let before = self.entries.len();
+        let had_pending = !self.pending.is_empty();
+        let had_encodes = !self.pending_encodes.is_empty();
+        self.poll();
+        self.poll_encodes();
+        self.entries.len() != before
+            || (had_pending && self.pending.is_empty())
+            || (had_encodes && self.pending_encodes.is_empty())
+    }
+
+    /// Collect finished background encodes.
+    fn poll_encodes(&mut self) {
+        let mut done = Vec::new();
+        let mut disconnected = Vec::new();
+        for (index, (job, receiver)) in self.pending_encodes.iter().enumerate() {
+            match receiver.try_recv() {
+                Ok(protocol) => done.push((job.clone(), protocol)),
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => disconnected.push(index),
+            }
+        }
+        for index in disconnected.into_iter().rev() {
+            let (job, _) = self.pending_encodes.remove(index);
+            self.encoding.remove(&job);
+        }
+        for (job, protocol) in done {
+            let (path, key) = job;
+            self.encoding.remove(&(path.clone(), key));
+            if let Some(protocol) = protocol {
+                self.store_protocol(&path, key, Rc::new(protocol));
+            }
+        }
     }
 
     fn poll(&mut self) {
@@ -534,19 +720,27 @@ impl ImageCache {
 
         for decoded in finished {
             self.pending.retain(|(path, _)| path != &decoded.path);
-            if self.entries.len() > 64 {
-                self.entries.clear();
-            }
             if decoded.source.is_none() {
                 self.failed.insert(decoded.path);
             } else {
                 self.failed.remove(&decoded.path);
+                // Evict the least recently used entry instead of clearing the
+                // whole map: the grid keeps its already-encoded tiles, so it
+                // does not blink.
+                if !self.entries.contains_key(&decoded.path)
+                    && self.entries.len() >= MAX_CACHED_IMAGES
+                {
+                    self.evict_one();
+                }
+                self.age = self.age.wrapping_add(1);
                 self.entries.insert(
                     decoded.path,
                     ImageEntry {
                         source: decoded.source,
+                        dimensions: decoded.dimensions.unwrap_or((0, 0)),
                         resized: HashMap::new(),
                         protocols: HashMap::new(),
+                        used: self.age,
                     },
                 );
             }
@@ -722,5 +916,129 @@ mod tests {
         assert!(is_image_path(Path::new("anim.webp")));
         assert!(!is_image_path(Path::new("notes.txt")));
         assert!(!is_image_path(Path::new("no-extension")));
+    }
+
+    /// `source_dimensions` is the first call a PDF page makes, and it used to
+    /// only read the cache. Nothing was queued, so "Rendering page…" never went
+    /// away. It must start the decode itself, like `render` and `protocol`.
+    #[test]
+    fn asking_for_dimensions_starts_a_decode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("page.jpg");
+        // A real 2×2 PNG so the decode succeeds on the worker thread.
+        let mut png = std::fs::File::create(&path).unwrap();
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(2, 2))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        drop(png);
+
+        let mut cache = ImageCache::new();
+        assert!(
+            cache.source_dimensions(&path).is_none(),
+            "the first call must miss and queue a decode"
+        );
+        assert!(
+            cache.is_loading() || !cache.pending.is_empty(),
+            "no decode was started, so the pane would wait forever"
+        );
+    }
+
+    fn image_entry(used: u64) -> ImageEntry {
+        ImageEntry {
+            source: None,
+            dimensions: (0, 0),
+            resized: HashMap::new(),
+            protocols: HashMap::new(),
+            used,
+        }
+    }
+
+    /// The cache must drop the *least* recently used entry, never whatever
+    /// `HashMap` happens to yield first. With the old behaviour a folder of
+    /// photos re-decoded the visible file hundreds of times.
+    #[test]
+    fn eviction_drops_the_least_recently_used_entry() {
+        let mut cache = ImageCache::new();
+        let paths: Vec<PathBuf> = (0..3)
+            .map(|i| PathBuf::from(format!("/tmp/img-{i}.png")))
+            .collect();
+        // Distinct, increasing stamps: the clock must be past all of them so a
+        // touch really moves an entry to the front.
+        for (i, path) in paths.iter().enumerate() {
+            cache
+                .entries
+                .insert(path.clone(), image_entry(10 * (i as u64 + 1)));
+        }
+        cache.age = 100;
+
+        // Touch the oldest entry: it is now the newest.
+        cache.touch(&paths[0]);
+        cache.evict_one();
+
+        assert!(
+            cache.entries.contains_key(&paths[0]),
+            "a just-used entry must survive eviction"
+        );
+        assert!(
+            !cache.entries.contains_key(&paths[1]),
+            "the least recently used entry is the one dropped"
+        );
+    }
+
+    /// The preview pane's file is pinned, so a burst of grid decodes cannot
+    /// evict the picture the user is actually looking at.
+    #[test]
+    fn a_pinned_entry_is_never_evicted() {
+        let mut cache = ImageCache::new();
+        let pinned = PathBuf::from("/tmp/pinned.png");
+        let other = PathBuf::from("/tmp/other.png");
+        cache.entries.insert(pinned.clone(), image_entry(0));
+        cache.entries.insert(other.clone(), image_entry(5));
+        cache.pin(&pinned);
+
+        for _ in 0..10 {
+            cache.evict_one();
+        }
+
+        assert!(cache.entries.contains_key(&pinned));
+        assert!(!cache.entries.contains_key(&other));
+    }
+}
+
+#[cfg(test)]
+mod bench_tmp {
+    #[test]
+    fn measure_encode_cost() {
+        use image::{DynamicImage, RgbImage};
+        use ratatui::layout::Rect;
+        use std::time::Instant;
+
+        fn photo(w: u32, h: u32) -> DynamicImage {
+            let mut img = RgbImage::new(w, h);
+            for (x, y, p) in img.enumerate_pixels_mut() {
+                *p = image::Rgb([(x % 251) as u8, (y % 253) as u8, ((x + y) % 247) as u8]);
+            }
+            DynamicImage::ImageRgb8(img)
+        }
+
+        let img = photo(1872, 1036);
+        let area = Rect::new(0, 0, 74, 46);
+        for (label, fit) in [
+            ("Fill", crate::graphics::Fit::Fill),
+            ("Inside", crate::graphics::Fit::Inside),
+        ] {
+            let started = Instant::now();
+            let proto = crate::graphics::render(img.clone(), area, fit);
+            let elapsed = started.elapsed();
+            match proto {
+                Some(proto) => println!(
+                    "{label}: {:?}, drawn area {:?}, whole pane {:?}",
+                    elapsed,
+                    proto.area(),
+                    area
+                ),
+                None => println!("{label}: none"),
+            }
+        }
     }
 }

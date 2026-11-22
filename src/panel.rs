@@ -4,11 +4,18 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use ratatui::layout::Rect;
 
 use crate::logging;
+
+/// How long the preview cursor must rest before the full-size bitmap is built.
+///
+/// Browsing a folder of photos used to build a pane-sized payload for every
+/// file that passed under the cursor, so the whole session hitched. Half blocks
+/// appear immediately; the expensive native encode waits for this pause.
+pub const FULL_PREVIEW_DELAY: Duration = Duration::from_millis(200);
 
 /// Directory loads slower than this are logged as `WARN`.
 const SLOW_LOAD_MS: u128 = 250;
@@ -122,6 +129,15 @@ pub struct Panel {
     pub preview_scroll_x: u16,
     pub preview_max_scroll: u16,
     pub preview_max_scroll_x: u16,
+    /// Which page of a multi-page document (PDF) the preview shows, 1-based.
+    pub preview_page: usize,
+    /// When `preview_path` last changed.
+    ///
+    /// The full-size bitmap is only built once the cursor has rested on a file
+    /// for `FULL_PREVIEW_DELAY`: while a folder is being browsed quickly the
+    /// pane shows the cheap half-block image only, so scrolling never waits for
+    /// a 50–80 ms encode plus a multi-megabyte write.
+    pub preview_settled: Option<Instant>,
     /// Grid geometry, updated by the thumbnail renderer.
     pub grid_cols: usize,
     pub grid_rows: usize,
@@ -173,6 +189,8 @@ impl Panel {
             preview_scroll_x: 0,
             preview_max_scroll: 0,
             preview_max_scroll_x: 0,
+            preview_page: 1,
+            preview_settled: None,
             grid_cols: 1,
             grid_rows: 1,
             loading: false,
@@ -207,12 +225,10 @@ impl Panel {
                     return None;
                 }
                 let cols = self.grid_cols.max(1);
-                let column = ((x - self.body_area.x) / self.tile_width) as usize;
+                let column =
+                    ((x - self.body_area.x) as usize / self.tile_width as usize).min(cols - 1);
                 let grid_row = (y - self.body_area.y) as usize / self.tile_height as usize;
-                if column >= cols {
-                    return None;
-                }
-                (self.offset + grid_row) * cols + column.min(cols - 1)
+                (self.offset + grid_row) * cols + column
             }
             PanelMode::Preview => return None,
         };
@@ -235,6 +251,8 @@ impl Panel {
             self.preview_scroll_x = 0;
             self.preview_max_scroll = 0;
             self.preview_max_scroll_x = 0;
+            self.preview_page = 1;
+            self.preview_settled = None;
         } else {
             self.offset = 0;
             self.mode = mode;
@@ -261,6 +279,8 @@ impl Panel {
         self.preview_scroll_x = 0;
         self.preview_max_scroll = 0;
         self.preview_max_scroll_x = 0;
+        self.preview_page = 1;
+        self.preview_settled = None;
     }
 
     pub fn scroll_preview(&mut self, delta_y: i32, delta_x: i32) {

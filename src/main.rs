@@ -8,6 +8,7 @@ mod icons;
 mod keys;
 mod logging;
 mod panel;
+mod pdf;
 mod preview;
 mod search;
 mod settings;
