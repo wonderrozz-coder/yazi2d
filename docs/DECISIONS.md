@@ -2005,3 +2005,41 @@ second script to keep in sync, and harder to inspect); requiring Homebrew
 
 **Consequences:** the documented path is three lines and needs no preparation
 beyond `git`. `TERM`/terminal quality is reported but never required.
+
+## ADR-080 — The Linux menu entry carries its own PATH
+
+**Status:** accepted (2026-11-22)
+
+**Context:** On the Arch + LXQt box an install printed every success line and
+still produced nothing a user could run. Three independent causes, found by
+inspecting the machine rather than the script:
+
+1. `Exec=yazi2d %F` in the `.desktop` file. A graphical session's `PATH` is
+   `/usr/local/sbin:/usr/local/bin:/usr/bin:…`; `~/.local/bin` is not on it. The
+   launcher therefore exited instantly, and since `Terminal=true`, no window
+   stayed open to show the error. Nothing in the menu, nothing in the terminal.
+2. The icon was installed only at `1024x1024`. Icon themes resolve a name by
+   looking it up in a size directory; a menu asking for `32x32` found no match
+   and drew a blank square. The fallback path assumed `ImageMagick`, which was
+   not installed.
+3. Nothing added `~/.local/bin` to the shell `PATH`; the script only printed a
+   warning that scrolled away with the build log.
+
+A fourth problem was self-inflicted and caught by re-running the generator
+standalone: a `#` comment placed inside the heredoc that writes the desktop file
+became literal lines of that file, so the menu tried to execute part of a
+comment.
+
+**Decision:** the entry launches `sh -lc "PATH=\"$HOME/.local/bin:$PATH\" exec
+yazi2d %F"`. `$HOME` and `$PATH` are escaped so the *target* shell expands them,
+not the installer. The icon source is copied into every size directory when no
+resizer is available. The installer appends a marker-guarded `PATH` block to
+`~/.profile`. Comments live outside the heredoc.
+
+**Verification:** the icon and entry sections were extracted and run on their
+own, without `cargo`, so the generated `.desktop` could be inspected directly.
+It now contains only real keys, and `16`…`1024` all exist.
+
+**Consequences:** a fresh Linux install works from the menu and from a terminal
+after one re-login. The `sh -lc` wrapper costs a shell startup per launch
+(~10 ms) and depends on `sh` existing, which every desktop Linux has.
