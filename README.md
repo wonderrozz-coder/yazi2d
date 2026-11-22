@@ -185,9 +185,23 @@ bash packaging/linux/build-desktop.sh
 Installs the binary to `~/.local/bin/yazi2d`, icons into
 `~/.local/share/icons/hicolor/*/apps/` and a launcher into
 `~/.local/share/applications/yazi2d.desktop`, so Yazi2D appears in the
-application menu (GNOME, KDE, XFCE, Cinnamon). The entry uses
+application menu (GNOME, KDE, XFCE, LXQt, Cinnamon). The entry uses
 `Terminal=true`, so your own terminal opens. Pass `--no-install` to stage
 everything in `dist/linux/` instead.
+
+Three details that a first-time install depends on, all handled by the
+script — worth checking if the menu entry ever does nothing:
+
+- The `.desktop` entry prepends `~/.local/bin` to `PATH` itself
+  (`Exec=sh -lc "PATH=… exec yazi2d %F"`). A graphical session's `PATH`
+  is `/usr/local/bin:/usr/bin:…` and does **not** include `~/.local/bin`,
+  so a bare `Exec=yazi2d` would exit instantly with no error.
+- The icon is written into every size directory (`16`…`512`). Toolkits
+  look the picture up by size; a single `1024x1024` entry is invisible to
+  a menu asking for `32x32`. `ImageMagick` is used when present, otherwise
+  the source is copied as-is (bigger file, still resolvable).
+- `~/.local/bin` is appended to `~/.profile` (once, guarded by a marker)
+  so `yazi2d` works in a terminal after the next login.
 
 The icon is generated from `packaging/icon-source.png`; regenerate it with
 `python3 packaging/render-icon.py` (no dependencies, pure stdlib).

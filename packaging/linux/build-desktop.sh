@@ -84,17 +84,19 @@ fi
 # `Terminal=true` is what makes this the Linux counterpart of the macOS
 # launcher: the desktop opens the terminal emulator of the user's choice.
 mkdir -p "$DIST/applications"
+# `Exec` is deliberately not bare `yazi2d`: the graphical session's PATH is
+# /usr/local/sbin:/usr/local/bin:/usr/bin:..., which does not include
+# ~/.local/bin on most distributions, so the menu entry would exit instantly
+# with no window and no message. `sh -lc` prepends the install directory, and
+# `\$PATH` is escaped so the *target* shell expands it, not this script.
+# (This note must stay outside the heredoc: a `#` line inside it becomes part
+# of the desktop file, which is how it broke the first time.)
 cat > "$DIST/applications/$BIN_NAME.desktop" <<DESKTOP
 [Desktop Entry]
 Type=Application
 Name=$APP_NAME
 GenericName=File Manager
 Comment=Dual-pane terminal file manager
-# `Exec` must not be bare `yazi2d`: the graphical session's PATH is
-# /usr/local/sbin:/usr/local/bin:/usr/bin:..., which does not include
-# ~/.local/bin on most distributions, and the menu entry then fails silently.
-# Wrapping in `sh -lc` prepends the directory the binary was installed into;
-# `\$PATH` is escaped so the *target* shell expands it, not this script.
 Exec=sh -lc "PATH=\\"\$HOME/.local/bin:\$PATH\\" exec $BIN_NAME %F"
 Icon=$BIN_NAME
 Terminal=true
